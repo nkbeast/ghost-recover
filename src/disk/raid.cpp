@@ -106,6 +106,13 @@ bool probeMdSuperblock(const std::string& path, RaidMember& member, RaidLayout& 
         layout.chunk_size   = (i64)b.le32(88) * 512;
         layout.members      = (int)b.le32(92);
         layout.parity_layout = layoutName(b.le32(76));
+        // RAID10 packs near/far copies and offset-ness into the layout field;
+        // the near count (how many adjacent members hold each chunk) is the
+        // low byte and is what the assembler needs.
+        if (layout.level == RaidLevel::Raid10) {
+            int near = (int)(b.le32(76) & 0xFF);
+            if (near > 0 && near <= 27) layout.copies = near;
+        }
         layout.detected_from = "mdraid-superblock";
         if (layout.chunk_size <= 0) layout.chunk_size = 65536;
 
@@ -138,18 +145,23 @@ bool probeMdSuperblock(const std::string& path, RaidMember& member, RaidLayout& 
         if (raw.size() >= 4096 && b.le32(0) == 0xA92B4EFCu && b.le32(4) == 0) {
             layout.level        = levelFromMd((int)(i32)b.le32(28));
             layout.members      = (int)b.le32(40);
-            layout.chunk_size   = (i64)b.le32(116);
-            layout.parity_layout = layoutName(b.le32(120));
+            // Layout is the personality word (md_p.h word 64); chunk_size there
+            // is stored in bytes, unlike the 512-byte units of superblock 1.x.
+            layout.parity_layout = layoutName(b.le32(256));
+            layout.chunk_size   = (i64)b.le32(260);
             layout.detected_from = "mdraid-superblock-0.90";
             if (layout.chunk_size <= 0) layout.chunk_size = 65536;
             member.path = path;
             member.data_offset = 0;
+            // MD_NEW_SIZE_SECTORS: the superblock sits in the last 64 KiB
+            // aligned block, which is exactly the usable size of the member.
             member.size = off090;
             member.present = true;
-            member.role = (int)b.le32(268);      // this_disk.raid_disk
+            // this_disk.raid_disk lives in the per-disk area at word 992.
+            member.role = (int)b.le32(3980);
             char u[64];
             snprintf(u, sizeof(u), "%08x:%08x:%08x:%08x",
-                     b.le32(20), b.le32(24), b.le32(28 + 100), b.le32(28 + 104));
+                     b.le32(20), b.le32(52), b.le32(56), b.le32(60));
             member.uuid = u;
             return true;
         }
@@ -197,7 +209,7 @@ bool RaidReader::open(std::string* err) {
         case RaidLevel::Raid1:  size_ = smallest; break;
         case RaidLevel::Raid5:  size_ = smallest * (n - 1); break;
         case RaidLevel::Raid6:  size_ = smallest * (n - 2); break;
-        case RaidLevel::Raid10: size_ = smallest * n / 2; break;
+        case RaidLevel::Raid10: size_ = smallest * n / std::max(1, layout_.copies); break;
         case RaidLevel::Linear: {
             size_ = 0;
             for (const auto& m : layout_.disks) size_ += m.size;
@@ -260,7 +272,9 @@ i64 RaidReader::read(u64 offset, u8* buf, i64 count) {
             }
             case RaidLevel::Raid10: {
                 // Near layout: each chunk exists on `copies` adjacent members.
-                const int copies = 2;
+                // The count comes from the superblock layout field when the
+                // array was detected; far/offset geometries are not supported.
+                const int copies = std::max(1, layout_.copies);
                 i64 chunkIdx = logical / C;
                 i64 inChunk  = logical % C;
                 int groups = n / copies;
@@ -469,6 +483,7 @@ RaidLayout detectRaidLayout(const std::vector<std::string>& memberPaths, Progres
                 layout.level = probe.level;
                 layout.chunk_size = probe.chunk_size;
                 layout.parity_layout = probe.parity_layout;
+                layout.copies = probe.copies;
                 layout.detected_from = probe.detected_from;
                 if (probe.members > 0) layout.members = probe.members;
                 for (const auto& n : probe.notes) layout.notes.push_back(n);

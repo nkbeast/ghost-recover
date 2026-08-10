@@ -52,6 +52,9 @@ struct RaidLayout {
     // Linux md parity layouts: "left-symmetric" (default), "left-asymmetric",
     // "right-symmetric", "right-asymmetric".
     std::string parity_layout = "left-symmetric";
+    // RAID10 near-layout mirror count; md stores it in the low byte of the
+    // layout field, and it is read from the superblock when available.
+    int copies = 2;
     std::vector<RaidMember> disks;
     i64  data_size  = 0;        // usable bytes in the assembled array
     double confidence = 0;
