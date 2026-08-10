@@ -315,6 +315,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
         // Determine the length.
         i64 size = -1;
+        bool guessedSize = false;
         if (opt.validate && spec.validator) {
             size = spec.validator(src, off, cap, spec);
             if (size < 0) { result.rejected++; continue; }
@@ -331,18 +332,21 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         }
         if (size <= 0) {
             // No self-describing length: bound the file by the next signature.
+            // The bound is never stretched past nextStart — a real file lives
+            // where the next signature sits and would otherwise be swallowed.
             auto it = std::upper_bound(starts.begin(), starts.end(), off);
             i64 nextStart = (it != starts.end()) ? *it : result.image_size;
-            i64 bound = std::min(cap, nextStart - off);
-            if (bound < spec.min_size) bound = std::min(cap, spec.min_size);
+            i64 bound = nextStart - off;
+            if (bound > cap) bound = cap;
+            if (bound < spec.min_size) { result.rejected++; continue; }
             size = trimTrailingZeros(disk, off, bound);
+            guessedSize = true;
             if (size < spec.min_size) { result.rejected++; continue; }
         }
 
-        if (size < spec.min_size || size > cap) {
-            if (size > cap) size = cap;
-            if (size < spec.min_size) { result.rejected++; continue; }
-        }
+        bool sizeClamped = false;
+        if (size > cap) { size = cap; sizeClamped = true; }
+        if (size < spec.min_size) { result.rejected++; continue; }
         if (size < opt.min_file_size) { result.rejected++; continue; }
 
         // Entropy screen: rejects both random noise that happens to contain a
@@ -438,7 +442,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         cf.size = written;
         cf.file = outPath;
         cf.entropy = entropy;
-        cf.validated = (spec.validator != nullptr && opt.validate);
+        cf.validated = (spec.validator != nullptr && opt.validate) && !guessedSize;
         cf.whole_file = cf.validated && spec.whole_file;
         cf.truncated = readError || written < size;
         cf.confidence = cf.validated ? (cf.truncated ? 0.6 : 1.0) : 0.5;
