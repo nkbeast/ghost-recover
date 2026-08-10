@@ -1,0 +1,16 @@
+build/
+build-*/
+*.o
+*.img
+
+# Editor / OS noise
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.DS_Store
+
+# Test fixtures (built by tests/build-fixtures.sh)
+/tmp/ghost-fixtures*/
+tests/fixtures/

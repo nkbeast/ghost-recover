@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=GHOST//RECOVER
+GenericName=Data Recovery
+Comment=Recover deleted files, repair damaged filesystems and rebuild RAID arrays
+Exec=pkexec ghost_recover --allow-writes
+TryExec=ghost_recover
+Terminal=false
+Type=Application
+Categories=System;Utility;Filesystem;
+Keywords=recovery;undelete;forensics;carving;filesystem;partition;raid;ntfs;ext4;
+StartupNotify=true

@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fixture-build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            zlib1g-dev \
+            e2fsprogs \
+            dosfstools \
+            exfatprogs \
+            ntfs-3g \
+            btrfs-progs \
+            xfsprogs \
+            genisoimage \
+            squashfs-tools \
+            mtools \
+            util-linux \
+            cmake
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      - name: Run verification suite
+        run: ./tests/verify.sh
