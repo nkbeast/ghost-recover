@@ -727,7 +727,12 @@ void finalizeFile(RecoveredFile& f, i64 volumeSize) {
     i64 total = 0;
     for (auto e : f.extents) {
         if (e.length <= 0) continue;
-        if (e.sparse) { keep.push_back(e); total += e.length; continue; }
+        if (e.sparse) {
+            // A hole holds no recoverable data; keep it so the extent list
+            // still describes the file, but never count it as recoverable.
+            keep.push_back(e);
+            continue;
+        }
         if (e.offset < 0 || e.offset >= volumeSize) continue;
         if (e.offset + e.length > volumeSize) e.length = volumeSize - e.offset;
         if (e.length <= 0) continue;
