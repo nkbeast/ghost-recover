@@ -136,7 +136,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     std::vector<Extent> regions = opt.regions;
     if (regions.empty()) {
         i64 start = std::max<i64>(0, opt.start_offset);
-        i64 end = opt.length > 0 ? std::min(result.image_size, start + opt.length) : result.image_size;
+        i64 end = result.image_size;
+        if (opt.length > 0) {
+            // start + opt.length must not overflow i64 even for hostile input.
+            end = (start > result.image_size || opt.length > result.image_size - start)
+                      ? result.image_size
+                      : start + opt.length;
+        }
         if (end > start) regions.push_back(Extent(start, end - start));
     }
     i64 totalBytes = 0;
@@ -428,7 +434,9 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             digest = std::to_string(h);
         }
         std::string key = digest + ":" + std::to_string(written);
-        if (opt.dedup && !seenHashes.insert(key).second) {
+        // The 8 KiB head + length key is far too weak to distinguish files, so
+        // dedup is only safe when real hashes were computed.
+        if (opt.dedup && opt.compute_hashes && !seenHashes.insert(key).second) {
             if (!outPath.empty()) ::remove(outPath.c_str());
             result.duplicates++;
             // Still mark the range consumed so overlapping candidates are skipped.
