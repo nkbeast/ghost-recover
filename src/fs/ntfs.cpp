@@ -130,7 +130,11 @@ struct NtfsFs {
 
         sector_size = b.le16(0x0B);
         u8 spc = b.u8at(0x0D);
-        u32 sectorsPerCluster = (spc > 0x80) ? (1u << (0x100 - spc)) : spc;
+        // A negative exponent encodes a power of two; clamp the shift so a
+        // hostile byte cannot shift a 1u past its width (UB).
+        u32 sectorsPerCluster = (spc > 0x80)
+                                    ? (1u << std::min<unsigned>(31, 0x100u - (u32)spc))
+                                    : (u32)spc;
         if (sector_size < 256 || sector_size > 4096 || (sector_size & (sector_size - 1)))
             { if (err) *err = "implausible bytes-per-sector"; return false; }
         if (sectorsPerCluster == 0 || sectorsPerCluster > 256)
@@ -140,10 +144,18 @@ struct NtfsFs {
         mft_lcn       = b.le64(0x30);
         mftmirr_lcn   = b.le64(0x38);
 
-        i8 cpr = (i8)b.u8at(0x40);
-        record_size = (cpr < 0) ? (1u << (u32)(-cpr)) : (u32)cpr * cluster_size;
-        i8 cpi = (i8)b.u8at(0x44);
-        index_size = (cpi < 0) ? (1u << (u32)(-cpi)) : (u32)cpi * cluster_size;
+        // (1u << 0x80) would be UB; derive the magnitude without negating the
+        // most negative i8 and clamp the shift to 31 bits.
+        u8 b40 = b.u8at(0x40);
+        i8 cpr = (i8)b40;
+        u32 cprShift = (u32)(-1 - cpr) + 1u;
+        record_size = (cpr < 0) ? (1u << std::min<unsigned>(31, cprShift))
+                                : (u32)cpr * cluster_size;
+        u8 b44 = b.u8at(0x44);
+        i8 cpi = (i8)b44;
+        u32 cpiShift = (u32)(-1 - cpi) + 1u;
+        index_size = (cpi < 0) ? (1u << std::min<unsigned>(31, cpiShift))
+                               : (u32)cpi * cluster_size;
         if (record_size < 256 || record_size > 65536) record_size = 1024;
         if (index_size < 256 || index_size > 1 << 20) index_size = 4096;
 
@@ -464,8 +476,12 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     res.block_size  = fs.cluster_size;
     res.uuid        = fs.serial;
     res.volume_size = fs.volume;
-    res.total_blocks = fs.total_sectors ? (i64)(fs.total_sectors * fs.sector_size / fs.cluster_size)
-                                        : fs.volume / fs.cluster_size;
+    // total_sectors * sector_size can overflow u64 on a corrupt boot sector;
+    // fall back to the volume size rather than wrapping.
+    u64 totalBytes = fs.volume;
+    if (fs.total_sectors && fs.total_sectors <= UINT64_MAX / fs.sector_size)
+        totalBytes = fs.total_sectors * fs.sector_size;
+    res.total_blocks = (i64)(totalBytes / fs.cluster_size);
 
     if (!fs.loadMft(res)) {
         res.ok = false;
@@ -851,7 +867,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
         f.parent_id = n.parent;
         f.path = pathOf(rec);
-        if (f.path.empty()) f.path = "/$orphans/" + f.name;
+        if (rec == 5) f.path = "/";                 // record 5 is the root dir
+        else if (f.path.empty()) f.path = "/$orphans/" + f.name;
         finalizeFile(f, fs.volume);
         if (f.is_deleted) {
             if (f.recoverable <= 0 && f.resident.empty()) f.confidence = std::min(f.confidence, 0.1);
