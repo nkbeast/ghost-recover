@@ -205,7 +205,12 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                 if (buf.empty()) break;
                 matcher.scan(buf.data(), buf.size(), pos, state,
                              [&](i64 hitOff, int specId) {
-                                 if (hitOff < u.start) return;   // belongs to the previous unit
+                                 // A signature that starts inside the overlap
+                                 // window belongs to this unit: its final byte
+                                 // lies at or beyond u.start, which the previous
+                                 // unit never consumed. Anything starting before
+                                 // the window is genuinely out of range.
+                                 if (hitOff < readStart) return;
                                  const CarveSpec* sp = specs[(size_t)specId];
                                  i64 fileOff = hitOff - sp->magic_offset;
                                  if (fileOff < 0) return;
@@ -254,6 +259,19 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                   if (a.offset != b.offset) return a.offset < b.offset;
                   return a.priority > b.priority;      // most specific spec first
               });
+    // Units overlap so a signature fully inside a shared window is reported by
+    // both neighbours; drop the exact duplicates before anything else.
+    {
+        std::vector<Candidate> unique;
+        unique.reserve(candidates.size());
+        for (const auto& c : candidates) {
+            if (!unique.empty() && unique.back().offset == c.offset &&
+                unique.back().spec == c.spec)
+                continue;
+            unique.push_back(c);
+        }
+        candidates = std::move(unique);
+    }
 
     // Offsets of every candidate, used to bound formats that cannot state their
     // own length: a file ends no later than where the next one begins.
