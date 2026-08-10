@@ -589,7 +589,17 @@ int startServer(const ServerConfig& cfg) {
     const std::string webRoot = webRootPath(cfg.web_root);
 
     httplib::Server svr;
-    svr.set_keep_alive_max_count(128);
+    // Without SO_REUSEADDR the privilege handover fails: the old instance's
+    // socket lingers in TIME_WAIT for 60 seconds (the browser keeps polling
+    // /api/health), and the elevated instance gives up after 15. SO_REUSEPORT
+    // alone does not help because it refuses to share a port across different
+    // user IDs, and the new process runs as root.
+    svr.set_socket_options([](int sock) {
+        httplib::set_socket_opt(sock, SOL_SOCKET, SO_REUSEADDR, 1);
+#ifdef SO_REUSEPORT
+        httplib::set_socket_opt(sock, SOL_SOCKET, SO_REUSEPORT, 1);
+#endif
+    });    svr.set_keep_alive_max_count(128);
     svr.set_keep_alive_timeout(30);
     svr.set_read_timeout(120, 0);
     svr.set_write_timeout(600, 0);
@@ -1628,9 +1638,17 @@ int startServer(const ServerConfig& cfg) {
     fflush(stdout);
 
     // When taking over, the previous instance needs a moment to close its
-    // listening socket.
-    const int attempts = takingOver ? 60 : 1;
+    // listening socket. SO_REUSEADDR lets us rebind over the old socket's
+    // TIME_WAIT, so this almost always succeeds on the second attempt.
+    //
+    // httplib latches `is_decommissioned` on the first failed bind and every
+    // later bind short-circuits to -1 without touching the network, so the
+    // retry loop below would otherwise be a no-op after the first attempt.
+    // stop() clears that latch (when the server is not running it just resets
+    // the flag), which is what makes the retries real.
+    const int attempts = takingOver ? 120 : 1;
     for (int i = 0; i < attempts; i++) {
+        svr.stop();
         if (svr.listen(bind.c_str(), cfg.port)) {
             g_server = nullptr;
             return 0;
