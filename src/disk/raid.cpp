@@ -672,7 +672,9 @@ RaidLayout detectRaidLayout(const std::vector<std::string>& memberPaths, Progres
                     } else if (b.eq(3, "NTFS    ", 8)) {
                         u16 bps = b.le16(0x0B);
                         u8 spcRaw = b.u8at(0x0D);
-                        u32 spc = (spcRaw > 0x80) ? (1u << (0x100 - spcRaw)) : spcRaw;
+                        // Corrupt counts would shift by up to 127 on a u32.
+                        u32 spc = (spcRaw > 0x80) ? (1u << std::min<unsigned>(31, 0x100u - spcRaw))
+                                                  : spcRaw;
                         u64 mftLcn = b.le64(0x30);
                         if (bps && spc && mftLcn) {
                             std::vector<u8> probe(512);
@@ -820,6 +822,14 @@ RaidBuildResult assembleRaid(const RaidLayout& layout, const std::string& outPat
         res.error = err;
         return res;
     }
+    // Never write the reconstruction over a member or onto the same disk a
+    // member lives on — that would destroy the only copy of the array.
+    for (const auto& m : layout.disks)
+        if (writesBackOntoSource(outPath, m.path)) {
+            res.error = "refusing to assemble over " + m.path +
+                        ", a member of this array. Write the reconstruction to a different disk.";
+            return res;
+        }
     if (!makeDirs(dirName(outPath))) {
         res.error = "cannot create output directory for " + outPath;
         return res;
