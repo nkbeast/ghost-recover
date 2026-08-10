@@ -64,6 +64,22 @@ void markRange(std::vector<MapEntry>& map, i64 offset, i64 length, char status) 
     map.push_back({offset, length, status});
 }
 
+// The checksum is taken from the finished image rather than streamed during
+// pass 1: retry passes overwrite recovered sectors afterwards, so a streaming
+// hash would describe bytes that no longer exist in the file.
+std::string hashFile(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    MD5 h;
+    std::vector<u8> buf(1 << 20);
+    while (f) {
+        f.read((char*)buf.data(), (std::streamsize)buf.size());
+        std::streamsize got = f.gcount();
+        if (got > 0) h.update(buf.data(), (size_t)got);
+    }
+    return h.hex();
+}
+
 }  // namespace
 
 ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& prog) {
@@ -101,24 +117,29 @@ ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& pro
     if (::ftruncate(fd, (off_t)total) != 0) { /* non-fatal on some filesystems */ }
 
     std::vector<MapEntry> map;
+    std::vector<std::pair<i64, i64>> badRanges;
     i64 resumeFrom = 0;
     if (!opt.mapfile.empty()) {
         map = loadMap(opt.mapfile);
-        for (const auto& e : map)
+        for (const auto& e : map) {
             if (e.status == '+') resumeFrom = std::max(resumeFrom, e.offset + e.length);
+            else if (e.status == '-') {
+                // A resumed run must still retry the sectors that failed last
+                // time; otherwise they would be skipped forever.
+                badRanges.emplace_back(e.offset, e.length);
+                res.bytes_bad += e.length;
+            }
+        }
         if (resumeFrom > 0)
             prog.setPhase("resuming at " + humanSize(resumeFrom));
     }
 
     const i64 blockSize = std::max<i64>(4096, opt.block_size);
     std::vector<u8> buf((size_t)blockSize);
-    MD5 md5;
-    bool hashValid = (resumeFrom == 0);
 
     prog.setPhase("imaging (pass 1: fast)");
     prog.set(resumeFrom, total);
 
-    std::vector<std::pair<i64, i64>> badRanges;
     i64 pos = resumeFrom;
     const i64 sector = disk.sectorSize() ? disk.sectorSize() : 512;
 
@@ -153,7 +174,6 @@ ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& pro
             }
             if (!res.error.empty()) break;
         }
-        if (hashValid && opt.verify) md5.update(buf.data(), (size_t)got);
 
         if (hadError) {
             badRanges.emplace_back(pos, got);
@@ -217,7 +237,7 @@ ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& pro
     res.elapsed_ms = nowMs() - t0;
     if (res.elapsed_ms > 0)
         res.rate_mb_s = (double)res.bytes_copied / (1024.0 * 1024.0) / (res.elapsed_ms / 1000.0);
-    if (opt.verify && hashValid && res.bytes_bad == 0) res.md5 = md5.hex();
+    if (opt.verify && res.bytes_bad == 0) res.md5 = hashFile(opt.output_path);
     res.ok = res.error.empty() && res.bytes_copied > 0;
     if (!res.ok && res.error.empty()) res.error = "no data could be read from the source";
     prog.setPhase("done");
