@@ -526,9 +526,23 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 f.extents = fs.clustersToExtents(cl);
                 f.method = "fat_chain_walk";
             } else {
-                // Try the alternate FAT copy first — its chain may be intact.
+                // An unlink clears the chain, but if the first entry still links
+                // onwards the whole chain survived — follow it rather than the
+                // free-cluster heuristic.
                 std::vector<u64> cl;
-                if (altFat) {
+                if (e.size > 0) {
+                    cl = fs.chain(fs.fat1, e.cluster, 1u << 22);
+                    i64 bytes = (i64)cl.size() * fs.clusterSize();
+                    if (!cl.empty() && bytes >= e.size &&
+                        bytes < e.size + (i64)fs.clusterSize() * 2) {
+                        f.method = "fat1_chain_walk";
+                        f.confidence = 0.9;
+                    } else {
+                        cl.clear();
+                    }
+                }
+                // Try the alternate FAT copy next — its chain may be intact.
+                if (cl.empty() && altFat) {
                     cl = fs.chain(*altFat, e.cluster, 1u << 22);
                     i64 bytes = (i64)cl.size() * fs.clusterSize();
                     if (!cl.empty() && e.size > 0 && bytes >= e.size &&
