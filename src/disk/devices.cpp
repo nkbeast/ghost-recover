@@ -44,6 +44,12 @@ int countPartitions(const std::string& sysPath, const std::string& name) {
         std::string sub = e->d_name;
         if (sub == "." || sub == "..") continue;
         if (!startsWith(sub, name)) continue;
+        // A partition is the disk name followed by digits only ("sda1", not
+        // "sdaa1" which belongs to a different disk).
+        if (sub.size() <= name.size()) continue;
+        size_t i = name.size();
+        for (; i < sub.size() && ::isdigit((unsigned char)sub[i]); i++) {}
+        if (i < sub.size()) continue;
         if (fileExists(sysPath + "/" + sub + "/partition")) n++;
     }
     closedir(d);
