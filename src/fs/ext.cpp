@@ -159,8 +159,17 @@ struct ExtFs {
             { if (err) *err = "implausible group geometry"; return false; }
         if (blocks_count == 0) { if (err) *err = "zero block count"; return false; }
 
-        groups = (u32)((blocks_count - first_data_block + blocks_per_group - 1) / blocks_per_group);
-        u32 byInode = (inodes_count + inodes_per_group - 1) / inodes_per_group;
+        // Do the group arithmetic in 64 bits: with bigalloc-style geometry the
+        // u32 products overflow and the group count wraps.
+        u64 gByBlocks = 1;
+        if (blocks_count > first_data_block)
+            gByBlocks = (blocks_count - (u64)first_data_block + (u64)blocks_per_group - 1) /
+                        (u64)blocks_per_group;
+        u64 gByInodes = ((u64)inodes_count + inodes_per_group - 1) / (u64)inodes_per_group;
+        if (gByBlocks > (1u << 22) || gByInodes > (1u << 22))
+            { if (err) *err = "implausible group count"; return false; }
+        groups = (u32)gByBlocks;
+        u32 byInode = (u32)gByInodes;
         if (byInode && byInode < groups) groups = byInode;
         if (groups == 0) groups = 1;
         if (groups > 1u << 22) { if (err) *err = "implausible group count"; return false; }
