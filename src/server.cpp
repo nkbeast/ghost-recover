@@ -580,6 +580,21 @@ bool pathAllowedForServing(const std::string& p) {
     return pathIsWithin(p, outputRoot());
 }
 
+// The hex view also takes a raw path so the UI can inspect devices. That path
+// may only be a real block device present in sysfs — never an arbitrary host
+// file. Images under the output root remain allowed for the job-based view.
+bool pathAllowedForRawHex(const std::string& p) {
+    if (p.empty()) return false;
+    std::string real = realPathOf(p);
+    if (real.empty()) return false;
+    if (pathIsWithin(real, outputRoot())) return true;
+    if (real.rfind("/dev/", 0) != 0) return false;
+    struct stat st{};
+    if (::stat(real.c_str(), &st) != 0 || !S_ISBLK(st.st_mode)) return false;
+    std::string sys = "/sys/block/" + real.substr(5);
+    return fileExists(sys + "/size") || fileExists(sys + "/partition");
+}
+
 // ---------------------------------------------------------------------------
 int startServer(const ServerConfig& cfg) {
     setOutputRoot(cfg.output_root.empty() ? defaultOutputRoot() : cfg.output_root);
@@ -1111,6 +1126,7 @@ int startServer(const ServerConfig& cfg) {
         i64 offset = 0, limit = 200;
         try { offset = std::stoll(req.get_param_value("offset")); } catch (...) {}
         try { limit = std::stoll(req.get_param_value("limit")); } catch (...) {}
+        if (offset < 0) offset = 0;                     // negative pages would read OOB
         if (limit < 1) limit = 1;
         if (limit > 5000) limit = 5000;
         std::string q = toLower(req.get_param_value("q"));
@@ -1207,8 +1223,11 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         i64 maxBytes = 64 * 1024 * 1024;
-        try { maxBytes = std::min<i64>(maxBytes, std::stoll(req.get_param_value("max"))); }
-        catch (...) {}
+        // A missing/negative "max" must not turn into an unbounded read.
+        try {
+            i64 m = std::stoll(req.get_param_value("max"));
+            if (m > 0) maxBytes = std::min<i64>(maxBytes, m);
+        } catch (...) {}
 
         const RecoveredFile& f = stored->files[(size_t)index];
         std::string err;
@@ -1235,6 +1254,7 @@ int startServer(const ServerConfig& cfg) {
         i64 offset = 0, length = 512;
         try { offset = std::stoll(req.get_param_value("offset")); } catch (...) {}
         try { length = std::stoll(req.get_param_value("length")); } catch (...) {}
+        if (offset < 0) offset = 0;             // negative offsets read out of bounds
         if (length < 16) length = 16;
         if (length > 65536) length = 65536;
 
@@ -1269,6 +1289,12 @@ int startServer(const ServerConfig& cfg) {
             std::string path = req.get_param_value("path");
             if (path.empty()) {
                 res.set_content(errorJson("provide either job+index or path"), "application/json");
+                return;
+            }
+            if (!pathAllowedForRawHex(path)) {
+                res.status = 403;
+                res.set_content(errorJson("raw hex view is limited to block devices and files "
+                                          "under " + outputRoot()), "application/json");
                 return;
             }
             std::string err;
