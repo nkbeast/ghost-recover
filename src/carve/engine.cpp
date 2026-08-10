@@ -68,19 +68,26 @@ i64 findFooter(DiskReader& disk, i64 start, i64 limit, const std::vector<u8>& fo
     return -1;
 }
 
-// Trailing zero padding is slack, not file content.
+// Trailing zero padding is slack, not file content. A heuristic-sized file
+// (gzip, bzip2, ...) can end far from the next signature, so the run of zeros
+// is walked back in overlapping windows instead of trusting the last 64 KiB.
 i64 trimTrailingZeros(DiskReader& disk, i64 offset, i64 size) {
     if (size <= 0) return size;
-    const i64 kLook = std::min<i64>(size, 64 * 1024);
-    auto tail = disk.readBlock((u64)(offset + size - kLook), kLook);
-    if (tail.empty()) return size;
-    i64 zeros = 0;
-    for (i64 i = (i64)tail.size() - 1; i >= 0; i--) {
-        if (tail[i] != 0) break;
-        zeros++;
+    const i64 kStep = 4 * 1024 * 1024;
+    i64 examined = 0;
+    while (examined < size) {
+        i64 look = std::min<i64>(kStep, size - examined);
+        auto tail = disk.readBlock((u64)(offset + size - examined - look), look);
+        if (tail.empty()) return size;
+        i64 zeros = 0;
+        for (i64 i = (i64)tail.size() - 1; i >= 0; i--) {
+            if (tail[i] != 0) break;
+            zeros++;
+        }
+        if (zeros < (i64)tail.size()) return size - examined - look + zeros;
+        examined += look;
     }
-    if (zeros < 512) return size;             // a little padding is normal
-    return size - zeros;
+    return 0;                                  // the whole candidate is zeros
 }
 
 std::string safeFormatName(const std::string& s) {
