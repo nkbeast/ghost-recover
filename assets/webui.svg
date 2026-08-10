@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="660" viewBox="0 0 1200 660" role="img" aria-label="GHOST//RECOVER web interface mock">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#010409"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="660" fill="url(#bg)"/>
+
+  <style>
+    .wintitle { font-family: 'Courier New', monospace; font-size: 14px; fill: #8b949e; }
+    .tab { font-family: 'Courier New', monospace; font-size: 13px; fill: #8b949e; }
+    .tabactive { fill: #3fb950; }
+    .h2 { font-family: 'Courier New', monospace; font-size: 18px; font-weight: bold; fill: #e6edf3; }
+    .dev { font-family: 'Courier New', monospace; font-size: 13px; fill: #c9d1d9; }
+    .devsub { font-family: 'Courier New', monospace; font-size: 11px; fill: #8b949e; }
+    .lock { fill: #f85149; }
+    .row { font-family: 'Courier New', monospace; font-size: 12px; fill: #c9d1d9; }
+    .rowacc { fill: #3fb950; }
+    .rowdel { fill: #f85149; }
+    .btn { font-family: 'Courier New', monospace; font-size: 13px; font-weight: bold; }
+  </style>
+
+  <!-- Browser chrome -->
+  <rect x="40" y="30" width="1120" height="600" rx="10" fill="#010409" stroke="#30363d" stroke-width="2"/>
+  <circle cx="70" cy="58" r="8" fill="#f85149"/>
+  <circle cx="95" cy="58" r="8" fill="#d29922"/>
+  <circle cx="120" cy="58" r="8" fill="#3fb950"/>
+  <rect x="160" y="46" width="620" height="24" rx="12" fill="#161b22"/>
+  <text x="470" y="63" text-anchor="middle" class="wintitle">127.0.0.1:3030</text>
+
+  <!-- Tabs -->
+  <text x="60" y="110" class="tab tabactive">DISKS</text>
+  <text x="130" y="110" class="tab">PARTITIONS</text>
+  <text x="240" y="110" class="tab">SCAN</text>
+  <text x="310" y="110" class="tab">CARVE</text>
+  <text x="390" y="110" class="tab">RAID</text>
+  <text x="460" y="110" class="tab">REPAIR</text>
+  <line x1="55" y1="120" x2="115" y2="120" stroke="#3fb950" stroke-width="3"/>
+
+  <text x="60" y="155" class="h2">Block devices</text>
+  <text x="1040" y="155" class="btn" fill="#3fb950">Unlock disks &rarr;</text>
+
+  <!-- Device rows -->
+  <rect x="55" y="175" width="1090" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="75" y="200" class="dev">/dev/nvme0n1</text>
+  <text x="75" y="218" class="devsub">Samsung SSD 980 &middot; 512.1 GB &middot; NVMe</text>
+  <text x="420" y="200" class="devsub">sda1 ntfs &middot; sda2 ext4 &middot; sda3 btrfs</text>
+  <text x="1020" y="200" class="devsub">accessed as root</text>
+  <circle cx="1005" cy="195" r="5" fill="#3fb950"/>
+
+  <rect x="55" y="237" width="1090" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="75" y="262" class="dev">/dev/sda</text>
+  <text x="75" y="280" class="devsub">WDC WD10EZEX &middot; 1.0 TB &middot; SATA &middot; rotational</text>
+  <text x="420" y="262" class="devsub">3 partitions &middot; 1 deleted partition found</text>
+  <text x="1020" y="262" class="btn" fill="#3fb950">SCAN</text>
+
+  <rect x="55" y="299" width="1090" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="75" y="324" class="dev">/dev/sdb</text>
+  <text x="75" y="342" class="devsub">TOSHIBA MK5055GSX &middot; 500.1 GB &middot; SATA</text>
+  <text x="1020" y="324" class="btn" fill="#3fb950">IMAGE</text>
+
+  <!-- Scan result panel -->
+  <text x="60" y="390" class="h2">Scan /dev/sda2 &mdash; 37,942 files, 4 deleted</text>
+  <rect x="55" y="405" width="1090" height="205" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="75" y="430" class="row" fill="#8b949e">NAME&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;SIZE&#160;&#160;&#160;&#160;&#160;&#160;METHOD&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;CONFIDENCE</text>
+  <text x="75" y="455" class="row rowdel">~/budget.xlsx&#160;&#160;128.4 KB&#160;&#160;journal mining (jbd2)&#160;&#160;0.98</text>
+  <text x="75" y="478" class="row rowdel">~/holiday.jpg&#160;&#160;&#160;2.1 MB&#160;&#160;&#160;dir-entry slack&#160;&#160;&#160;&#160;&#160;&#160;0.95</text>
+  <text x="75" y="501" class="row rowdel">~/notes.txt&#160;&#160;&#160;&#160;4.2 KB&#160;&#160;&#160;orphan inode&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;0.99</text>
+  <text x="75" y="524" class="row rowdel">~/old.png&#160;&#160;&#160;&#160;&#160;&#160;812 KB&#160;&#160;&#160;unlinked inode&#160;&#160;&#160;&#160;&#160;&#160;0.97</text>
+  <text x="75" y="550" class="row">recovered 4 deleted files &mdash; 2.9 MB</text>
+  <text x="75" y="573" class="row rowacc">[+] extracted to ~/ghost-recover-output &mdash; md5 verified</text>
+  <rect x="75" y="585" width="200" height="8" rx="4" fill="#30363d"/>
+  <rect x="75" y="585" width="200" height="8" rx="4" fill="#3fb950"/>
+  <text x="285" y="593" class="devsub">done</text>
+</svg>

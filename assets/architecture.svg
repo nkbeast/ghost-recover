@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-label="GHOST//RECOVER architecture diagram">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#010409"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="720" fill="url(#bg)"/>
+
+  <style>
+    .box { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 8; }
+    .boxaccent { fill: #1f6feb; }
+    .txt { font-family: 'Courier New', monospace; }
+    .lbl { fill: #8b949e; font-size: 13px; }
+    .lblg { fill: #3fb950; font-size: 13px; }
+    .lblb { fill: #58a6ff; font-size: 13px; }
+    .hdr { fill: #c9d1d9; font-size: 15px; font-weight: bold; }
+    .sub { fill: #8b949e; font-size: 12px; }
+  </style>
+
+  <text x="600" y="40" text-anchor="middle" class="txt hdr" font-size="20" fill="#e6edf3">GHOST//RECOVER &mdash; ENGINE ARCHITECTURE</text>
+
+  <!-- Source -->
+  <rect x="420" y="70" width="360" height="64" class="box" stroke="#3fb950"/>
+  <text x="600" y="98" text-anchor="middle" class="txt hdr">/dev/sdX &middot; image &middot; md member</text>
+  <text x="600" y="118" text-anchor="middle" class="txt lbl">physical disk, raw image, or RAID member</text>
+
+  <line x1="600" y1="134" x2="600" y2="170" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Core I/O -->
+  <rect x="420" y="170" width="360" height="64" class="box"/>
+  <text x="600" y="198" text-anchor="middle" class="txt hdr">DiskReader &mdash; windowed, cached I/O</text>
+  <text x="600" y="218" text-anchor="middle" class="txt lbl">bounds-checked reads &middot; tolerant of bad sectors &middot; read-only by default</text>
+
+  <line x1="600" y1="234" x2="600" y2="270" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Three branches -->
+  <rect x="40" y="270" width="360" height="190" class="box"/>
+  <text x="220" y="298" text-anchor="middle" class="txt hdr">FILESYSTEM DRIVERS &mdash; 25+</text>
+  <text x="220" y="322" text-anchor="middle" class="txt lbl">metadata walk &rarr; full paths &rarr; extent lists</text>
+  <text x="220" y="346" text-anchor="middle" class="txt lblg">ext2/3/4 &middot; NTFS &middot; FAT &middot; exFAT &middot; XFS</text>
+  <text x="220" y="368" text-anchor="middle" class="txt lblg">Btrfs &middot; F2FS &middot; HFS+/HFSX &middot; APFS</text>
+  <text x="220" y="390" text-anchor="middle" class="txt lblg">ISO 9660 &middot; UDF &middot; SquashFS &middot; cramfs</text>
+  <text x="220" y="412" text-anchor="middle" class="txt lblg">romfs &middot; MINIX &middot; JFFS2 &middot; UFS &middot; JFS</text>
+  <text x="220" y="436" text-anchor="middle" class="txt lblb">deleted files via journal mining, slack, orphans</text>
+
+  <rect x="420" y="270" width="360" height="190" class="box"/>
+  <text x="600" y="298" text-anchor="middle" class="txt hdr">DISK LAYER</text>
+  <text x="600" y="322" text-anchor="middle" class="txt lbl">partition tables &rarr; deleted-partition recovery</text>
+  <text x="600" y="346" text-anchor="middle" class="txt lblg">MBR + EBR chain &middot; GPT + CRC &middot; superblock scan</text>
+  <text x="600" y="368" text-anchor="middle" class="txt lblg">RAID 0 / 1 / 5 / 6 / 10 &middot; linear</text>
+  <text x="600" y="390" text-anchor="middle" class="txt lblg">md superblocks &middot; blind geometry brute-force</text>
+  <text x="600" y="412" text-anchor="middle" class="txt lblg">missing member rebuilt from parity</text>
+  <text x="600" y="436" text-anchor="middle" class="txt lblb">honest ambiguity reporting, never guesses</text>
+
+  <rect x="800" y="270" width="360" height="190" class="box"/>
+  <text x="980" y="298" text-anchor="middle" class="txt hdr">SIGNATURE CARVING &mdash; 251 formats</text>
+  <text x="980" y="322" text-anchor="middle" class="txt lbl">single Aho-Corasick pass over the device</text>
+  <text x="980" y="346" text-anchor="middle" class="txt lblg">15 categories &middot; structural length validation</text>
+  <text x="980" y="368" text-anchor="middle" class="txt lblg">entropy screening &middot; content-hash dedup</text>
+  <text x="980" y="390" text-anchor="middle" class="txt lblg">fragmented-file reassembly</text>
+  <text x="980" y="412" text-anchor="middle" class="txt lblg">free-space-only carve option</text>
+  <text x="980" y="436" text-anchor="middle" class="txt lblb">whole files at true size, not guesses</text>
+
+  <line x1="600" y1="270" x2="220" y2="270" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="600" y1="270" x2="600" y2="270" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="600" y1="270" x2="980" y2="270" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Outputs -->
+  <rect x="40" y="500" width="560" height="180" class="box"/>
+  <text x="320" y="530" text-anchor="middle" class="txt hdr">RECOVERY PIPELINE</text>
+  <text x="320" y="558" text-anchor="middle" class="txt lbl">extent-accurate extraction &mdash; fragmented files come out intact</text>
+  <text x="320" y="582" text-anchor="middle" class="txt lblg">ddrescue-style imaging with resumable map file</text>
+  <text x="320" y="606" text-anchor="middle" class="txt lblg">dry-run repair: ext superblocks &middot; FAT/exFAT boot &middot; NTFS &middot; GPT &middot; MBR</text>
+  <text x="320" y="630" text-anchor="middle" class="txt lblg">refuses to write onto the source device</text>
+  <text x="320" y="654" text-anchor="middle" class="txt lblb">every output verified by MD5 in the test suite</text>
+
+  <rect x="640" y="500" width="520" height="180" class="box" stroke="#3fb950"/>
+  <text x="900" y="530" text-anchor="middle" class="txt hdr">INTERFACES</text>
+  <text x="900" y="562" text-anchor="middle" class="txt lblg">Web UI &mdash; 127.0.0.1:3030</text>
+  <text x="900" y="588" text-anchor="middle" class="txt lbl">job polling &middot; preview &middot; hex viewer &middot; file info</text>
+  <text x="900" y="614" text-anchor="middle" class="txt lblg">CLI &mdash; full parity with the UI</text>
+  <text x="900" y="640" text-anchor="middle" class="txt lbl">HTTP API &mdash; /api/scan /api/carve /api/raid &hellip;</text>
+  <text x="900" y="666" text-anchor="middle" class="txt lbl">pkexec / sudo elevation with handover</text>
+
+  <line x1="320" y1="500" x2="320" y2="500" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="600" y1="460" x2="320" y2="500" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="600" y1="460" x2="900" y2="500" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+</svg>
