@@ -264,8 +264,12 @@ i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (sz32 == 1) {
             auto ext = s.read(p + 8, 8);
             if (ext.size() < 8) break;
-            size = 0;
-            for (int i = 0; i < 8; i++) size = (size << 8) | ext[i];
+            // Accumulate in u64: an 8-byte extended size can reach 2^64-1 and
+            // shifting it into a signed i64 is undefined behaviour.
+            u64 esz = 0;
+            for (int i = 0; i < 8; i++) esz = (esz << 8) | ext[i];
+            if (esz > 0x7FFFFFFFFFFFFFFFull) break;
+            size = (i64)esz;
         } else if (sz32 == 0) {
             // "extends to end of file" — in a carving context we cannot know
             // where that is, so stop at the last complete atom.
@@ -1158,6 +1162,9 @@ i64 vPsd(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u32 width = s.be32(off + 18);
     u16 depth = s.be16(off + 22);
     if (channels == 0 || channels > 56 || width == 0 || height == 0) return -1;
+    // The header is all we have before trusting these: bound the dimensions so
+    // width * height * channels * depth cannot overflow signed arithmetic.
+    if (width > 65536 || height > 65536) return -1;
     if (depth != 1 && depth != 8 && depth != 16 && depth != 32) return -1;
     i64 p = 26;
     u32 colorLen = s.be32(off + p); p += 4 + colorLen;
