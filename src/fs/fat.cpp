@@ -201,22 +201,28 @@ struct FatFs {
     }
 
     // A deleted file's FAT chain has been zeroed. Rebuild it by taking the
-    // clusters that follow the start cluster and are still marked free — an
-    // allocated cluster in the middle means the space was reused, so it is
-    // skipped and the result is flagged as lower confidence.
+    // clusters that follow the start cluster and are still marked free. An
+    // allocated cluster in the middle means the space was reused — the file
+    // stops there rather than stepping over it, which would misalign every
+    // subsequent extent; the result is flagged as fragmented.
     std::vector<u64> rebuildDeletedChain(u64 first, i64 size, bool* fragmented) const {
         std::vector<u64> out;
         if (first < 2 || size <= 0) return out;
-        u64 need = ((u64)size + clusterSize() - 1) / clusterSize();
+        // A corrupt directory entry can claim a huge size; cap both the number
+        // of clusters we want and how far we are willing to scan for them.
+        const u64 kCapClusters = 1u << 24;             // ~64 GiB of data
+        u64 need = std::min(kCapClusters, ((u64)size + clusterSize() - 1) / clusterSize());
         u64 cur = first;
         u64 scanned = 0;
         bool skipped = false;
-        while (out.size() < need && cur < cluster_count + 2 && scanned < need * 8 + 64) {
+        const u64 kMaxScan = std::min(kCapClusters * 8 + 64, (u64)1 << 26);
+        while (out.size() < need && cur < cluster_count + 2 && scanned < kMaxScan) {
             u32 e = fatEntry(fat1, cur);
             if (e == 0 || out.empty()) {
                 out.push_back(cur);
             } else {
-                skipped = true;    // in use by a live file — step over it
+                skipped = true;
+                break;
             }
             cur++;
             scanned++;
@@ -628,7 +634,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             filesFound++;
             orphans++;
         }
-        for (u64 c = 2; c < fs.cluster_count + 2; c++)
+        // A damaged FAT can claim billions of clusters; counting bad ones is
+        // diagnostic only, so do not walk more than 2^26 of them.
+        u64 badLimit = std::min(fs.cluster_count + 2, (u64)1 << 26);
+        for (u64 c = 2; c < badLimit; c++)
             if (fs.isBad(fs.fatEntry(fs.fat1, c))) bad++;
         if (orphans) { res.technique("orphaned_cluster_scan"); res.bump("orphan_chains", orphans); }
         if (bad) res.bump("bad_clusters", bad);
