@@ -391,6 +391,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
         i64 written = 0;
         bool readError = false;
+        bool writeError = false;
         {
             const i64 kChunk = 4 * 1024 * 1024;
             while (written < size) {
@@ -401,14 +402,17 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                     md5.update(chunk.data(), chunk.size());
                     sha1.update(chunk.data(), chunk.size());
                 }
-                if (fp) fwrite(chunk.data(), 1, chunk.size(), fp);
+                if (fp && fwrite(chunk.data(), 1, chunk.size(), fp) != chunk.size()) {
+                    writeError = true;
+                    break;
+                }
                 written += (i64)chunk.size();
                 if ((i64)chunk.size() < want) { readError = true; break; }
             }
         }
         if (fp) fclose(fp);
         if (!outPath.empty()) adoptOwnership(outPath);
-        if (written <= 0 || (readError && written < spec.min_size)) {
+        if (written <= 0 || ((readError || writeError) && written < spec.min_size)) {
             if (!outPath.empty()) ::remove(outPath.c_str());
             result.rejected++;
             continue;
@@ -444,7 +448,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         cf.entropy = entropy;
         cf.validated = (spec.validator != nullptr && opt.validate) && !guessedSize;
         cf.whole_file = cf.validated && spec.whole_file;
-        cf.truncated = readError || written < size;
+        cf.truncated = readError || writeError || written < size || sizeClamped;
         cf.confidence = cf.validated ? (cf.truncated ? 0.6 : 1.0) : 0.5;
         if (opt.compute_hashes) { cf.md5 = digest; cf.sha1 = sha1.hex(); }
         cf.extents.push_back(Extent(off, written));
