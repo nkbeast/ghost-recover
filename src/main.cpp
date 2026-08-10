@@ -501,10 +501,17 @@ int main(int argc, char* argv[]) {
     cfg.allow_repair_writes = args.has("--allow-writes");
     cfg.takeover_file = args.get("--takeover");
 
-    printf("\n");
-    printf("  GHOST//RECOVER  %s\n", ghost::engineVersion());
-    printf("  %zu filesystems · %zu carver signatures · RAID · imaging · repair\n\n",
-           ghost::filesystemRegistry().size(), ghost::carverRegistry().size());
+    if (args.has("--json")) {
+        printf("{\"version\":\"%s\",\"filesystems\":%zu,\"carvers\":%zu,\"port\":%d,"
+               "\"listen\":\"%s\"}\n",
+               ghost::engineVersion(), ghost::filesystemRegistry().size(),
+               ghost::carverRegistry().size(), cfg.port, cfg.bind_address.c_str());
+    } else {
+        printf("\n");
+        printf("  GHOST//RECOVER  %s\n", ghost::engineVersion());
+        printf("  %zu filesystems · %zu carver signatures · RAID · imaging · repair\n\n",
+               ghost::filesystemRegistry().size(), ghost::carverRegistry().size());
+    }
 
     if (!args.has("--no-browser") && cfg.takeover_file.empty()) {
         pid_t pid = fork();
@@ -513,8 +520,14 @@ int main(int argc, char* argv[]) {
             launchBrowser("http://localhost:" + std::to_string(cfg.port));
             _exit(0);
         }
-        // Reap the helper so it does not linger as a zombie.
-        signal(SIGCHLD, SIG_IGN);
+        // Reap the helper so it does not linger as a zombie. This must be a
+        // real handler rather than SIG_IGN: SIG_IGN prevents waitpid() from
+        // ever succeeding, which would silently break the elevation handshake
+        // (spawnElevated waits on the child) later in the session.
+        struct sigaction sa{};
+        sa.sa_handler = [](int) {};
+        sa.sa_flags = SA_NOCLDSTOP | SA_RESTART;
+        ::sigaction(SIGCHLD, &sa, nullptr);
     }
 
     return ghost::startServer(cfg);

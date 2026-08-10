@@ -485,6 +485,13 @@ bool spawnElevated(const std::string& method, const std::string& password,
                              "--takeover", tokenFile});
     if (cfg.allow_repair_writes) argv.push_back("--allow-writes");
     if (!cfg.web_root.empty()) { argv.push_back("--web"); argv.push_back(cfg.web_root); }
+    // The elevated instance must bind the same address. Without this, a parent
+    // listening on 0.0.0.0 spawns a child that tries 127.0.0.1, gets
+    // EADDRINUSE and dies before the handover completes.
+    if (!cfg.bind_address.empty() && cfg.bind_address != "127.0.0.1") {
+        argv.push_back("--listen");
+        argv.push_back(cfg.bind_address);
+    }
 
     int pw[2] = {-1, -1};
     const bool needsPassword = (method == "sudo-password");
@@ -1346,7 +1353,18 @@ int startServer(const ServerConfig& cfg) {
             res.set_content(errorJson("file not found"), "application/json");
             return;
         }
-        std::string data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        // Recovered files can be gigabytes; slurping one into memory and
+        // base64-encoding it would exhaust the HTTP handler. Serve at most the
+        // first few megabytes — enough for a preview — and say so in a header.
+        constexpr i64 kPreviewCap = 4 * 1024 * 1024;
+        f.seekg(0, std::ios::end);
+        i64 size = (i64)f.tellg();
+        f.seekg(0, std::ios::beg);
+        i64 take = std::min<i64>(size, kPreviewCap);
+        std::string data((size_t)take, '\0');
+        if (take > 0) f.read(&data[0], take);
+        res.set_header("X-File-Size", std::to_string(size));
+        if (size > take) res.set_header("X-Content-Truncated", "1");
         res.set_header("Content-Disposition",
                        "inline; filename=\"" + sanitizeFilename(baseName(path)) + "\"");
         res.set_content(data, mimeForExtension(extensionOf(path)).c_str());

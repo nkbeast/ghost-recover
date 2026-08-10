@@ -96,6 +96,14 @@ ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& pro
                     ", the device being imaged. Write the clone to a different disk.";
         return res;
     }
+    // The map file is opened with O_TRUNC when it is saved. If it lives on the
+    // source device, saving it truncates the device's header — the exact thing
+    // imaging is meant to protect. Refuse like the output path.
+    if (!opt.mapfile.empty() && writesBackOntoSource(opt.mapfile, disk.path())) {
+        res.error = "refusing to use " + opt.mapfile + " as the map file: it is on " +
+                    disk.path() + ", the device being imaged. Put the map on a different disk.";
+        return res;
+    }
     if (!makeDirs(dirName(opt.output_path))) {
         res.error = "cannot create the output directory";
         return res;

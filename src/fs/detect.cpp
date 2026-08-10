@@ -370,7 +370,10 @@ DetectResult detectFilesystem(DiskReader& disk) {
             r.detected   = true;
             r.filesystem = "f2fs";
             r.family     = "f2fs";
-            r.block_size = 1LL << fb.le32(8);
+            // log_blocksize lives at 0x10; 0x08 is log_sectorsize, which is
+            // always 9 and made the reported block size 512 on every volume.
+            u32 logBlockSize = fb.le32(0x10);
+            if (logBlockSize <= 16) r.block_size = 1024LL << logBlockSize;
             r.confidence = 1.0;
             return r;
         }

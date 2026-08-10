@@ -115,6 +115,12 @@ struct XfsFs {
             { if (err) *err = "implausible XFS inode size"; return false; }
         if (sb.agcount == 0 || sb.agcount > 1000000 || sb.agblocks == 0)
             { if (err) *err = "implausible XFS AG geometry"; return false; }
+        // These are shift counts used as `1 << x` when converting between inode
+        // numbers, AG blocks and bytes. A corrupt value above 63 is undefined
+        // behavior; anything implausible is not a real XFS volume anyway.
+        if (sb.agblklog == 0 || sb.agblklog > 32 || sb.inopblog == 0 || sb.inopblog > 10 ||
+            sb.blocklog < 8 || sb.blocklog > 16 || sb.sectlog < 7 || sb.sectlog > 16)
+            { if (err) *err = "implausible XFS log fields"; return false; }
         return true;
     }
 };
@@ -229,7 +235,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 s.dblocks   = b.be64(0x08);
                 s.versionnum = b.be16(0x64);
                 s.crc = (s.versionnum & 0x0F) == 5;
-                if (s.blocksize >= 512 && s.agblocks && s.agcount && s.inodesize >= 256) {
+                if (s.blocksize >= 512 && s.agblocks && s.agcount && s.inodesize >= 256 &&
+                    s.agblklog >= 1 && s.agblklog <= 32 && s.inopblog >= 1 && s.inopblog <= 10) {
                     fs.sb = s;
                     res.technique("backup_superblock_recovery");
                     res.bump("superblock_recovered_at_offset", off);

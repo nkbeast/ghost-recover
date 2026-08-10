@@ -760,10 +760,10 @@ std::vector<Extent> exfatFree(DiskReader& disk, Progress& prog) {
     Bytes b(b0);
     if (!b.eq(3, "EXFAT   ", 8)) return free;
     u8 bpsShift = b.u8at(0x6C), spcShift = b.u8at(0x6D);
-    if (bpsShift < 9 || bpsShift > 12) return free;
-    u32 bps = 1u << bpsShift;
-    u32 spc = 1u << spcShift;
-    u32 clusterSize = bps * spc;
+    if (bpsShift < 9 || bpsShift > 12 || spcShift < 1 || spcShift > 25 - bpsShift) return free;
+    u64 bps = 1ull << bpsShift;
+    u64 spc = 1ull << spcShift;
+    u64 clusterSize = bps * spc;
     u32 heapOff = b.le32(0x58);
     u32 clusterCount = b.le32(0x5C);
     u32 rootCluster = b.le32(0x60);

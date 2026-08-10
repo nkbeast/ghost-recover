@@ -170,8 +170,16 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             res.technique("backup_boot_region_recovery");
             res.bump("boot_region_recovered_from_backup", 1);
             Bytes b(bk);
-            fs.bytes_per_sector    = 1u << std::max<u8>(9, b.u8at(0x6C));
-            fs.sectors_per_cluster = 1u << b.u8at(0x6D);
+            // The primary boot region already failed plausibility checks; apply
+            // the same ones to the backup before using its shift counts, which
+            // feed power-of-two computations.
+            u8 bpsShift = b.u8at(0x6C);
+            u8 spcShift = b.u8at(0x6D);
+            if (bpsShift < 9 || bpsShift > 12 || spcShift > 25 - bpsShift) {
+                res.ok = false; res.error = err; return res;
+            }
+            fs.bytes_per_sector    = 1u << bpsShift;
+            fs.sectors_per_cluster = 1u << spcShift;
             fs.volume_length = b.le64(0x48);
             fs.fat_offset    = b.le32(0x50);
             fs.fat_length    = b.le32(0x54);

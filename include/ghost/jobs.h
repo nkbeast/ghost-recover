@@ -8,6 +8,7 @@
 
 #include "ghost/types.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <thread>
 
@@ -23,9 +24,11 @@ struct Job {
     std::string target;      // device/image path, for display
     std::atomic<JobState> state{JobState::Queued};
     Progress    progress;
-    i64         created_ms  = 0;
-    i64         started_ms  = 0;
-    i64         finished_ms = 0;
+    // Written by the worker thread, read by the HTTP thread while the job is
+    // still running — plain i64 fields were a data race.
+    std::atomic<i64>    created_ms  {0};
+    std::atomic<i64>    started_ms  {0};
+    std::atomic<i64>    finished_ms {0};
 
     mutable std::mutex mu;
     std::string result_json;   // guarded by mu
