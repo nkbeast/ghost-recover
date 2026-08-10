@@ -188,6 +188,58 @@ if [ -d "$IMG/raid5-filled" ]; then
   else bad "degraded RAID 5 rebuild does not match the original"; fi
 else skip "RAID 5 (no fixture)"; fi
 
+if [ -d "$IMG/raid5-md" ]; then
+  out="$WORK/raid5-md.img"
+  # Deliberately out of order: the superblock roles must re-sort the members.
+  info=$("$BIN" raid "$IMG/raid5-md/member2.img" "$IMG/raid5-md/member0.img" \
+                     "$IMG/raid5-md/member3.img" "$IMG/raid5-md/member1.img" \
+         --out "$out" 2>/dev/null)
+  level=$(echo "$info" | awk '/^Level/{print $3}')
+  chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
+  lay=$(echo "$info" | awk '/^Layout/{print $3}')
+  src=$(echo "$info" | awk '/^Source/{print $3}')
+  if [ "$level" = raid5 ] && [ "$chunk" = 65536 ] && [ "$lay" = left-symmetric ] &&
+     echo "$src" | grep -q mdraid; then
+    ok "RAID 5 geometry comes from the md 1.x superblocks (members out of order)"
+  else bad "RAID 5 md 1.x superblock wrong: level=$level chunk=$chunk layout=$lay src=$src"; fi
+  head -c "$(stat -c%s "$IMG/filled.img")" "$out" > "$WORK/raid5-md-trim.img"
+  if cmp -s "$WORK/raid5-md-trim.img" "$IMG/filled.img"; then
+    ok "assembled RAID 5 from md superblocks is byte-identical to the original"
+  else bad "RAID 5 md assembly does not match the original"; fi
+else skip "RAID 5 md superblock (no fixture)"; fi
+
+if [ -d "$IMG/raid0-md" ]; then
+  out="$WORK/raid0-md.img"
+  info=$("$BIN" raid "$IMG/raid0-md/member0.img" "$IMG/raid0-md/member1.img" \
+         --out "$out" 2>/dev/null)
+  level=$(echo "$info" | awk '/^Level/{print $3}')
+  chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
+  src=$(echo "$info" | awk '/^Source/{print $3}')
+  if [ "$level" = raid0 ] && [ "$chunk" = 65536 ] && [ "$src" = mdraid-superblock-0.90 ]; then
+    ok "RAID 0 geometry comes from the md 0.90 superblocks"
+  else bad "RAID 0 md 0.90 superblock wrong: level=$level chunk=$chunk src=$src"; fi
+  if cmp -s "$out" "$IMG/filled.img"; then
+    ok "assembled RAID 0 from md 0.90 superblocks is byte-identical to the original"
+  else bad "RAID 0 md 0.90 assembly does not match the original"; fi
+else skip "RAID 0 md superblock (no fixture)"; fi
+
+if [ -d "$IMG/raid10-md" ]; then
+  out="$WORK/raid10-md.img"
+  info=$("$BIN" raid "$IMG/raid10-md/member3.img" "$IMG/raid10-md/member0.img" \
+                     "$IMG/raid10-md/member2.img" "$IMG/raid10-md/member1.img" \
+         --out "$out" 2>/dev/null)
+  level=$(echo "$info" | awk '/^Level/{print $3}')
+  chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
+  src=$(echo "$info" | awk '/^Source/{print $3}')
+  if [ "$level" = raid10 ] && [ "$chunk" = 65536 ] && echo "$src" | grep -q mdraid; then
+    ok "RAID 10 near-2 geometry comes from the md 1.x superblocks"
+  else bad "RAID 10 md superblock wrong: level=$level chunk=$chunk src=$src"; fi
+  head -c "$(stat -c%s "$IMG/filled.img")" "$out" > "$WORK/raid10-md-trim.img"
+  if cmp -s "$WORK/raid10-md-trim.img" "$IMG/filled.img"; then
+    ok "assembled near-2 RAID 10 from md superblocks is byte-identical to the original"
+  else bad "RAID 10 md assembly does not match the original"; fi
+else skip "RAID 10 md superblock (no fixture)"; fi
+
 if [ -d "$IMG/raid" ]; then
   # A near-empty array is genuinely ambiguous: chunk N and N/2 map its start
   # identically. The engine must say so rather than assert a guess.

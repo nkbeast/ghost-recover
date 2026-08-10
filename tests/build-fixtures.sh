@@ -221,6 +221,101 @@ stripe0(f'{img}/filled.img', f'{img}/raid-filled')   # filled: determinable
 os.makedirs(f'{img}/raid5-filled', exist_ok=True)
 raid5(f'{img}/filled.img',   f'{img}/raid5-filled')
 PY
+
+  # Same arrays, but stamped with real Linux md superblocks (1.x and 0.90,
+  # field layouts from include/uapi/linux/raid/md_p.h) so the superblock
+  # parsers are exercised: geometry must come from the metadata, not from
+  # brute force. The superblock is appended, so the data offsets stay zero.
+  python3 - "$IMG" <<'PY'
+import sys, os, struct, random, shutil
+img = sys.argv[1]
+rnd = random.Random(0x900)
+C = 65536
+
+def sb1(member_size, level, layout, n, devs, role):
+    # superblock 1.0: sits in the last 4 KiB block, 8 KiB from the end.
+    S = member_size + 8192
+    sb = bytearray(4096)
+    def w32(off, v): sb[off:off+4] = struct.pack('<I', v & 0xffffffff)
+    def w64(off, v): sb[off:off+8] = struct.pack('<Q', v & 0xffffffffffffffff)
+    w32(0,  0xA92B4EFC)                      # md_magic
+    sb[4] = 1                                # major version 1 (1.0: sb at end)
+    sb[8:24] = os.urandom(16)                # set_uuid
+    w64(64, 1700000000)                      # ctime
+    w32(72, level)                           # level
+    w32(76, layout)                          # layout (raid10: near copies in low byte)
+    w64(80, member_size // 512)              # size in sectors
+    w32(88, C // 512)                        # chunk size in 512-byte units
+    w32(92, n)                               # raid_disks
+    w64(128, 0)                              # data_offset (0 for 1.0)
+    w64(136, member_size // 512)             # data_size
+    w64(144, (S - 8192) // 512)              # super_offset
+    w32(160, role)                           # this device's number
+    sb[168:184] = os.urandom(16)             # device_uuid
+    w64(192, 1700000000)                     # utime
+    w64(200, 100 + role)                     # events
+    w32(220, n)                              # max_dev
+    for i, d in enumerate(devs):             # dev_roles[]
+        sb[256 + 2*i:258 + 2*i] = struct.pack('<H', d)
+    return bytes(sb) + bytes(4096)
+
+def sb090(member_size, level, layout, n, role):
+    S = member_size + 65536
+    sb = bytearray(4096)
+    def w32(off, v): sb[off:off+4] = struct.pack('<I', v & 0xffffffff)
+    w32(0,  0xA92B4EFC)                      # md_magic
+    w32(4,  0)                               # major 0.90
+    w32(8,  90)                              # minor
+    w32(20, rnd.getrandbits(32))             # set_uuid0
+    w32(24, 1700000000)                      # ctime
+    w32(28, level)                           # level
+    w32(32, member_size // 512)              # size in sectors (usable size)
+    w32(40, n)                               # raid_disks
+    w32(52, rnd.getrandbits(32))             # set_uuid1
+    w32(56, rnd.getrandbits(32))             # set_uuid2
+    w32(60, rnd.getrandbits(32))             # set_uuid3
+    w32(256, layout)                         # md_layout
+    w32(260, C)                              # chunk_size in bytes
+    w32(3968, role)                          # this_disk.number
+    w32(3980, role)                          # this_disk.raid_disk
+    for i in range(n):                       # disks[] array
+        base = 512 + i * 128
+        w32(base, i)                         # number
+        w32(base + 12, i)                    # raid_disk
+    return bytes(sb) + bytes(65536 - 4096)
+
+def stamp(dirname, maker, *args):
+    for name in sorted(os.listdir(f'{img}/{dirname}')):
+        if not name.startswith('member'): continue
+        p = f'{img}/{dirname}/{name}'
+        data = open(p, 'rb').read()
+        role = int(name[len('member'):name.index('.')])
+        open(p, 'wb').write(data + maker(len(data), *args, role=role))
+
+# 1.x on the RAID 5 array, kept separate from the superblock-less fixture.
+shutil.copytree(f'{img}/raid5-filled', f'{img}/raid5-md')
+stamp('raid5-md', sb1, 5, 2, 4, [0, 1, 2, 3])
+
+# 0.90 on the RAID 0 array.
+shutil.copytree(f'{img}/raid-filled', f'{img}/raid0-md')
+stamp('raid0-md', sb090, 0, 0, 2)
+
+# near-2 RAID 10 (1.x) built from the filled image.
+def raid10_near2(src, outdir):
+    os.makedirs(outdir, exist_ok=True)
+    data = open(src, 'rb').read()
+    nC = (len(data) + C - 1) // C
+    mem = [bytearray(nC * C) for _ in range(4)]
+    for c in range(nC):
+        pair = (c % 2) * 2
+        ch = data[c*C:(c+1)*C].ljust(C, b'\x00')
+        mem[pair][(c // 2)*C:(c // 2 + 1)*C] = ch
+        mem[pair + 1][(c // 2)*C:(c // 2 + 1)*C] = ch
+    for i, m in enumerate(mem):
+        open(f'{outdir}/member{i}.img', 'wb').write(bytes(m))
+raid10_near2(f'{img}/filled.img', f'{img}/raid10-md')
+stamp('raid10-md', sb1, 10, 2, 4, [0, 1, 2, 3])
+PY
 fi
 
 echo "$OUT"
