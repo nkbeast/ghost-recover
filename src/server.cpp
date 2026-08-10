@@ -780,6 +780,7 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         g_handedOver = true;
+        g_handoverToken.clear();        // one-time: never honour a second claim
         if (!g_handoverFile.empty()) ::unlink(g_handoverFile.c_str());
         json::Writer w;
         w.beginObject().kv("ok", true).kv("message", "standing down").endObject();
