@@ -229,7 +229,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
         if (!fs.bitmap.empty()) {
             u64 free = 0;
-            for (u64 c = 2; c < (u64)fs.cluster_count + 2; c++) if (fs.clusterFree(c)) free++;
+            // Counting free clusters is diagnostic only; a corrupt bitmap can
+            // claim billions of clusters, so cap the walk.
+            u64 freeLimit = std::min((u64)fs.cluster_count + 2, (u64)1 << 26);
+            for (u64 c = 2; c < freeLimit; c++) if (fs.clusterFree(c)) free++;
             res.free_blocks = (i64)free;
         }
     }
@@ -286,6 +289,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             for (int s = 0; s < secondaryCount && p + 32 <= b.size(); s++, p += 32) {
                 u8 t = b.u8at(p);
                 u8 tb = t & 0x7F;
+                // Only 0xC0 (stream) and 0xC1 (name) are legal secondaries. A
+                // corrupt count would otherwise swallow whole following entry
+                // sets — stop at the first non-secondary entry instead.
+                if (tb != (kEntryStream & 0x7F) && tb != (kEntryName & 0x7F)) break;
                 if (tb == (kEntryStream & 0x7F)) {
                     streamFlags  = b.u8at(p + 1);
                     nameLen      = b.u8at(p + 3);
