@@ -7,9 +7,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
+#include <sstream>
 
+#include <dirent.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 namespace ghost {
@@ -462,8 +466,61 @@ bool writesBackOntoSource(const std::string& outputPath, const std::string& sour
 
     if (S_ISBLK(src.st_mode)) {
         // Recovering from a block device: refuse if the destination filesystem
-        // is mounted from that same device.
+        // is mounted from that same device, or from any partition of the same
+        // physical disk — imaging /dev/sdb must not write to a partition of
+        // /dev/sdb that happens to be mounted at the output location.
         if (out.st_dev == src.st_rdev) return true;
+
+        // Find the device name in /proc/partitions, then its whole-disk name
+        // via sysfs: a partition node lives at /sys/block/<disk>/<part> and
+        // carries a "partition" attribute.
+        std::string srcName;
+        {
+            std::ifstream parts("/proc/partitions");
+            std::string line;
+            while (std::getline(parts, line)) {
+                unsigned maj, min;
+                unsigned long long blk;
+                std::string name;
+                std::istringstream iss(line);
+                if (iss >> maj >> min >> blk >> name && ::makedev(maj, min) == src.st_rdev) {
+                    srcName = name;
+                    break;
+                }
+            }
+        }
+        if (srcName.empty()) return false;
+
+        std::string whole;
+        DIR* dir = ::opendir("/sys/block");
+        if (dir) {
+            struct dirent* e;
+            while ((e = ::readdir(dir)) != nullptr) {
+                std::string w = e->d_name;
+                if (w == "." || w == "..") continue;
+                if (w == srcName) { whole = w; break; }                       // whole disk itself
+                if (fileExists("/sys/block/" + w + "/" + srcName + "/partition")) {
+                    whole = w;                                                // a partition of w
+                    break;
+                }
+            }
+            ::closedir(dir);
+        }
+        if (whole.empty()) return false;
+
+        std::ifstream parts("/proc/partitions");
+        std::string line;
+        while (std::getline(parts, line)) {
+            unsigned maj, min;
+            unsigned long long blk;
+            std::string name;
+            std::istringstream iss(line);
+            if (!(iss >> maj >> min >> blk >> name)) continue;
+            bool onSourceDisk = (name == whole) || (name.size() > whole.size() &&
+                                 name.compare(0, whole.size(), whole) == 0 &&
+                                 fileExists("/sys/block/" + whole + "/" + name + "/partition"));
+            if (onSourceDisk && ::makedev(maj, min) == (dev_t)out.st_dev) return true;
+        }
         return false;
     }
     // Recovering from an image file: refuse only if the destination is that
