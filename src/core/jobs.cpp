@@ -59,13 +59,16 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
         }
         job->finished_ms = nowMs();
         {
+            // Result and state are decided under one lock so a concurrent
+            // cancel() can never observe a "running" job that already stored
+            // a terminal state (or vice versa).
             std::lock_guard<std::mutex> lk(job->mu);
             job->result_json = out;
             if (!err.empty()) job->error = err;
+            if (!err.empty())                   job->state = JobState::Failed;
+            else if (job->progress.cancelled()) job->state = JobState::Cancelled;
+            else                                job->state = JobState::Done;
         }
-        if (!err.empty())                     job->state = JobState::Failed;
-        else if (job->progress.cancelled())   job->state = JobState::Cancelled;
-        else                                  job->state = JobState::Done;
         job->progress.setPhase(jobStateName(job->state.load()));
     });
 
@@ -96,9 +99,13 @@ std::vector<std::shared_ptr<Job>> JobManager::list() const {
 
 bool JobManager::cancel(const std::string& id) {
     auto j = get(id);
-    if (!j || j->terminal()) return false;
-    j->progress.cancel();
-    j->progress.setPhase("cancelling");
+    if (!j) return false;
+    {
+        std::lock_guard<std::mutex> lk(j->mu);
+        if (j->terminal()) return false;
+        j->progress.cancel();
+        j->progress.setPhase("cancelling");
+    }
     return true;
 }
 
