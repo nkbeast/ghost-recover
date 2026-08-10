@@ -43,24 +43,6 @@ suites use &mdash; and some they don't:
 
 ---
 
-## ✨ Why it stands out
-
-| Capability | GHOST//RECOVER | PhotoRec / testdisk | ddrescue | Commercial suites |
-|---|---|---|---|---|
-| Filesystem metadata walk (25+ FS) | ✅ full paths + extents | ◐ partial | ❌ | ✅ |
-| Deleted-file recovery (journal mining, MFT slack) | ✅ | ◐ names only | ❌ | ✅ |
-| Carving with validation + dedup | ✅ 251 formats | ✅ (~500, blind) | ❌ | ◐ |
-| RAID 0/1/5/6/10 rebuild from data alone | ✅ + parity rebuild | ◐ | ❌ | ✅ |
-| Resumable bad-sector imaging | ✅ | ❌ | ✅ | ✅ |
-| Dry-run repair | ✅ | ✅ | ❌ | ✅ |
-| Web UI **+** CLI **+** HTTP API | ✅ (all three) | ❌ | ❌ | ◐ GUI only |
-| Honest "I can't decide" ambiguity reporting | ✅ | ❌ | ❌ | ❌ |
-| Open source (MIT) | ✅ | ✅ | ✅ | ❌ |
-
-No other open-source tool combines all of these. No commercial tool tells you when it *can't* decide.
-
----
-
 ## 🗺️ How it works
 
 <p align="center">
