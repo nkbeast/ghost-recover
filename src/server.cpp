@@ -655,12 +655,20 @@ int startServer(const ServerConfig& cfg) {
         std::string msg = "unhandled error";
         try { if (ep) std::rethrow_exception(ep); }
         catch (const std::exception& e) { msg = e.what(); }
-        catch (...) {}
+        catch (...) { msg = "unhandled non-std exception"; }
         res.status = 500;
         res.set_content(errorJson(msg), "application/json");
     });
 
     auto jsonBody = [](const httplib::Request& req) { return json::parse(req.body); };
+
+    // Malformed query parameters fall back to the supplied default instead of
+    // being swallowed by an empty catch.
+    auto paramInt = [](const httplib::Request& req, const char* name, i64 def) -> i64 {
+        const std::string& s = req.get_param_value(name);
+        if (s.empty()) return def;
+        try { return std::stoll(s); } catch (...) { return def; }
+    };
 
     // ---- meta --------------------------------------------------------------
     svr.Get("/api/health", [&](const httplib::Request&, httplib::Response& res) {
@@ -1149,8 +1157,8 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         i64 offset = 0, limit = 200;
-        try { offset = std::stoll(req.get_param_value("offset")); } catch (...) {}
-        try { limit = std::stoll(req.get_param_value("limit")); } catch (...) {}
+        offset = paramInt(req, "offset", offset);
+        limit  = paramInt(req, "limit", limit);
         if (offset < 0) offset = 0;                     // negative pages would read OOB
         if (limit < 1) limit = 1;
         if (limit > 5000) limit = 5000;
@@ -1203,8 +1211,7 @@ int startServer(const ServerConfig& cfg) {
     // Full detail for one file, including where its data physically lives.
     svr.Get("/api/fileinfo", [&](const httplib::Request& req, httplib::Response& res) {
         auto stored = ResultStore::instance().get(req.get_param_value("job"));
-        i64 index = -1;
-        try { index = std::stoll(req.get_param_value("index")); } catch (...) {}
+        i64 index = paramInt(req, "index", -1);
         if (!stored || index < 0 || index >= (i64)stored->files.size()) {
             res.status = 404;
             res.set_content(errorJson("no such file in that job"), "application/json");
@@ -1240,19 +1247,16 @@ int startServer(const ServerConfig& cfg) {
             res.set_content(errorJson("no results for that job"), "application/json");
             return;
         }
-        i64 index = -1;
-        try { index = std::stoll(req.get_param_value("index")); } catch (...) {}
+        i64 index = paramInt(req, "index", -1);
         if (index < 0 || index >= (i64)stored->files.size()) {
             res.status = 404;
             res.set_content(errorJson("index out of range"), "application/json");
             return;
         }
-        i64 maxBytes = 64 * 1024 * 1024;
+        i64 maxBytes = 64LL * 1024 * 1024;
         // A missing/negative "max" must not turn into an unbounded read.
-        try {
-            i64 m = std::stoll(req.get_param_value("max"));
-            if (m > 0) maxBytes = std::min<i64>(maxBytes, m);
-        } catch (...) {}
+        i64 m = paramInt(req, "max", 0);
+        if (m > 0) maxBytes = std::min<i64>(maxBytes, m);
 
         const RecoveredFile& f = stored->files[(size_t)index];
         std::string err;
@@ -1277,8 +1281,8 @@ int startServer(const ServerConfig& cfg) {
     // Hex view of a range, either of a stored file or of the raw device.
     svr.Get("/api/hex", [&](const httplib::Request& req, httplib::Response& res) {
         i64 offset = 0, length = 512;
-        try { offset = std::stoll(req.get_param_value("offset")); } catch (...) {}
-        try { length = std::stoll(req.get_param_value("length")); } catch (...) {}
+        offset = paramInt(req, "offset", offset);
+        length = paramInt(req, "length", length);
         if (offset < 0) offset = 0;             // negative offsets read out of bounds
         if (length < 16) length = 16;
         if (length > 65536) length = 65536;
@@ -1290,8 +1294,7 @@ int startServer(const ServerConfig& cfg) {
         std::string jobId = req.get_param_value("job");
         if (!jobId.empty()) {
             auto stored = ResultStore::instance().get(jobId);
-            i64 index = -1;
-            try { index = std::stoll(req.get_param_value("index")); } catch (...) {}
+            i64 index = paramInt(req, "index", -1);
             if (!stored || index < 0 || index >= (i64)stored->files.size()) {
                 res.status = 404;
                 res.set_content(errorJson("no such file in that job"), "application/json");
