@@ -40,7 +40,7 @@ Please include:
 ## Disclosing
 
 We prefer coordinated disclosure. After a fix is released, public write-ups
-are welcome — we will credit you unless you prefer to stay anonymous.
+are welcome — we will acknowledge you unless you prefer to stay anonymous.
 
 ## Safe-harbor
 
