@@ -95,60 +95,6 @@ struct Args {
     std::vector<std::string> raw;
 };
 
-int findBrowser(char* buf, size_t bufsize) {
-    static const char* kBrowsers[] = {"google-chrome", "google-chrome-stable", "chromium",
-                                      "chromium-browser", "brave-browser", "microsoft-edge",
-                                      "firefox", "xdg-open", nullptr};
-    // Search $PATH directly; calling `command -v` through a shell would hand
-    // user-controlled strings to /bin/sh for no benefit.
-    const char* pathEnv = getenv("PATH");
-    if (!pathEnv) return 0;
-    std::vector<std::string> dirs;
-    const char* p = pathEnv;
-    while (*p) {
-        const char* sep = strchr(p, ':');
-        dirs.push_back(sep ? std::string(p, (size_t)(sep - p)) : std::string(p));
-        if (!sep) break;
-        p = sep + 1;
-    }
-    for (int i = 0; kBrowsers[i]; i++) {
-        for (const auto& dir : dirs) {
-            std::string cand = dir + "/" + kBrowsers[i];
-            if (::access(cand.c_str(), X_OK) == 0) {
-                snprintf(buf, bufsize, "%s", cand.c_str());
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-void launchBrowser(const std::string& url) {
-    char browser[512];
-    if (!findBrowser(browser, sizeof(browser))) {
-        fprintf(stderr, "\n  No browser found — open %s manually.\n\n", url.c_str());
-        return;
-    }
-    pid_t pid = fork();
-    if (pid != 0) return;
-    setsid();
-    const char* base = strrchr(browser, '/');
-    base = base ? base + 1 : browser;
-    if (strstr(base, "chrom") || strstr(base, "brave") || strstr(base, "edge")) {
-        std::string appFlag = "--app=" + url;
-        execlp(browser, base, appFlag.c_str(), "--no-first-run", "--disable-extensions", nullptr);
-        execlp(browser, base, "--new-window", url.c_str(), nullptr);
-    } else if (strstr(base, "firefox")) {
-        execlp(browser, base, "--new-window", url.c_str(), nullptr);
-    } else {
-        execlp(browser, base, url.c_str(), nullptr);
-    }
-    _exit(127);
-}
-
-// ---------------------------------------------------------------------------
-// Headless commands
-// ---------------------------------------------------------------------------
 int cmdDisks(const Args&) {
     auto disks = detectDisks();
     if (disks.empty()) {
@@ -521,20 +467,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!args.has("--no-browser") && cfg.takeover_file.empty()) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            sleep(1);
-            launchBrowser("http://localhost:" + std::to_string(cfg.port));
-            _exit(0);
-        }
-        // Reap the helper so it does not linger as a zombie. This must be a
-        // real handler rather than SIG_IGN: SIG_IGN prevents waitpid() from
-        // ever succeeding, which would silently break the elevation handshake
-        // (spawnElevated waits on the child) later in the session.
-        struct sigaction sa{};
-        sa.sa_handler = [](int) {};
-        sa.sa_flags = SA_NOCLDSTOP | SA_RESTART;
-        ::sigaction(SIGCHLD, &sa, nullptr);
+        cfg.open_browser = true;
     }
 
     return ghost::startServer(cfg);

@@ -32,7 +32,9 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -422,6 +424,61 @@ bool sudoWorksWithoutPassword() {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// Browser launch (kept in the server so the page is only opened once the port
+// actually answers; the old code fired the browser one second after the
+// process started, which on a slow bind produced "localhost refused").
+// ---------------------------------------------------------------------------
+int findBrowser(char* buf, size_t bufsize) {
+    static const char* kBrowsers[] = {"google-chrome", "google-chrome-stable", "chromium",
+                                      "chromium-browser", "brave-browser", "microsoft-edge",
+                                      "firefox", "xdg-open", nullptr};
+    const char* pathEnv = getenv("PATH");
+    if (!pathEnv) return 0;
+    std::vector<std::string> dirs;
+    const char* p = pathEnv;
+    while (*p) {
+        const char* sep = strchr(p, ':');
+        dirs.push_back(sep ? std::string(p, (size_t)(sep - p)) : std::string(p));
+        if (!sep) break;
+        p = sep + 1;
+    }
+    for (int i = 0; kBrowsers[i]; i++) {
+        for (const auto& dir : dirs) {
+            std::string cand = dir + "/" + kBrowsers[i];
+            if (::access(cand.c_str(), X_OK) == 0) {
+                snprintf(buf, bufsize, "%s", cand.c_str());
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Best-effort: if no browser can be found the user is told to open the URL.
+void launchBrowser(const std::string& url) {
+    char browser[512];
+    if (!findBrowser(browser, sizeof(browser))) {
+        fprintf(stderr, "\n  No browser found — open %s manually.\n\n", url.c_str());
+        return;
+    }
+    pid_t pid = ::fork();
+    if (pid != 0) return;
+    ::setsid();
+    const char* base = strrchr(browser, '/');
+    base = base ? base + 1 : browser;
+    if (strstr(base, "chrom") || strstr(base, "brave") || strstr(base, "edge")) {
+        std::string appFlag = "--app=" + url;
+        ::execlp(browser, base, appFlag.c_str(), "--no-first-run", "--disable-extensions", nullptr);
+        ::execlp(browser, base, "--new-window", url.c_str(), nullptr);
+    } else if (strstr(base, "firefox")) {
+        ::execlp(browser, base, "--new-window", url.c_str(), nullptr);
+    } else {
+        ::execlp(browser, base, url.c_str(), nullptr);
+    }
+    ::_exit(127);
+}
+
 std::string selfExecutablePath() {
     char buf[4096] = {0};
     ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -711,6 +768,20 @@ int startServer(const ServerConfig& cfg) {
             w.beginObject().kv("ok", true).kv("already_root", true)
              .kv("message", "already running with full disk access").endObject();
             res.set_content(w.str(), "application/json");
+            return;
+        }
+        // One elevation at a time: a second request would spawn a second
+        // sudo/pkexec dialog and burn the one-time handover token, leaving
+        // the first child unable to claim the port.
+        if (g_elevation.pending.load() && !g_elevation.child_exited.load()) {
+            res.set_content(errorJson("an elevation is already in progress — finish or dismiss "
+                                      "the open authentication dialog first"),
+                            "application/json");
+            return;
+        }
+        if (g_handedOver.load()) {
+            res.set_content(errorJson("this session already handed its port over — reload the page"),
+                            "application/json");
             return;
         }
         ElevationMethods m = detectElevationMethods();
@@ -1687,6 +1758,7 @@ int startServer(const ServerConfig& cfg) {
     // If an unprivileged instance spawned us, tell it to stand down and take
     // over its port, so the browser session survives the switch.
     bool takingOver = false;
+    bool parentRejected = false;
     if (!cfg.takeover_file.empty()) {
         std::ifstream tf(cfg.takeover_file);
         std::string token;
@@ -1704,6 +1776,14 @@ int startServer(const ServerConfig& cfg) {
             if (r && r->status == 200) {
                 takingOver = true;
                 printf("taking over port %d from the unprivileged instance\n", cfg.port);
+            } else if (r && r->status == 403) {
+                // A live engine answered but rejected the token. It is not the
+                // parent that spawned us (that would have accepted), so binding
+                // alongside it would split every request between two engines.
+                // Refuse to start rather than serve half a page per round trip.
+                parentRejected = true;
+                fprintf(stderr, "ERROR: the engine on port %d refused the handover token\n",
+                        cfg.port);
             } else {
                 printf("no unprivileged instance answered on port %d; starting normally\n",
                        cfg.port);
@@ -1722,6 +1802,32 @@ int startServer(const ServerConfig& cfg) {
         printf("  note: not running as root — raw block devices will not be readable\n");
     fflush(stdout);
 
+    if (parentRejected) return 1;
+
+    // The page is only opened once the port actually accepts connections, so a
+    // slow bind — or a bind that never succeeds — never leaves the user staring
+    // at "localhost refused to connect".
+    if (cfg.open_browser) {
+        std::thread([port = cfg.port]() {
+            for (int i = 0; i < 40; i++) {
+                int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+                if (sock >= 0) {
+                    sockaddr_in sa{};
+                    sa.sin_family = AF_INET;
+                    sa.sin_port = htons((unsigned short)port);
+                    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                    if (::connect(sock, (sockaddr*)&sa, sizeof(sa)) == 0) {
+                        ::close(sock);
+                        launchBrowser("http://localhost:" + std::to_string(port));
+                        return;
+                    }
+                    ::close(sock);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }).detach();
+    }
+
     // When taking over, the previous instance needs a moment to close its
     // listening socket. SO_REUSEADDR lets us rebind over the old socket's
     // TIME_WAIT, so this almost always succeeds on the second attempt.
@@ -1732,6 +1838,12 @@ int startServer(const ServerConfig& cfg) {
     // stop() clears that latch (when the server is not running it just resets
     // the flag), which is what makes the retries real.
     const int attempts = takingOver ? 120 : 1;
+    // Let the old instance finish its 250ms response-flush and close its
+    // listening socket BEFORE we bind. Binding earlier would make, for
+    // example, a browser request during the switch land on the closing
+    // instance (connection reset) or, worse, split traffic between two
+    // engines that both think they own the port.
+    if (takingOver) std::this_thread::sleep_for(std::chrono::milliseconds(300));
     for (int i = 0; i < attempts; i++) {
         svr.stop();
         if (svr.listen(bind.c_str(), cfg.port)) {

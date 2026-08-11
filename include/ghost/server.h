@@ -12,6 +12,7 @@ struct ServerConfig {
     std::string output_root;                  // defaults to defaultOutputRoot()
     bool        allow_repair_writes = false;  // --allow-writes
     bool        allow_remote        = false;  // --listen 0.0.0.0
+    bool        open_browser        = true;   // --no-browser; never set with --takeover
 
     // Set on the elevated instance that a running unprivileged instance
     // spawned. It names a file holding a one-time token; the new instance
