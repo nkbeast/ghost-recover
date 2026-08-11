@@ -14,3 +14,5 @@ build-*/
 # Test fixtures (built by tests/build-fixtures.sh)
 /tmp/ghost-fixtures*/
 tests/fixtures/
+__pycache__/
+*.pyc
