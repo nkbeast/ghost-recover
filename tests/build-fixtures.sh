@@ -78,6 +78,13 @@ w(root + '/docs/script.sh', b'#!/bin/bash\necho "recovered"\nexit 0\n' + b'# pad
 shutil.copyfile('/bin/true', root + '/docs/true.elf')
 # Large enough to need several blocks and an indirect/extent chain.
 w(root + '/media/large.bin', bytes((i * 7 + 13) % 251 for i in range(600 * 1024)))
+# Compressible files: the btrfs fixture is patched so these are stored as
+# compressed extents (inline zlib/lzo/zstd, and a regular zlib extent).
+for name, ch in (('inline-a.txt', 'a'), ('inline-b.txt', 'b'), ('inline-c.txt', 'c')):
+    w(root + '/docs/' + name, (ch * 200).encode())
+w(root + '/media/compressible.bin',
+  b''.join(('GHOST//RECOVER compression fixture line %06d\n' % i).encode()
+           for i in range(5000)))
 print('corpus files:', sum(len(f) for _, _, f in os.walk(root)))
 PY
 
@@ -91,6 +98,13 @@ have genisoimage && genisoimage -quiet -J -R -V GHOSTISO -o "$IMG/iso9660.img" "
 if have mkfs.btrfs; then
   truncate -s 400M "$IMG/btrfs.img"
   mkfs.btrfs -q -f -L GHOSTBTRFS -r "$SRC" "$IMG/btrfs.img"
+  # Rewrite selected extents as compressed ones; byte-identical recovery then
+  # proves the codec paths (the raw bytes are gone once this runs).
+  if python3 - "$IMG/btrfs.img" "$SRC" < tests/btrfs_compress_fixture.py
+  then :; else
+    echo "btrfs compressed-fixture patching failed" >&2
+    exit 1
+  fi
 fi
 
 if have mkfs.vfat && have mcopy; then

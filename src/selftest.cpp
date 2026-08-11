@@ -164,6 +164,20 @@ static int runZlib() {
             fail++;
         }
     }
+
+    // Raw DEFLATE (the form Btrfs stores): compress2() emits a wrapped
+    // stream; strip the 2-byte header and 4-byte Adler-32 trailer.
+    if (clen < 6) {
+        printf("zlib: raw-deflate input too short\n");
+        fail++;
+    } else {
+        std::vector<unsigned char> out;
+        bool ok = rawDeflateAll(comp.data() + 2, clen - 6, out);
+        if (!ok || out.size() != plain.size() || memcmp(out.data(), plain.data(), plain.size()) != 0) {
+            printf("zlib: raw-deflate decode mismatch\n");
+            fail++;
+        }
+    }
 #endif
     printf("zlib: %d fail\n", fail);
     return fail;

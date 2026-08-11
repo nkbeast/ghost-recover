@@ -20,6 +20,9 @@ bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out);
 // zlib stream (btrfs zlib extents, squashfs-style zlib blocks).
 bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out);
 
+// Raw DEFLATE (no zlib wrapper), as Btrfs stores for zlib-compressed extents.
+bool rawDeflateAll(const u8* in, size_t inLen, std::vector<u8>& out);
+
 // Standard zstd frame (btrfs zstd extents). Empty result when the engine was
 // built without zstd support.
 std::vector<u8> zstdFrameDecode(const u8* in, size_t inLen);

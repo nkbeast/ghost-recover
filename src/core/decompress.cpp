@@ -25,10 +25,10 @@ namespace ghost {
 namespace {
 
 // zlib inflate of a whole stream. Returns false on failure.
-bool inflateAll(const u8* src, size_t srcLen, std::vector<u8>& out) {
+bool inflateAny(const u8* src, size_t srcLen, std::vector<u8>& out, bool raw) {
 #ifdef GHOST_HAVE_ZLIB
     z_stream zs{};
-    if (inflateInit(&zs) != Z_OK) return false;
+    if (inflateInit2(&zs, raw ? -MAX_WBITS : MAX_WBITS) != Z_OK) return false;
     zs.next_in = const_cast<Bytef*>(src);
     zs.avail_in = (uInt)srcLen;
     size_t base = out.size();
@@ -59,6 +59,11 @@ bool inflateAll(const u8* src, size_t srcLen, std::vector<u8>& out) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+bool rawDeflateAll(const u8* src, size_t srcLen, std::vector<u8>& out) {
+    return inflateAny(src, srcLen, out, /*raw=*/true);
+}
 
 // ---------------------------------------------------------------------------
 // LZO1X raw stream decoder. Instruction semantics follow lzo1x_d.ch; the
@@ -189,7 +194,7 @@ bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
 
 // ---------------------------------------------------------------------------
 bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
-    return inflateAll(in, inLen, out);
+    return inflateAny(in, inLen, out, /*raw=*/false);
 }
 
 // ---------------------------------------------------------------------------
@@ -264,8 +269,10 @@ std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
     std::vector<u8> out;
     if (codec == "btrfs-lzo") {
         if (!btrfsLzoDecode(data, len, out)) return {};
-    } else if (codec == "zlib-block" || codec == "btrfs-zlib") {
+    } else if (codec == "zlib-block") {
         if (!zlibStreamDecode(data, len, out)) return {};
+    } else if (codec == "btrfs-zlib") {
+        if (!rawDeflateAll(data, len, out)) return {};
     } else if (codec == "btrfs-zstd") {
         out = zstdFrameDecode(data, len);
         if (out.empty()) return {};
