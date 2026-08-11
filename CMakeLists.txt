@@ -11,6 +11,10 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")
 
+# Export compile_commands.json so language servers (e.g. clangd) and IDEs can
+# index the project with correct include paths and compiler flags.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # A Debug build turns on the sanitizers. This tool parses hostile on-disk
 # structures for a living, so being able to run the test suite under ASan/UBSan
 # is worth keeping wired up. The flags have to reach the link line too, or the
