@@ -433,7 +433,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         Pending cur = queue.back();
         queue.pop_back();
         if (!visited.insert(cur.dirOffset).second) continue;
-        auto dirBuf = disk.readBlock(cur.dirOffset, std::min<i64>(cur.dirSize, 16 * 1024 * 1024));
+        auto dirBuf = disk.readBlock(cur.dirOffset, std::min<i64>(cur.dirSize, 16LL * 1024 * 1024));
         Bytes db(dirBuf);
         size_t p = 0;
         while (p + 12 <= db.size()) {
@@ -467,7 +467,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 auto tbl = disk.readBlock(in.offset, (i64)nblocks * 4);
                 Bytes tb(tbl);
                 u32 start = in.offset + nblocks * 4;
-                for (u32 k = 0; k < nblocks && tb.has(k * 4, 4); k++) {
+                for (u32 k = 0; k < nblocks && tb.has((size_t)k * 4, 4); k++) {
                     u32 end = tb.le32(k * 4);
                     if (end <= start) break;
                     if ((i64)start < volume) f.extents.push_back(Extent(start, end - start));
@@ -679,7 +679,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     }
 
     auto zonesToExtents = [&](const MInode& in, std::vector<Extent>& out) {
-        int direct = (version == 2) ? 7 : 7;
+        const int direct = 7;   // both Minix v1 and v2 use seven direct zones
         for (int z = 0; z < direct && z < (int)in.zones.size(); z++) {
             u32 zn = in.zones[z];
             if (!zn) { out.push_back(Extent(0, kBlock, true)); continue; }
@@ -695,7 +695,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             Bytes bb(blk);
             u32 per = (version == 2) ? kBlock / 4 : kBlock / 2;
             for (u32 i = 0; i < per; i++) {
-                u32 zn = (version == 2) ? bb.le32(i * 4) : bb.le16(i * 2);
+                u32 zn = (version == 2) ? bb.le32((size_t)i * 4) : bb.le16((size_t)i * 2);
                 if (!zn) continue;
                 i64 off = (i64)zn * kBlock;
                 if (off < 0 || off >= volume) continue;
@@ -730,7 +730,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 parents[child] = ino;
             }
             budget += e.length;
-            if (budget > 8 * 1024 * 1024) break;
+            if (budget > 8LL * 1024 * 1024) break;
         }
     }
     res.technique("directory_walk");
@@ -811,7 +811,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     std::unordered_map<u32, Node> inodes;
 
     prog.setPhase("scanning JFFS2 nodes");
-    const i64 chunkSize = 4 * 1024 * 1024;
+    const i64 chunkSize = 4LL * 1024 * 1024;
     i64 limit = volume;
     if (opt.max_scan_bytes > 0) limit = std::min(limit, opt.max_scan_bytes);
     prog.set(0, limit);
@@ -1082,7 +1082,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         blocksToExtents(in, ex);
         for (const auto& e : ex) {
             if (e.sparse) continue;
-            auto buf = disk.readBlock((u64)e.offset, std::min<i64>(e.length, 256 * 1024));
+            auto buf = disk.readBlock((u64)e.offset, std::min<i64>(e.length, 256LL * 1024));
             Bytes db(buf);
             size_t p = 0;
             while (p + 8 <= db.size()) {
@@ -1199,7 +1199,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     i64 leaves = 0;
 
     for (i64 off = 0; off + blockSize <= limit && !prog.cancelled(); off += blockSize) {
-        if ((off % (64 * 1024 * 1024)) == 0) prog.set(off, limit);
+        if ((off % (64LL * 1024 * 1024)) == 0) prog.set(off, limit);
         auto raw = disk.readBlock((u64)off, blockSize);
         if ((i64)raw.size() < blockSize) break;
         Bytes b(raw);
@@ -1396,7 +1396,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     if (opt.max_scan_bytes > 0) limit = std::min(limit, opt.max_scan_bytes);
     prog.set(0, limit);
 
-    const i64 chunkSize = 4 * 1024 * 1024;
+    const i64 chunkSize = 4LL * 1024 * 1024;
     i64 found = 0;
     for (i64 base = 0; base < limit && !prog.cancelled(); base += chunkSize) {
         prog.set(base, limit);
@@ -1488,7 +1488,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     i64 validLabels = 0;
     u64 bestTxg = 0;
-    std::string poolName, poolGuid;
+    std::string poolName;
     for (u64 lbl : labelOffsets) {
         if ((i64)lbl + 0x4000 > volume) continue;
         // The name/value pair list sits at label+16 KiB and is XDR-encoded; the
