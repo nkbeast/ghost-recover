@@ -448,14 +448,21 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             Bytes b(backup);
             fs.sector_size = b.le16(0x0B);
             u8 spc = b.u8at(0x0D);
-            u32 spcv = (spc > 0x80) ? (1u << (0x100 - spc)) : spc;
+            // A negative exponent encodes a power of two; clamp the shift so a
+            // hostile byte cannot shift a 1u past its width (UB), mirroring the
+            // primary boot sector parsing in readBoot().
+            u32 spcv = (spc > 0x80) ? (1u << std::min<unsigned>(31, 0x100u - (u32)spc)) : spc;
             if (fs.sector_size >= 256 && spcv > 0 && spcv <= 256) {
                 fs.cluster_size = fs.sector_size * spcv;
                 fs.total_sectors = b.le64(0x28);
                 fs.mft_lcn = b.le64(0x30);
                 fs.mftmirr_lcn = b.le64(0x38);
                 i8 cpr = (i8)b.u8at(0x40);
-                fs.record_size = (cpr < 0) ? (1u << (u32)(-cpr)) : (u32)cpr * fs.cluster_size;
+                // (1u << 0x80) would be UB; derive the magnitude without
+                // negating the most negative i8 and clamp the shift to 31 bits.
+                u32 cprShift = (u32)(-1 - cpr) + 1u;
+                fs.record_size = (cpr < 0) ? (1u << std::min<unsigned>(31, cprShift))
+                                           : (u32)cpr * fs.cluster_size;
                 if (fs.record_size < 256 || fs.record_size > 65536) fs.record_size = 1024;
                 fs.serial = toHex(backup.data() + 0x48, 8);
                 res.technique("backup_boot_sector_recovery");

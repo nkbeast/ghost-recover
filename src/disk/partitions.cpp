@@ -696,7 +696,11 @@ std::vector<Extent> ntfsFree(DiskReader& disk, Progress& prog) {
     u32 clusterSize = bps * spc;
     u64 mftLcn = b.le64(0x30);
     i8 cpr = (i8)b.u8at(0x40);
-    u32 recSize = (cpr < 0) ? (1u << (u32)(-cpr)) : (u32)cpr * clusterSize;
+    // (1u << 0x80) would be UB; derive the magnitude without negating the
+    // most negative i8 and clamp the shift to 31 bits, matching the NTFS
+    // boot sector parsing in the filesystem drivers.
+    u32 cprShift = (u32)(-1 - cpr) + 1u;
+    u32 recSize = (cpr < 0) ? (1u << std::min<unsigned>(31, cprShift)) : (u32)cpr * clusterSize;
     if (recSize < 256 || recSize > 65536) recSize = 1024;
 
     // Read $Bitmap's record directly; it lives 6 records into the MFT.
