@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Platform-Linux-green" alt="Linux"/>
   <a href="https://github.com/nkbeast/ghost-recover/stargazers"><img src="https://img.shields.io/github/stars/nkbeast/ghost-recover?style=social" alt="Stars"/></a>
   <a href="https://github.com/nkbeast/ghost-recover/forks"><img src="https://img.shields.io/github/forks/nkbeast/ghost-recover?style=social" alt="Forks"/></a>
-  <img src="https://img.shields.io/badge/tests-52%2F52%20passing-success" alt="52/52 tests"/>
+  <img src="https://img.shields.io/badge/tests-61%2F61%20passing-success" alt="61/61 tests"/>
 </p>
 
 ---
@@ -216,11 +216,11 @@ the host.
 ## 🧪 Testing
 
 ```sh
-./tests/verify.sh        # end-to-end fixtures: 58 automated checks
+./tests/verify.sh        # end-to-end fixtures: 61 automated checks
 ./tests/verify.sh /tmp/ghost-fixtures   # reuse a previously built fixture set
 ```
 
-**58 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
+**61 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
 SquashFS/cramfs/MINIX filesystems from a known corpus (no mounting, no root), deletes files from
 some of them, then checks that the engine identifies each filesystem, finds the deleted files, and
 writes every recovered file back out **byte-for-byte identical** to the original — verified by
