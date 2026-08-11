@@ -216,10 +216,11 @@ the host.
 ## 🧪 Testing
 
 ```sh
-./tests/verify.sh
+./tests/verify.sh        # end-to-end fixtures: 58 automated checks
+./tests/verify.sh /tmp/ghost-fixtures   # reuse a previously built fixture set
 ```
 
-**52 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
+**58 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
 SquashFS/cramfs/MINIX filesystems from a known corpus (no mounting, no root), deletes files from
 some of them, then checks that the engine identifies each filesystem, finds the deleted files, and
 writes every recovered file back out **byte-for-byte identical** to the original — verified by
@@ -229,6 +230,13 @@ Also covered: MBR logical partitions, partition recovery after wiping both GPT c
 geometry recovery from data alone, parity rebuild of a destroyed member, superblock repair (dry
 run vs. apply), bad-sector imaging, the refusal to write onto the source disk, and corrupt /
 truncated / random images handled without crashing or being misidentified.
+
+Static analysis runs in CI-style fashion via clang-tidy with the `bugprone*`,
+`clang-analyzer*` and `misc-const-correctness` groups:
+
+```sh
+run-clang-tidy -p build src/
+```
 
 The suite also runs under **ASan/UBSan** — this tool parses hostile on-disk structures for a
 living, so memory safety is tested, not assumed.
