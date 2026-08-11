@@ -143,6 +143,12 @@ fi
 have mkfs.exfat && { truncate -s 64M "$IMG/exfat.img"; mkfs.exfat -n GHOSTEXFAT "$IMG/exfat.img" >/dev/null 2>&1; }
 have mkfs.minix && { truncate -s 20M "$IMG/minix.img"; mkfs.minix -3 "$IMG/minix.img" >/dev/null 2>&1; }
 
+if have mkfs.jffs2; then
+  # Read-only population; every data node is zlib-compressed by default, so
+  # byte-identical recovery exercises the JFFS2 walker and zlib decode.
+  mkfs.jffs2 -q -l -r "$SRC" -o "$IMG/jffs2.img" --eraseblock=64KiB
+fi
+
 # Deleted-file fixtures: unlink without mounting.
 if [ -f "$IMG/ext4.img" ] && have debugfs; then
   cp "$IMG/ext4.img" "$IMG/ext4-deleted.img"

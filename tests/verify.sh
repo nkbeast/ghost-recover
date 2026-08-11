@@ -50,7 +50,7 @@ head2 "Filesystem identification"
 declare -A EXPECT=(
   [ext4]=ext4 [ext2]=ext2 [ntfs]=ntfs [fat32]=fat32 [exfat]=exfat
   [btrfs]=btrfs [xfs]=xfs [iso9660]=iso9660 [squashfs]=squashfs [minix]=minix
-  [cramfs]=cramfs
+  [cramfs]=cramfs [jffs2]=jffs2
 )
 for fs in "${!EXPECT[@]}"; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
@@ -61,7 +61,7 @@ done
 
 # --------------------------------------------------------------- extraction
 head2 "Recovery is byte-for-byte identical to the originals"
-for fs in ext4 ext2 ntfs fat32 btrfs xfs iso9660 squashfs cramfs udf; do
+for fs in ext4 ext2 ntfs fat32 btrfs xfs iso9660 squashfs cramfs udf jffs2; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
   out="$WORK/out-$fs"
   # The UDF fixture is a hybrid image that is also ISO 9660; name the driver.
