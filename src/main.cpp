@@ -99,19 +99,26 @@ int findBrowser(char* buf, size_t bufsize) {
     static const char* kBrowsers[] = {"google-chrome", "google-chrome-stable", "chromium",
                                       "chromium-browser", "brave-browser", "microsoft-edge",
                                       "firefox", "xdg-open", nullptr};
+    // Search $PATH directly; calling `command -v` through a shell would hand
+    // user-controlled strings to /bin/sh for no benefit.
+    const char* pathEnv = getenv("PATH");
+    if (!pathEnv) return 0;
+    std::vector<std::string> dirs;
+    const char* p = pathEnv;
+    while (*p) {
+        const char* sep = strchr(p, ':');
+        dirs.push_back(sep ? std::string(p, (size_t)(sep - p)) : std::string(p));
+        if (!sep) break;
+        p = sep + 1;
+    }
     for (int i = 0; kBrowsers[i]; i++) {
-        std::string cmd = std::string("command -v ") + kBrowsers[i] + " 2>/dev/null";
-        FILE* fp = popen(cmd.c_str(), "r");
-        if (!fp) continue;
-        char path[512] = {0};
-        bool got = fgets(path, sizeof(path), fp) != nullptr;
-        pclose(fp);
-        if (!got) continue;
-        size_t len = strlen(path);
-        while (len && (path[len - 1] == '\n' || path[len - 1] == '\r')) path[--len] = 0;
-        if (!len) continue;
-        snprintf(buf, bufsize, "%s", path);
-        return 1;
+        for (const auto& dir : dirs) {
+            std::string cand = dir + "/" + kBrowsers[i];
+            if (::access(cand.c_str(), X_OK) == 0) {
+                snprintf(buf, bufsize, "%s", cand.c_str());
+                return 1;
+            }
+        }
     }
     return 0;
 }
