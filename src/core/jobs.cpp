@@ -26,7 +26,7 @@ JobManager& JobManager::instance() {
 JobManager::~JobManager() { shutdown(); }
 
 void JobManager::shutdown() {
-    std::lock_guard<std::mutex> lk(mu_);
+    const std::lock_guard<std::mutex> lk(mu_);
     stopping_ = true;
     for (auto& [id, j] : jobs_) j->progress.cancel();
 }
@@ -62,7 +62,7 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
             // Result and state are decided under one lock so a concurrent
             // cancel() can never observe a "running" job that already stored
             // a terminal state (or vice versa).
-            std::lock_guard<std::mutex> lk(job->mu);
+            const std::lock_guard<std::mutex> lk(job->mu);
             job->result_json = out;
             if (!err.empty()) job->error = err;
             if (!err.empty())                   job->state = JobState::Failed;
@@ -80,13 +80,13 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
 }
 
 std::shared_ptr<Job> JobManager::get(const std::string& id) const {
-    std::lock_guard<std::mutex> lk(mu_);
+    const std::lock_guard<std::mutex> lk(mu_);
     auto it = jobs_.find(id);
     return it == jobs_.end() ? nullptr : it->second;
 }
 
 std::vector<std::shared_ptr<Job>> JobManager::list() const {
-    std::lock_guard<std::mutex> lk(mu_);
+    const std::lock_guard<std::mutex> lk(mu_);
     std::vector<std::shared_ptr<Job>> out;
     out.reserve(jobs_.size());
     for (const auto& [id, j] : jobs_) out.push_back(j);
@@ -110,15 +110,15 @@ bool JobManager::cancel(const std::string& id) {
 }
 
 void JobManager::prune(i64 maxAgeMs, size_t keep) {
-    std::lock_guard<std::mutex> lk(mu_);
-    i64 now = nowMs();
+    const std::lock_guard<std::mutex> lk(mu_);
+    const i64 now = nowMs();
     std::vector<std::pair<i64, std::string>> terminal;
     for (const auto& [id, j] : jobs_)
         if (j->terminal()) terminal.emplace_back(j->finished_ms, id);
     std::sort(terminal.begin(), terminal.end());
     for (size_t i = 0; i < terminal.size(); i++) {
-        bool tooOld  = (now - terminal[i].first) > maxAgeMs;
-        bool tooMany = (terminal.size() - i) > keep;
+        const bool tooOld  = (now - terminal[i].first) > maxAgeMs;
+        const bool tooMany = (terminal.size() - i) > keep;
         if (tooOld || tooMany) jobs_.erase(terminal[i].second);
     }
 }
