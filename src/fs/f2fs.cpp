@@ -125,7 +125,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     std::unordered_map<u32, Node> inodes;   // ino -> newest node seen
     std::unordered_map<u32, std::vector<u32>> directNodes;   // nid -> addresses
 
-    const i64 chunkSize = 4 * 1024 * 1024;
+    const i64 chunkSize = 4LL * 1024 * 1024;
     std::vector<u8> chunk;
     i64 nodeBlocks = 0;
 

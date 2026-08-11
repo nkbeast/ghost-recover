@@ -199,7 +199,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if (!visited.insert(cur.lba).second) continue;
         i64 off = (i64)cur.lba * kSector;
         if (off < 0 || off >= volume) continue;
-        i64 want = std::min<i64>(cur.size, 32 * 1024 * 1024);
+        i64 want = std::min<i64>(cur.size, 32LL * 1024 * 1024);
         auto buf = disk.readBlock((u64)off, want);
         if (buf.empty()) continue;
         Bytes b(buf);
@@ -315,8 +315,6 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 // ===========================================================================
 namespace udf {
 namespace {
-
-constexpr u32 kSector = 2048;
 
 struct Tag {
     u16 id = 0;
@@ -556,7 +554,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         // Concatenate the directory's extents and walk the FIDs.
         std::vector<u8> buf;
         for (const auto& e : dir.extents) {
-            auto part = disk.readBlock((u64)e.offset, std::min<i64>(e.length, 16 * 1024 * 1024));
+            auto part = disk.readBlock((u64)e.offset, std::min<i64>(e.length, 16LL * 1024 * 1024));
             buf.insert(buf.end(), part.begin(), part.end());
             if (buf.size() > 32u * 1024 * 1024) break;
         }

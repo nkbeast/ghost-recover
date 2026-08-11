@@ -511,7 +511,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 auto ex = forkExtents(n);
                 i64 budget = 0;
                 for (const auto& e : ex) {
-                    for (i64 o = 0; o < e.length && budget < 32 * 1024 * 1024;
+                    for (i64 o = 0; o < e.length && budget < 32LL * 1024 * 1024;
                          o += fs.sb.blocksize, budget += fs.sb.blocksize) {
                         auto blk = disk.readBlock((u64)(e.offset + o), fs.sb.blocksize);
                         if (blk.size() < 16) break;
