@@ -92,7 +92,7 @@ bool probeMdSuperblock(const std::string& path, RaidMember& member, RaidLayout& 
     i64 candidates[3];
     candidates[0] = 4096;
     candidates[1] = 0;
-    candidates[2] = ((size - 8 * 1024) & ~(i64)0xFFF);
+    candidates[2] = ((size - 8LL * 1024) & ~(i64)0xFFF);
 
     for (int i = 0; i < 3; i++) {
         i64 off = candidates[i];
@@ -417,7 +417,7 @@ i64 scoreByContent(const RaidLayout& layout, Progress& prog) {
     std::string err;
     if (!rr.open(&err)) return -1;
 
-    const i64 prefix = std::min<i64>(rr.size(), 24 * 1024 * 1024);
+    const i64 prefix = std::min<i64>(rr.size(), 24LL * 1024 * 1024);
     if (prefix <= 0) return -1;
 
     char tmpl[] = "/tmp/ghost-raid-probe-XXXXXX";
@@ -426,7 +426,7 @@ i64 scoreByContent(const RaidLayout& layout, Progress& prog) {
     std::string tmpPath = tmpl;
 
     {
-        const i64 kChunk = 4 * 1024 * 1024;
+        const i64 kChunk = 4LL * 1024 * 1024;
         std::vector<u8> buf((size_t)kChunk);
         i64 done = 0;
         while (done < prefix) {
@@ -758,7 +758,7 @@ RaidLayout detectRaidLayout(const std::vector<std::string>& memberPaths, Progres
             }
             // Below this much end-to-end verified content the ranking is noise
             // rather than evidence, so the structural priors decide instead.
-            const i64 kMeaningful = 256 * 1024;
+            const i64 kMeaningful = 256LL * 1024;
             if (bestContent < kMeaningful) {
                 chosen = candidates.front();
                 chosen.confidence = 0.35;
@@ -845,7 +845,7 @@ RaidBuildResult assembleRaid(const RaidLayout& layout, const std::string& outPat
     prog.setPhase("assembling RAID array");
     prog.set(0, total);
 
-    const i64 kChunk = 8 * 1024 * 1024;
+    const i64 kChunk = 8LL * 1024 * 1024;
     std::vector<u8> buf((size_t)kChunk);
     i64 written = 0;
     while (written < total && !prog.cancelled()) {
