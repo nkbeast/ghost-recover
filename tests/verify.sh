@@ -37,7 +37,7 @@ head2() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # ---------------------------------------------------------------- codec selftest
 head2 "Codec selftest (embedded vectors)"
-if "$BIN" selftest >/dev/null 2>&1; then ok "lzo1x/lznt1/btrfs-lzo/zlib/zstd vectors decode"
+if "$BIN" selftest >/dev/null 2>&1; then ok "lzo1x/lznt1/xpress/btrfs-lzo/zlib/zstd vectors decode"
 else bad "selftest failed: $("$BIN" selftest 2>&1 | tr '\n' ' ')"; fi
 
 # Reference hashes, keyed by basename (layouts differ per filesystem).

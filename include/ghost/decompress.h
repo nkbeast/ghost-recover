@@ -31,6 +31,19 @@ std::vector<u8> zstdFrameDecode(const u8* in, size_t inLen);
 // each with a 0x3000 (raw) or 0xB000 (compressed) header.
 bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out);
 
+// XPRESS plain LZ77 (MS-XCA 2.1.1): 32-bit flag groups (bit 31 first), LE16
+// match words ((off-1) << 3) | (len-3), shared-nibble length bytes, optional
+// 0xff/u16/u32 length extension. Decodes until the padded end-of-data marker.
+bool xpressPlainDecode(const u8* in, size_t inLen, std::vector<u8>& out);
+
+// XPRESS LZ77+Huffman (MS-XCA 2.1.2/2.1.4): 512-byte canonical-code table,
+// then a bit stream of LE16 words (MSB first, 32-bit register, refill at
+// < 15 bits), with any nibble-15 length extensions written raw after the bit
+// region. `expectedOut` is required: the EOF symbol (256) is only emitted
+// once the block is complete, so the decoder needs the uncompressed length.
+bool xpressHuffmanDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                         size_t expectedOut);
+
 // Dispatches one independently compressed block on its codec id. `expectedOut`
 // (when > 0) truncates the result to that length. Empty vector on failure.
 std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
