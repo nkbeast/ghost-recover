@@ -98,7 +98,7 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
         for (const auto& e : f.extents) budget += e.length;
     }
     if (budget <= 0) return out;
-    out.reserve((size_t)std::min<i64>(budget, 64 * 1024 * 1024));
+    out.reserve((size_t)std::min<i64>(budget, 64LL * 1024 * 1024));
 
     for (size_t ei = 0; ei < f.extents.size(); ei++) {
         const Extent& e = f.extents[ei];
@@ -262,7 +262,7 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                     const std::vector<u8>* payload = &chunk;
 #ifdef GHOST_HAVE_ZLIB
                     if (f.codec == "zlib-block") {
-                        if (!inflateInto(chunk.data(), chunk.size(), decoded)) { pos = take; break; }
+                        if (!inflateInto(chunk.data(), chunk.size(), decoded)) break;
                         payload = &decoded;
                         pos = take;   // one extent == one independently coded block
                     }
@@ -274,7 +274,6 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                                                   payload->size() - start);
                             emit(payload->data() + start, len);
                         }
-                        pos = take;
                         break;
                     }
                     emit(payload->data(), payload->size());
