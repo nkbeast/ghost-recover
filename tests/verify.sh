@@ -35,6 +35,11 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 skip() { printf '  \033[90mSKIP\033[0m  %s\n' "$1"; SKIP=$((SKIP+1)); }
 head2() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
+# ---------------------------------------------------------------- codec selftest
+head2 "Codec selftest (embedded vectors)"
+if "$BIN" selftest >/dev/null 2>&1; then ok "lzo1x/lznt1/btrfs-lzo/zlib/zstd vectors decode"
+else bad "selftest failed: $("$BIN" selftest 2>&1 | tr '\n' ' ')"; fi
+
 # Reference hashes, keyed by basename (layouts differ per filesystem).
 ( cd "$SRC" && find . -type f -exec md5sum {} \; ) \
   | awk '{n=$2; sub(/.*\//,"",n); print $1, n}' | sort > "$WORK/expected.md5"
@@ -418,8 +423,15 @@ if command -v curl >/dev/null; then
   done
   [ "$gone" = yes ] && ok "engine stops and releases the port" \
                     || bad "engine still answers after /api/shutdown"
-  kill -0 "$SRV" 2>/dev/null && bad "engine process survived shutdown" \
-                             || ok "engine process exited"
+  # The stop is deliberately delayed ~250 ms past the HTTP reply; give the
+  # process time to finish its cleanup before asserting it has exited.
+  exited=no
+  for _ in $(seq 1 50); do
+    kill -0 "$SRV" 2>/dev/null || { exited=yes; break; }
+    sleep 0.1
+  done
+  [ "$exited" = yes ] && ok "engine process exited" \
+                       || bad "engine process survived shutdown"
   wait "$SRV" 2>/dev/null
   # Restarting while another engine already owns the port must not fail: the
   # second instance recognises the running engine and reconnects to it.

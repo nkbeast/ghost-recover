@@ -128,8 +128,14 @@ struct RecoveredFile {
 
     // Non-empty when the extents hold compressed blocks that the extractor must
     // decode. Each extent is then one independently compressed block.
-    // Values: "" (raw) | "zlib-block" | "lzma-block"
+    // Values: "" (raw) | "zlib-block" | "lzma-block" | "btrfs-zlib" |
+    //          "btrfs-lzo" | "btrfs-zstd" | "lznt1"
     std::string codec;
+
+    // Parallel to `extents`, only for codecs whose decompressed size differs
+    // from the on-disk extent length (btrfs compressed extents, NTFS LZNT1
+    // units). Empty = decompressed size equals the extent length.
+    std::vector<i64> decomp_sizes;
 
     // SquashFS-style tail packing: the final extent is a block shared with other
     // files, and only [fragment_offset, fragment_offset + fragment_length) of it

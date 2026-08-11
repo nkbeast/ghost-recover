@@ -10,6 +10,7 @@
 // and it also survives a corrupted root tree.
 #include "ghost/fs.h"
 
+#include "ghost/decompress.h"
 #include "ghost/util.h"
 
 #include <algorithm>
@@ -220,6 +221,16 @@ FileKind kindOf(u32 mode) {
     }
 }
 
+// Btrfs compression algorithm ids: 1 = zlib, 2 = lzo, 3 = zstd.
+const char* codecOf(u8 compression) {
+    switch (compression) {
+        case 1: return "btrfs-zlib";
+        case 2: return "btrfs-lzo";
+        case 3: return "btrfs-zstd";
+        default: return nullptr;
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -261,6 +272,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         std::string name;
         u64 parent = 0;
         std::vector<Extent> extents;
+        std::vector<i64> decompSizes;   // parallel to extents for compressed files
+        std::string codec;
         std::vector<u8> inlineData;
         u64 bestGeneration = 0;
         bool haveInode = false;
@@ -371,18 +384,50 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         auto& n = inodes[objectid];
                         if (extType == 0) {                 // inline
                             u8 compression = b.u8at(dp + 16);
-                            if (compression == 0 && dataLen > 21) {
-                                size_t len = dataLen - 21;
-                                if (b.has(dp + 21, len) && n.inlineData.empty())
-                                    n.inlineData.assign(b.p + dp + 21, b.p + dp + 21 + len);
+                            u64 ramBytes = b.le64(dp + 8);
+                            size_t len = dataLen > 21 ? dataLen - 21 : 0;
+                            if (b.has(dp + 21, len) && n.inlineData.empty()) {
+                                std::vector<u8> blob(b.p + dp + 21, b.p + dp + 21 + len);
+                                if (compression == 0) {
+                                    n.inlineData = std::move(blob);
+                                } else {
+                                    const char* codec = codecOf(compression);
+                                    if (codec) {
+                                        n.inlineData = decompressBlock(
+                                            codec, blob.data(), blob.size(),
+                                            (i64)ramBytes > 0 ? (i64)ramBytes : 0);
+                                    }
+                                }
                             }
                             break;
                         }
                         if (!b.has(dp + 21, 32)) break;
-                        u64 diskBytenr = b.le64(dp + 21);
+                        u8 compression = b.u8at(dp + 16);
+                        u64 diskBytenr  = b.le64(dp + 21);
+                        u64 diskNumBytes = b.le64(dp + 29);
                         u64 extOffset  = b.le64(dp + 37);
                         u64 numBytes   = b.le64(dp + 45);
                         if (diskBytenr == 0 || numBytes == 0) break;   // hole
+                        if (compression != 0) {
+                            // Compressed extent: the on-disk blob (diskNumBytes
+                            // bytes) decompresses to numBytes. Decompression
+                            // happens at extract time so huge extents are not
+                            // inflated during the scan.
+                            i64 phys = fs.toPhysical(diskBytenr);
+                            if (phys < 0 || phys >= fs.volume) break;
+                            const char* codec = codecOf(compression);
+                            if (!codec) break;
+                            if (n.codec.empty()) n.codec = codec;
+                            else if (n.codec != codec) { n.codec.clear(); n.decompSizes.clear(); break; }
+                            bool dup = false;
+                            for (const auto& e : n.extents)
+                                if (e.offset == phys && e.length == (i64)diskNumBytes) { dup = true; break; }
+                            if (!dup) {
+                                n.extents.push_back(Extent(phys, (i64)diskNumBytes));
+                                n.decompSizes.push_back((i64)numBytes);
+                            }
+                            break;
+                        }
                         i64 phys = fs.toPhysical(diskBytenr + extOffset);
                         if (phys < 0 || phys >= fs.volume) break;
                         // Deduplicate: CoW means the same extent shows up in
@@ -451,9 +496,27 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             f.resident = n.inlineData;
             f.method = "inline_extent";
         } else {
-            std::sort(n.extents.begin(), n.extents.end(),
-                      [](const Extent& a, const Extent& b2) { return a.offset < b2.offset; });
+            // Sort by disk offset; keep the parallel decompression sizes in
+            // step with their extents.
+            std::vector<std::pair<Extent, i64>> zipped;
+            zipped.reserve(n.extents.size());
+            for (size_t i = 0; i < n.extents.size(); i++)
+                zipped.push_back({n.extents[i],
+                                  i < n.decompSizes.size() ? n.decompSizes[i] : 0});
+            std::sort(zipped.begin(), zipped.end(),
+                      [](const auto& a, const auto& b2) { return a.first.offset < b2.first.offset; });
+            n.extents.clear();
+            n.decompSizes.clear();
+            for (auto& z : zipped) {
+                n.extents.push_back(z.first);
+                n.decompSizes.push_back(z.second);
+            }
             f.extents = n.extents;
+            if (!n.codec.empty()) {
+                f.codec = n.codec;
+                f.is_compressed = true;
+                f.decomp_sizes = n.decompSizes;
+            }
             f.method = n.stale ? "cow_stale_leaf_recovery" : "extent_data_items";
         }
         finalizeFile(f, fs.volume);

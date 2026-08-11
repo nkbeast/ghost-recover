@@ -30,9 +30,14 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initi
 
 find_package(Threads REQUIRED)
 
-# zlib enables SquashFS/cramfs/JFFS2 content extraction. Optional: without it
-# those drivers still list files but cannot decompress their contents.
+# zlib enables SquashFS/cramfs/JFFS2 content extraction and btrfs zlib
+# extents. Optional: without it those drivers still list files but cannot
+# decompress their contents.
 find_package(ZLIB QUIET)
+
+# zstd enables btrfs zstd extents. Optional, like zlib.
+find_library(ZSTD_LIBRARY NAMES zstd)
+find_path(ZSTD_INCLUDE_DIR zstd.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -40,6 +45,8 @@ set(SOURCES
     src/main.cpp
     src/server.cpp
 
+    src/core/decompress.cpp
+    src/selftest.cpp
     src/core/io.cpp
     src/core/json.cpp
     src/core/util.cpp
@@ -79,6 +86,15 @@ if(ZLIB_FOUND)
     message(STATUS "zlib found: compressed-filesystem extraction enabled")
 else()
     message(WARNING "zlib not found: SquashFS/cramfs/JFFS2 contents cannot be decompressed")
+endif()
+
+if(ZSTD_LIBRARY AND ZSTD_INCLUDE_DIR)
+    target_link_libraries(ghost_recover PRIVATE ${ZSTD_LIBRARY})
+    target_include_directories(ghost_recover PRIVATE ${ZSTD_INCLUDE_DIR})
+    target_compile_definitions(ghost_recover PRIVATE GHOST_HAVE_ZSTD)
+    message(STATUS "zstd found: btrfs zstd extents can be decompressed")
+else()
+    message(WARNING "zstd not found: btrfs zstd extents will be listed but not decoded")
 endif()
 
 install(TARGETS ghost_recover RUNTIME DESTINATION bin)

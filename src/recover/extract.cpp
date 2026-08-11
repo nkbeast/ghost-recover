@@ -8,6 +8,7 @@
 // manifest so the recovery is auditable.
 #include "ghost/recover.h"
 
+#include "ghost/decompress.h"
 #include "ghost/json.h"
 #include "ghost/util.h"
 
@@ -22,43 +23,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#ifdef GHOST_HAVE_ZLIB
-#include <zlib.h>
-#endif
-
 namespace ghost {
 
 namespace {
-
-#ifdef GHOST_HAVE_ZLIB
-bool inflateInto(const u8* src, size_t srcLen, std::vector<u8>& out) {
-    z_stream zs{};
-    if (inflateInit(&zs) != Z_OK) return false;
-    zs.next_in = const_cast<Bytef*>(src);
-    zs.avail_in = (uInt)srcLen;
-    size_t base = out.size();
-    out.resize(base + srcLen * 4 + 4096);
-    size_t total = base;
-    int ret;
-    while (true) {
-        zs.next_out = out.data() + total;
-        zs.avail_out = (uInt)(out.size() - total);
-        ret = inflate(&zs, Z_NO_FLUSH);
-        total = out.size() - zs.avail_out;
-        if (ret == Z_STREAM_END) break;
-        if (ret != Z_OK) { inflateEnd(&zs); out.resize(base); return false; }
-        if (zs.avail_out == 0) {
-            if (out.size() > base + 512u * 1024 * 1024) { inflateEnd(&zs); out.resize(base); return false; }
-            out.resize(out.size() * 2);
-        } else if (zs.avail_in == 0) {
-            break;
-        }
-    }
-    inflateEnd(&zs);
-    out.resize(total);
-    return true;
-}
-#endif
 
 void applyTimes(const std::string& path, i64 mtime, i64 atime) {
     if (mtime <= 0 && atime <= 0) return;
@@ -103,21 +70,30 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
     for (size_t ei = 0; ei < f.extents.size(); ei++) {
         const Extent& e = f.extents[ei];
         const bool isTailFragment = (f.fragment_offset >= 0 && ei + 1 == f.extents.size());
-        if (!isTailFragment && (i64)out.size() >= budget) break;
-        i64 want = isTailFragment ? e.length : std::min(e.length, budget - (i64)out.size());
+        const bool coded = !f.codec.empty();
+        const i64 decompSize = (!f.decomp_sizes.empty() && ei < f.decomp_sizes.size())
+                                   ? f.decomp_sizes[ei] : 0;
+        // A compressed block has to be read whole before it can be decoded;
+        // only the raw path can stop at the budget boundary.
+        if (!isTailFragment && !coded && (i64)out.size() >= budget) break;
+        i64 want = e.length;
+        if (!coded && !isTailFragment)
+            want = std::min(e.length, budget - (i64)out.size());
         if (e.sparse) {
-            out.insert(out.end(), (size_t)want, 0);
+            out.insert(out.end(), (size_t)(decompSize > 0 ? decompSize : want), 0);
             continue;
         }
         auto chunk = disk.readBlock((u64)e.offset, want);
-        std::vector<u8> decoded;
         const std::vector<u8>* payload = &chunk;
-#ifdef GHOST_HAVE_ZLIB
-        if (f.codec == "zlib-block") {
-            if (!inflateInto(chunk.data(), chunk.size(), decoded)) continue;
+        std::vector<u8> decoded;
+        if (coded) {
+            // Only drivers that record per-extent output sizes (btrfs) get
+            // truncation here; squashfs/cramfs blocks (or shared fragment
+            // blocks) must decompress in full before slicing.
+            decoded = decompressBlock(f.codec, chunk.data(), chunk.size(), decompSize);
+            if (decoded.empty()) continue;
             payload = &decoded;
         }
-#endif
         if (isTailFragment) {
             size_t start = (size_t)f.fragment_offset;
             size_t len = (size_t)f.fragment_length;
@@ -127,6 +103,7 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
             continue;
         }
         out.insert(out.end(), payload->begin(), payload->end());
+        if (!coded && budget > 0 && (i64)out.size() > budget) out.resize((size_t)budget);
         if ((i64)chunk.size() < want) break;
     }
     if (f.size > 0 && (i64)out.size() > f.size && f.codec.empty()) out.resize((size_t)f.size);
@@ -254,19 +231,23 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                     continue;
                 }
                 i64 pos = 0;
+                const bool coded = !f.codec.empty();
+                const i64 decompSize = (!f.decomp_sizes.empty() && ei < f.decomp_sizes.size())
+                                           ? f.decomp_sizes[ei] : 0;
                 while (pos < take && !failed) {
-                    i64 want = std::min(kChunk, take - pos);
+                    i64 want = coded ? (take - pos)
+                                     : std::min(kChunk, take - pos);
                     auto chunk = disk.readBlock((u64)(e.offset + pos), want);
                     if (chunk.empty()) break;
-                    std::vector<u8> decoded;
                     const std::vector<u8>* payload = &chunk;
-#ifdef GHOST_HAVE_ZLIB
-                    if (f.codec == "zlib-block") {
-                        if (!inflateInto(chunk.data(), chunk.size(), decoded)) break;
+                    std::vector<u8> decoded;
+                    if (coded) {
+                        decoded = decompressBlock(f.codec, chunk.data(), chunk.size(),
+                                                  decompSize);
+                        if (decoded.empty()) break;
                         payload = &decoded;
                         pos = take;   // one extent == one independently coded block
                     }
-#endif
                     if (isTailFragment) {
                         size_t start = (size_t)f.fragment_offset;
                         if (start < payload->size()) {

@@ -4,6 +4,7 @@
 // command line, so the engine can be scripted and used over SSH instead of
 // only through a browser.
 #include "ghost/carve.h"
+#include "ghost/decompress.h"
 #include "ghost/disk.h"
 #include "ghost/fs.h"
 #include "ghost/jobs.h"
@@ -440,6 +441,7 @@ int main(int argc, char* argv[]) {
         if (cmd == "raid")    return cmdRaid(args);
         if (cmd == "repair")  return cmdRepair(args);
         if (cmd == "carvers") return cmdCarvers(args);
+        if (cmd == "selftest") return ghost::selftest::run();
         fprintf(stderr, "unknown command '%s'\n\n", cmd.c_str());
         printUsage();
         return 2;
