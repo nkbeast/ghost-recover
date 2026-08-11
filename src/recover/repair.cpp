@@ -210,8 +210,9 @@ RepairResult repairExfatBootRegion(DiskReader& disk, const RepairOptions& opt) {
         return r;
     }
     // exFAT mirrors the whole 12-sector boot region at sector 12.
-    auto backup = disk.readBlock(12 * 512, 12 * 512);
-    if (backup.size() < 12 * 512 || !Bytes(backup).eq(3, "EXFAT   ", 8)) {
+    const i64 mirrorBytes = 12LL * 512;
+    auto backup = disk.readBlock(mirrorBytes, mirrorBytes);
+    if (backup.size() < (size_t)mirrorBytes || !Bytes(backup).eq(3, "EXFAT   ", 8)) {
         r.error = "backup exFAT boot region at sector 12 is also unusable";
         return r;
     }
@@ -222,7 +223,7 @@ RepairResult repairExfatBootRegion(DiskReader& disk, const RepairOptions& opt) {
         r.detail += " — run with apply=true to copy the 12-sector region to sector 0";
         return r;
     }
-    auto original = disk.readBlock(0, 12 * 512);
+    auto original = disk.readBlock(0, mirrorBytes);
     if (!saveBackup(opt, "exfat_boot_region", 0, original, r)) return r;
     Writer w(disk.path(), disk.base());
     std::string err;
@@ -377,7 +378,9 @@ RepairResult repairGptTable(DiskReader& disk, const RepairOptions& opt) {
 
     i64 targetLba = restoringPrimary ? 1 : totalSectors - 1;
     i64 otherLba  = restoringPrimary ? totalSectors - 1 : 1;
-    i64 entryArrayLba = restoringPrimary ? 2 : (totalSectors - 1 - (i64)((numEntries * entrySize + ss - 1) / ss));
+    i64 entryArrayLba = restoringPrimary
+        ? 2
+        : (totalSectors - 1 - (i64)(((u64)numEntries * entrySize + ss - 1) / ss));
 
     put64(24, (u64)targetLba);
     put64(32, (u64)otherLba);
