@@ -61,7 +61,7 @@ done
 
 # --------------------------------------------------------------- extraction
 head2 "Recovery is byte-for-byte identical to the originals"
-for fs in ext4 ext2 ntfs fat32 btrfs xfs iso9660 squashfs cramfs udf jffs2; do
+for fs in ext4 ext2 ntfs fat32 exfat btrfs xfs iso9660 squashfs cramfs udf jffs2; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
   out="$WORK/out-$fs"
   # The UDF fixture is a hybrid image that is also ISO 9660; name the driver.

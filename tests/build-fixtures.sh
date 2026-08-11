@@ -140,7 +140,17 @@ if have mkfs.xfs; then
   mkfs.xfs -q -f -L GHOSTXFS -p "$OUT/xfs.proto" "$IMG/xfs.img"
 fi
 
-have mkfs.exfat && { truncate -s 64M "$IMG/exfat.img"; mkfs.exfat -n GHOSTEXFAT "$IMG/exfat.img" >/dev/null 2>&1; }
+if have mkfs.exfat; then
+  truncate -s 64M "$IMG/exfat.img"
+  mkfs.exfat -n GHOSTEXFAT "$IMG/exfat.img" >/dev/null 2>&1
+  # Pure-python population: entry sets, contiguous NoFatChain runs, FAT and
+  # allocation bitmap are written without mounting.
+  if python3 - "$IMG/exfat.img" "$SRC" < tests/exfat_fixture.py
+  then :; else
+    echo "exfat fixture population failed" >&2
+    exit 1
+  fi
+fi
 have mkfs.minix && { truncate -s 20M "$IMG/minix.img"; mkfs.minix -3 "$IMG/minix.img" >/dev/null 2>&1; }
 
 if have mkfs.jffs2; then
