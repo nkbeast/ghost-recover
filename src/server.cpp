@@ -1288,7 +1288,21 @@ int startServer(const ServerConfig& cfg) {
                 return;
             }
             const RecoveredFile& f = stored->files[(size_t)index];
-            auto all = readFileData(*disk, f, offset + length);
+            // Bound the read to the file's real length. An offset near INT64_MAX
+            // would otherwise make offset+length overflow and force readFileData
+            // into materialising the whole file to return nothing at all.
+            i64 fileLen = f.size > 0 ? f.size : 0;
+            if (fileLen <= 0)
+                for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
+            i64 end = offset + length;
+            if (end < offset || (fileLen > 0 && offset >= fileLen)) {
+                res.status = 404;
+                res.set_content(errorJson("offset is beyond the end of the file"),
+                                "application/json");
+                return;
+            }
+            if (fileLen > 0) end = std::min(end, fileLen);
+            auto all = readFileData(*disk, f, end);
             total = f.size > 0 ? f.size : (i64)all.size();
             if (offset < (i64)all.size())
                 data.assign(all.begin() + offset, all.begin() + std::min<size_t>(all.size(), (size_t)(offset + length)));
@@ -1313,6 +1327,12 @@ int startServer(const ServerConfig& cfg) {
                 return;
             }
             total = disk->size();
+            if (total > 0 && offset >= total) {
+                res.status = 404;
+                res.set_content(errorJson("offset is beyond the end of the device"),
+                                "application/json");
+                return;
+            }
             data = disk->readBlock((u64)offset, length);
             sourceLabel = path;
         }
