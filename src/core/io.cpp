@@ -81,7 +81,7 @@ bool DiskReader::open(std::string* err) {
         if (ioctl(fd_, BLKGETSIZE64, &sz) == 0 && sz > 0) {
             device_size_ = (i64)sz;
         } else {
-            i64 end = lseek(fd_, 0, SEEK_END);
+            const i64 end = lseek(fd_, 0, SEEK_END);
             if (end > 0) device_size_ = end;
         }
         int ss = 0;
@@ -146,13 +146,13 @@ void DiskReader::noteBad(u64 abs_off, i64 len) {
 i64 DiskReader::rawPread(u64 abs_off, u8* dst, i64 count) {
     i64 total = 0;
     while (total < count) {
-        ssize_t n = ::pread(fd_, dst + total, (size_t)(count - total), (off_t)(abs_off + total));
+        const ssize_t n = ::pread(fd_, dst + total, (size_t)(count - total), (off_t)(abs_off + total));
         if (n > 0) { total += n; continue; }
         if (n == 0) break;                      // clean EOF
         if (errno == EINTR) continue;
         // Hardware/medium error — fall back to a per-sector read so we salvage
         // everything around the bad spot instead of losing the whole request.
-        i64 got = degradedPread(abs_off + total, dst + total, count - total);
+        const i64 got = degradedPread(abs_off + total, dst + total, count - total);
         total += got;
         break;
     }
@@ -163,8 +163,8 @@ i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
     const i64 ss = sector_size_ > 0 ? sector_size_ : 512;
     i64 done = 0;
     while (done < count) {
-        i64 chunk = std::min(ss, count - done);
-        ssize_t n = ::pread(fd_, dst + done, (size_t)chunk, (off_t)(abs_off + done));
+        const i64 chunk = std::min(ss, count - done);
+        const ssize_t n = ::pread(fd_, dst + done, (size_t)chunk, (off_t)(abs_off + done));
         if (n == chunk) { done += chunk; continue; }
         if (n > 0) { done += n; continue; }
         if (n == 0) break;                      // EOF
@@ -186,7 +186,7 @@ i64 DiskReader::read(u64 offset, void* buf, i64 count) {
     const u64 abs = base_ + offset;
 
     if (count >= kCacheBypass || cache_.empty()) {
-        i64 n = rawPread(abs, dst, count);
+        const i64 n = rawPread(abs, dst, count);
         bytes_read_ += n;
         return n;
     }
@@ -201,7 +201,7 @@ i64 DiskReader::read(u64 offset, void* buf, i64 count) {
         CacheLine& line = cache_[(size_t)blk & cache_mask_];
         if (line.tag != blk) {
             if ((i64)line.data.size() != kCacheBlock) line.data.resize((size_t)kCacheBlock);
-            i64 got = rawPread(blk * (u64)kCacheBlock, line.data.data(), kCacheBlock);
+            const i64 got = rawPread(blk * (u64)kCacheBlock, line.data.data(), kCacheBlock);
             line.tag   = blk;
             line.valid = got;
             bytes_read_ += got;
