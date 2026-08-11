@@ -403,7 +403,41 @@ if command -v curl >/dev/null; then
   grep -q "refused the handover token" "$WORK/handover.log" && [ "$rc" -ne 0 ] \
     && ok "a refused takeover exits instead of sharing the port" \
     || bad "refused takeover did not exit cleanly (rc=$rc)"
-  kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+  # The engine must stop on request (UI "Shut down" button) and release the
+  # port so a later start binds cleanly.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+         "http://127.0.0.1:$PORT/api/shutdown" || true)
+  [ "$code" = 200 ] && ok "/api/shutdown accepts the request" \
+                    || bad "/api/shutdown answered $code"
+  gone=no
+  for _ in $(seq 1 50); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' \
+           "http://127.0.0.1:$PORT/api/health" || true)
+    [ "$code" != 200 ] && { gone=yes; break; }
+    sleep 0.1
+  done
+  [ "$gone" = yes ] && ok "engine stops and releases the port" \
+                    || bad "engine still answers after /api/shutdown"
+  kill -0 "$SRV" 2>/dev/null && bad "engine process survived shutdown" \
+                             || ok "engine process exited"
+  wait "$SRV" 2>/dev/null
+  # Restarting while another engine already owns the port must not fail: the
+  # second instance recognises the running engine and reconnects to it.
+  "$BIN" --port "$PORT" --no-browser > "$WORK/server2.log" 2>&1 &
+  SRV2=$!
+  sleep 0.7
+  "$BIN" --port "$PORT" --no-browser > "$WORK/server3.log" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && grep -q "already running" "$WORK/server3.log" \
+    && ok "a second start reconnects to the running engine (rc=$rc)" \
+    || bad "second start did not reconnect (rc=$rc): $(tr '\n' ' ' < "$WORK/server3.log")"
+  kill -0 "$SRV2" 2>/dev/null && ok "the original engine kept serving" \
+                              || bad "the original engine died"
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+         "http://127.0.0.1:$PORT/api/health" || true)
+  [ "$code" = 200 ] && ok "health still answers after reconnect" \
+                    || bad "health answered $code after reconnect"
+  kill "$SRV2" 2>/dev/null; wait "$SRV2" 2>/dev/null
 else
   skip "web API checks (curl not installed)"
 fi

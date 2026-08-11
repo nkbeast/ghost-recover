@@ -33,6 +33,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -54,6 +55,46 @@ std::string       g_handoverToken;
 std::string       g_handoverFile;
 httplib::Server*  g_server = nullptr;
 std::atomic<bool> g_handedOver{false};
+
+// Graceful shutdown. /api/shutdown and the signal thread both land here:
+// stop() makes httplib's listen() return, after which startServer returns and
+// the process exits, releasing the port for the next start.
+void requestEngineShutdown() {
+    if (g_server) g_server->stop();
+}
+
+// True when a GHOST//RECOVER engine is answering health on the given port.
+// Used to reconnect to an already-running instance instead of failing.
+bool liveEngineOnPort(int port) {
+    httplib::Client cli("127.0.0.1", port);
+    cli.set_connection_timeout(1, 0);
+    cli.set_read_timeout(2, 0);
+    auto r = cli.Get("/api/health");
+    return r && r->status == 200 &&
+           r->body.find("\"service\":\"ghost-recover\"") != std::string::npos;
+}
+
+// SIGINT/SIGTERM -> graceful stop. httplib's stop() is not async-signal-safe,
+// so the signals are blocked process-wide and a dedicated thread consumes them
+// with sigwait() instead of using a raw handler. The mask is inherited by
+// every thread spawned after installShutdownSignals(), which is what makes the
+// sigwait reliable. Called only from startServer, so the CLI scan/carve modes
+// keep their default signal behaviour.
+void installShutdownSignals() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGINT);
+    sigaddset(&set, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &set, nullptr);
+    std::thread([set]() {
+        for (;;) {
+            int sig = 0;
+            if (sigwait(&set, &sig) != 0) continue;
+            fprintf(stderr, "shutdown requested (signal %d)\n", sig);
+            requestEngineShutdown();
+        }
+    }).detach();
+}
 
 // State of an in-flight elevation attempt. pkexec and sudo both *exec* the
 // target on success, so the child process only ever exits on its own if the
@@ -687,6 +728,7 @@ int startServer(const ServerConfig& cfg) {
     setOutputRoot(cfg.output_root.empty() ? defaultOutputRoot() : cfg.output_root);
     g_allowWrites = cfg.allow_repair_writes;
     makeDirs(outputRoot());
+    installShutdownSignals();
 
     const std::string webRoot = webRootPath(cfg.web_root);
 
@@ -915,6 +957,19 @@ int startServer(const ServerConfig& cfg) {
         std::thread([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             if (g_server) g_server->stop();
+        }).detach();
+    });
+
+    // Explicit engine shutdown — the UI's "Shut down" button, equivalent to a
+    // SIGTERM. The engine exits once the response flushes, so a later start
+    // always finds the port free.
+    svr.Post("/api/shutdown", [](const httplib::Request&, httplib::Response& res) {
+        json::Writer w;
+        w.beginObject().kv("ok", true).kv("message", "shutting down").endObject();
+        res.set_content(w.str(), "application/json");
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            requestEngineShutdown();
         }).detach();
     });
 
@@ -1827,6 +1882,20 @@ int startServer(const ServerConfig& cfg) {
 
     if (parentRejected) return 1;
 
+    // Reconnect, don't duplicate: when we are not taking over, a live engine
+    // already answering on the port — usually the privileged instance left
+    // running from an earlier unlock — is already serving. SO_REUSEPORT would
+    // let a same-UID second instance bind alongside it (splitting every
+    // request between two engines), so detect it before binding and just point
+    // the browser at it.
+    if (!takingOver && liveEngineOnPort(cfg.port)) {
+        printf("an engine is already running on port %d — connecting to it\n", cfg.port);
+        fflush(stdout);
+        if (cfg.open_browser)
+            launchBrowser("http://localhost:" + std::to_string(cfg.port));
+        return 0;
+    }
+
     // The page is only opened once the port actually accepts connections, so a
     // slow bind — or a bind that never succeeds — never leaves the user staring
     // at "localhost refused to connect".
@@ -1876,6 +1945,17 @@ int startServer(const ServerConfig& cfg) {
         if (i + 1 < attempts) std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     g_server = nullptr;
+    // Fallback: binding failed, but a live engine may still hold the port —
+    // most commonly the privileged instance from an earlier unlock (different
+    // UID, so SO_REUSEPORT refused the bind), which keeps serving after the
+    // browser tab was closed. That is "already running", not an error.
+    if (liveEngineOnPort(cfg.port)) {
+        printf("an engine is already running on port %d — connecting to it\n", cfg.port);
+        fflush(stdout);
+        if (cfg.open_browser)
+            launchBrowser("http://localhost:" + std::to_string(cfg.port));
+        return 0;
+    }
     fprintf(stderr, "ERROR: could not bind %s:%d (is another instance running?)\n",
             bind.c_str(), cfg.port);
     return 1;

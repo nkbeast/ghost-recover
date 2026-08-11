@@ -182,6 +182,8 @@ function viewTopbar() {
     <div class="stat"><span class="dot ${busy ? 'red' : 'green'}"></span>
       ${busy ? esc(S.job.phase || 'working') : 'idle'}</div>
     <button class="btn sm" onclick="toggleLog()">Log ${S.logs.length ? '(' + S.logs.length + ')' : ''}</button>
+    <button class="btn sm warn" onclick="shutdownEngine()"
+      title="Stop the engine and release the port">Shut down</button>
   </div>`;
 }
 
@@ -1003,6 +1005,21 @@ function go(screen) {
 
 function toggleLog() { S.logOpen = !S.logOpen; render(); }
 
+function shutdownEngine() {
+  const job = S.job && S.job.state && S.job.state !== 'done' && S.job.state !== 'failed'
+    ? '\n\nA job is still running and will be interrupted.'
+    : '';
+  if (!confirm('Shut down the GHOST//RECOVER engine?' + job)) return;
+  fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
+  setTimeout(() => {
+    document.body.innerHTML = `<div class="center">
+      <div class="logo">GHOST//RECOVER</div>
+      <div class="tag">Engine stopped — you may close this tab.</div>
+      <div class="tag">The next launch will start a fresh session.</div>
+    </div>`;
+  }, 300);
+}
+
 function viewLog() {
   return `<div class="logdrawer">
     <div class="pane-h"><span class="grow">Activity log</span>
@@ -1624,7 +1641,8 @@ Object.assign(window, {
   usePartition, useRegion, useWholeDisk, startJob, cancelJob, loadResults, setSort,
   selectFile, toggleSel, selectAllShown, setPreview, downloadFile, showFileInfo,
   openModal, closeModal, browseTo, pickFile, attachConfirm, toggleCat, runCarve,
-  runExtract, runImage, detectRaid, assembleRaid, runRepair, toggleLog, backToVolumes,
+  runExtract, runImage, detectRaid, assembleRaid, runRepair, toggleLog, shutdownEngine,
+  backToVolumes,
   loadPrivileges, elevate
 });
 
