@@ -653,6 +653,11 @@ bool spawnElevated(const std::string& method, const std::string& password,
     if (needsPassword) {
         ::close(pw[1]);
         std::string line = password + "\n";
+        // The password reaches sudo through this pty master/slave pair on the
+        // local host; it is never written to a network socket, and the
+        // sudo-password method is refused when the server is reachable
+        // remotely (no TLS on the HTTP listener).
+        // codeql[cpp/cleartext-transmission]
         ssize_t written = ::write(pw[0], line.data(), line.size());
         (void)written;
         ::close(pw[0]);
@@ -699,6 +704,31 @@ ElevationMethods detectElevationMethods() {
                  "dialog in, so the sudo password is used instead.";
     }
     return m;
+}
+
+// When the web server listens on a non-loopback address there is no TLS on
+// the HTTP listener, so the sudo-password method must not be offered: the
+// password would cross the network in cleartext.  pkexec's system dialog and
+// passwordless sudo never send a password through this server.
+static ElevationMethods
+elevationMethodsForServing(const ElevationMethods& m, bool allowRemote) {
+    if (!allowRemote || m.preferred != "sudo-password")
+        return m;
+    ElevationMethods out = m;
+    if (out.pkexec) {
+        out.preferred = "pkexec";
+        out.note = "Password-based sudo is disabled on remote connections because the web "
+                   "server has no TLS; use the graphical authentication instead.";
+    } else if (out.sudo_nopasswd) {
+        out.preferred = "sudo-nopasswd";
+        out.note = "Password-based sudo is disabled on remote connections because the web "
+                   "server has no TLS; use passwordless sudo instead.";
+    } else {
+        out.preferred = "";
+        out.note = "Password-based sudo is disabled on remote connections because the web "
+                   "server has no TLS. Quit and start this program locally, or as root.";
+    }
+    return out;
 }
 
 bool pathAllowedForServing(const std::string& p) {
@@ -804,15 +834,17 @@ int startServer(const ServerConfig& cfg) {
          .kv("web_root", webRoot)
          .kv("carvers", (i64)carverRegistry().size())
          .kv("filesystems", (i64)filesystemRegistry().size());
-        ElevationMethods em = detectElevationMethods();
+        ElevationMethods em = elevationMethodsForServing(detectElevationMethods(),
+                                                         cfg.allow_remote);
         w.kv("can_elevate", !em.preferred.empty()).kv("elevate_method", em.preferred);
         w.endObject();
         res.set_content(w.str(), "application/json");
     });
 
     // ---- privileges --------------------------------------------------------
-    svr.Get("/api/privileges", [](const httplib::Request&, httplib::Response& res) {
-        ElevationMethods m = detectElevationMethods();
+    svr.Get("/api/privileges", [&](const httplib::Request&, httplib::Response& res) {
+        ElevationMethods m = elevationMethodsForServing(detectElevationMethods(),
+                                                        cfg.allow_remote);
         json::Writer w;
         w.beginObject();
         w.kv("ok", true).kv("is_root", m.is_root).kv("uid", (i64)::getuid());
@@ -849,12 +881,22 @@ int startServer(const ServerConfig& cfg) {
                             "application/json");
             return;
         }
-        ElevationMethods m = detectElevationMethods();
+        ElevationMethods m = elevationMethodsForServing(detectElevationMethods(),
+                                                        cfg.allow_remote);
         std::string method = body.getStr("method", m.preferred);
         if (method.empty()) {
             res.set_content(errorJson(
                 m.note.empty() ? "no way to raise privileges on this system" : m.note,
                 "Quit and run: sudo ghost_recover"), "application/json");
+            return;
+        }
+        if (method == "sudo-password" && cfg.allow_remote) {
+            res.set_content(errorJson(
+                "password-based sudo is disabled when the web server is reachable from other "
+                "machines (--listen 0.0.0.0): the password would be sent over unencrypted HTTP. "
+                "Open the interface on this computer (http://localhost) instead, or use the "
+                "graphical authentication or passwordless-sudo methods."),
+                "application/json");
             return;
         }
         if (method == "pkexec" && !m.pkexec) {
