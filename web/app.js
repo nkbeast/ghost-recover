@@ -1473,11 +1473,22 @@ async function elevate(method) {
   try {
     r = await apiPost('/elevate', body);
   } catch (e) {
-    S.elevating = { phase: 'failed', title: 'Could not start', message: e.message };
-    render();
+    // Fetch can be reset by the engine stopping mid-switch, or refused for
+    // the few hundred milliseconds where no instance owns the port yet.
+    // Losing the request does not mean the elevation failed — the privileged
+    // instance may be well on its way — so go straight to the polling path
+    // instead of telling the user the unlock broke.
+    log('elevation request lost at the network layer (' + e.message + '); polling…', 'warn');
+    waitForElevated(method, true);
     return;
   }
   if (!r.ok) {
+    if ((r.error || '').indexOf('already in progress') >= 0) {
+      log('an elevation is already running — waiting for it', 'warn');
+      render();
+      waitForElevated(method);
+      return;
+    }
     S.elevating = { phase: 'failed', title: 'Could not start',
                     message: (r.error || '') + (r.hint ? ' — ' + r.hint : '') };
     log('elevation failed: ' + r.error, 'err');
@@ -1496,12 +1507,14 @@ async function elevate(method) {
  * reporting that the pkexec/sudo child exited without ever claiming the port. */
 async function waitForElevated(method) {
   const deadline = Date.now() + 180000;
+  let silence = 0;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 600));
     if (!S.elevating) return;                       // the user backed out
 
     let h = null;
     try { h = await apiGet('/health'); } catch (e) { /* the handover moment */ }
+    if (h) silence = 0; else silence++;
 
     if (h && h.is_root) {
       S.health = h;
@@ -1533,7 +1546,9 @@ async function waitForElevated(method) {
 
     if (S.elevating && S.elevating.phase !== 'failed') {
       S.elevating.message = method === 'pkexec'
-        ? 'Waiting for the authentication dialog…'
+        ? (silence > 20
+             ? 'Waiting for the engine to come back after the switch…'
+             : 'Waiting for the authentication dialog…')
         : 'Waiting for the privileged engine to take over…';
       render();
     }
