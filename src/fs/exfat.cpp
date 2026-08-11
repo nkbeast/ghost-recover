@@ -165,7 +165,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     std::string err;
     if (!fs.load(&err)) {
         // exFAT keeps a full backup boot region 12 sectors in.
-        auto bk = disk.readBlock(12 * 512, 512);
+        auto bk = disk.readBlock(12LL * 512, 512);
         if (bk.size() == 512 && Bytes(bk).eq(3, "EXFAT   ", 8)) {
             res.technique("backup_boot_region_recovery");
             res.bump("boot_region_recovered_from_backup", 1);
@@ -213,7 +213,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     prog.setPhase("reading root directory");
     {
         auto rootChain = fs.chain(fs.root_cluster, 65536);
-        auto rootBuf = fs.readClusters(rootChain, 4 * 1024 * 1024);
+        auto rootBuf = fs.readClusters(rootChain, 4LL * 1024 * 1024);
         Bytes b(rootBuf);
         for (size_t i = 0; i + 32 <= b.size(); i += 32) {
             u8 type = b.u8at(i);
@@ -261,7 +261,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                                   ? fs.contiguous(cur.cluster, cur.length)
                                   : fs.chain(cur.cluster, 65536);
         if (cl.empty()) continue;
-        auto buf = fs.readClusters(cl, 16 * 1024 * 1024);
+        auto buf = fs.readClusters(cl, 16LL * 1024 * 1024);
         Bytes b(buf);
 
         size_t i = 0;
