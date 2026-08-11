@@ -108,9 +108,8 @@ i64 vPng(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 // --- GIF: walk blocks to the 0x3B trailer. ---------------------------------
 i64 vGif(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    i64 p = off + 10;
-    u8 packed = s.byte(off + 10);
-    p = off + 13;
+    const u8 packed = s.byte(off + 10);
+    i64 p = off + 13;
     if (packed & 0x80) p += 3LL * (1 << ((packed & 0x07) + 1));   // global colour table
     int guard = 0;
     while (p < off + max && guard++ < 100000) {
