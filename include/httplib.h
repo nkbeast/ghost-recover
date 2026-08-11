@@ -13421,6 +13421,11 @@ inline bool ClientImpl::handle_request(Stream &strm, Request &req,
 
   if (!is_ssl() && is_proxy_enabled_for_host(host_)) {
     auto req2 = req;
+    // Absolute-form request URI for an HTTP(S)_PROXY (RFC 7230 §5.3.2); the
+    // transport to the proxy follows the proxy URL's own scheme, so this
+    // "http://" prefix does not downgrade any connection.  Vendored upstream
+    // cpp-httplib code; do not rewrite locally.
+    // codeql[cpp/non-https-url]
     req2.path = "http://" +
                 detail::make_host_and_port_string(host_, port_, false) +
                 req.path;
