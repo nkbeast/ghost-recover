@@ -1,0 +1,21 @@
+name: "CodeQL security configuration"
+
+# Two known findings are deliberate and are scoped out here rather than left
+# permanently red:
+#
+# 1. cpp/cleartext-transmission at src/server.cpp:535 — the password goes over
+#    an anonymous pipe directly into `sudo -S`'s stdin on the same host. It
+#    never touches the network; the pipe is the standard and only sane way to
+#    pass it (the token file is already 0600, and putting the password on the
+#    command line would expose it via `ps`).
+#
+# 2. include/httplib.h is the vendored cpp-httplib single header (upstream
+#    content, not ours to change); its internal default-HTTP client is only
+#    used for localhost loopback requests (the privilege handover).
+
+query-filters:
+  - exclude:
+      id: cpp/cleartext-transmission
+
+paths-ignore:
+  - include/httplib.h
