@@ -130,6 +130,13 @@ ImageResult createImage(DiskReader& disk, const ImageOptions& opt, Progress& pro
     if (!opt.mapfile.empty()) {
         map = loadMap(opt.mapfile);
         for (const auto& e : map) {
+            // Stale or tampered entries may point anywhere; only offsets inside
+            // this imaging range are meaningful. Ignore everything else so a
+            // corrupt map can neither skip the whole run nor resurrect data
+            // that was never written.
+            const bool inRange = e.offset >= 0 && e.length > 0 &&
+                                 e.offset < total && e.length <= total - e.offset;
+            if (!inRange) continue;
             if (e.status == '+') resumeFrom = std::max(resumeFrom, e.offset + e.length);
             else if (e.status == '-') {
                 // A resumed run must still retry the sectors that failed last
