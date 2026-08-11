@@ -394,6 +394,15 @@ if command -v curl >/dev/null; then
   else
     skip "scan-job web check (ext4 fixture missing)"
   fi
+  # A takeover attempt that a live engine refuses (wrong token) must NOT bind
+  # alongside it: that would split traffic between two engines.
+  echo -n "not-the-token" > "$WORK/handover-token"
+  "$BIN" --port "$PORT" --no-browser --output "$WORK/handover-out" \
+         --takeover "$WORK/handover-token" > "$WORK/handover.log" 2>&1
+  rc=$?
+  grep -q "refused the handover token" "$WORK/handover.log" && [ "$rc" -ne 0 ] \
+    && ok "a refused takeover exits instead of sharing the port" \
+    || bad "refused takeover did not exit cleanly (rc=$rc)"
   kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 else
   skip "web API checks (curl not installed)"
