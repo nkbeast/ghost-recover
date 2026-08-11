@@ -36,7 +36,6 @@ constexpr u8 kKeyExtentData  = 108;
 constexpr u8 kKeyRootItem    = 132;
 constexpr u8 kKeyChunkItem   = 228;
 
-constexpr u64 kBlockGroupData     = 1ull << 0;
 constexpr u64 kBlockGroupSystem   = 1ull << 1;
 constexpr u64 kBlockGroupMetadata = 1ull << 2;
 
