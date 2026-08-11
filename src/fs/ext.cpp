@@ -35,7 +35,6 @@ constexpr u32 kIncompatFiletype  = 0x0002;
 constexpr u32 kIncompat64Bit     = 0x0080;
 constexpr u32 kIncompatExtents   = 0x0040;
 constexpr u32 kIncompatMetaBg    = 0x0010;
-constexpr u32 kIncompatInlineData = 0x8000;
 // s_feature_compat
 constexpr u32 kCompatHasJournal  = 0x0004;
 
@@ -768,7 +767,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 for (const auto& e : ex) {
                     if (e.sparse) continue;
                     for (i64 o = 0; o < e.length; o += fs.block_size) {
-                        if (budget > 64 * 1024 * 1024) break;
+                        if (budget > 64LL * 1024 * 1024) break;
                         auto blk = disk.readBlock((u64)(e.offset + o), fs.block_size);
                         if (blk.empty()) break;
                         budget += fs.block_size;
