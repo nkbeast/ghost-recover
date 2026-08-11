@@ -272,7 +272,11 @@ std::string Value::asStr() const {
     switch (type) {
         case Type::String: return s;
         case Type::Number: {
-            if (num == (double)(i64)num) return std::to_string((i64)num);
+            // Casting a double beyond int64's range to i64 is undefined
+            // behaviour; only take the integer path when it actually fits.
+            if (num >= -9.2233720368547758e18 && num <= 9.2233720368547758e18 &&
+                num == (double)(i64)num)
+                return std::to_string((i64)num);
             char tmp[40];
             snprintf(tmp, sizeof(tmp), "%.6g", num);
             return tmp;
