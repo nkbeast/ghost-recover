@@ -26,7 +26,6 @@ namespace ntfs {
 namespace {
 
 constexpr u32 kAttrStandardInfo = 0x10;
-constexpr u32 kAttrAttributeList = 0x20;
 constexpr u32 kAttrFileName     = 0x30;
 constexpr u32 kAttrVolumeName   = 0x60;
 constexpr u32 kAttrData         = 0x80;
@@ -260,7 +259,7 @@ struct NtfsFs {
     std::vector<u8> readRuns(const std::vector<Run>& runs, i64 offset, i64 length) const {
         std::vector<u8> out;
         if (length <= 0) return out;
-        out.reserve((size_t)std::min<i64>(length, 64 * 1024 * 1024));
+        out.reserve((size_t)std::min<i64>(length, 64LL * 1024 * 1024));
         i64 pos = 0;
         for (const auto& run : runs) {
             i64 runBytes = run.clusters * (i64)cluster_size;
@@ -730,7 +729,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     } else if (a.type == kAttrIndexAlloc && a.name == "$I30" && !a.runs.empty()) {
                         i64 total = 0;
                         for (const auto& run : a.runs) total += run.clusters * (i64)fs.cluster_size;
-                        total = std::min<i64>(total, 16 * 1024 * 1024);
+                        total = std::min<i64>(total, 16LL * 1024 * 1024);
                         for (i64 off = 0; off + fs.index_size <= total; off += fs.index_size) {
                             auto blk = fs.readRuns(a.runs, off, fs.index_size);
                             if (blk.size() < 32) break;
@@ -782,8 +781,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     if (a.type != kAttrData || a.name != "$J" || a.runs.empty()) continue;
                     i64 total = 0;
                     for (const auto& run : a.runs) total += run.clusters * (i64)fs.cluster_size;
-                    i64 cap = std::min<i64>(total, 256 * 1024 * 1024);
-                    const i64 step = 4 * 1024 * 1024;
+                    i64 cap = std::min<i64>(total, 256LL * 1024 * 1024);
+                    const i64 step = 4LL * 1024 * 1024;
                     for (i64 off = std::max<i64>(0, total - cap); off < total && !prog.cancelled();
                          off += step) {
                         auto buf = fs.readRuns(a.runs, off, std::min(step, total - off));
