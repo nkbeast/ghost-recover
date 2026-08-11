@@ -373,6 +373,27 @@ if command -v curl >/dev/null; then
          "http://127.0.0.1:$PORT/api/hex?job=missing&index=0&offset=999999999999&length=16" || true)
   [ "$code" = 404 ] && ok "out-of-range hex-view requests are refused" \
                     || bad "out-of-range hex request answered $code"
+  if [ -f "$IMG/ext4.img" ]; then
+    resp=$(curl -s -X POST "http://127.0.0.1:$PORT/api/scan" \
+           -H 'Content-Type: application/json' \
+           -d "{\"path\":\"$IMG/ext4.img\",\"deep\":false,\"journal\":false,\"slack\":false,\"orphans\":false}" || true)
+    jid=$(printf '%s' "$resp" | sed -n 's/.*"job":"\([^"]*\)".*/\1/p')
+    if [ -z "$jid" ]; then
+      bad "could not start a scan job over the web API"
+    else
+      state=starting
+      for _ in $(seq 1 60); do
+        s=$(curl -s "http://127.0.0.1:$PORT/api/job?id=$jid" || true)
+        state=$(printf '%s' "$s" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+        [ "$state" = done ] || [ "$state" = failed ] && break
+        sleep 0.5
+      done
+      [ "$state" = done ] && ok "scan job runs to completion over the web API" \
+                         || bad "scan job ended with state $state"
+    fi
+  else
+    skip "scan-job web check (ext4 fixture missing)"
+  fi
   kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
 else
   skip "web API checks (curl not installed)"
