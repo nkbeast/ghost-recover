@@ -27,8 +27,6 @@ namespace fat {
 namespace {
 
 constexpr u8 kAttrReadOnly  = 0x01;
-constexpr u8 kAttrHidden    = 0x02;
-constexpr u8 kAttrSystem    = 0x04;
 constexpr u8 kAttrVolumeId  = 0x08;
 constexpr u8 kAttrDirectory = 0x10;
 constexpr u8 kAttrLfn       = 0x0F;
