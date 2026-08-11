@@ -35,3 +35,9 @@ jobs:
 
       - name: Run verification suite
         run: ./tests/verify.sh
+
+      - name: Static analysis (clang-tidy)
+        run: |
+          sudo apt-get install -y -qq clang-tidy clang-tools
+          run-clang-tidy -p build src/ > /tmp/tidy.log 2>&1 || true
+          if grep -E '^/.*warning:|^/.*error:' /tmp/tidy.log; then exit 1; fi
