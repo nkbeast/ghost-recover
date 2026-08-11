@@ -678,6 +678,16 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     f.is_compressed |= (a.flags & kAttrCompressed) != 0;
                     f.is_encrypted  |= (a.flags & kAttrEncrypted) != 0;
                     f.is_sparse     |= (a.flags & kAttrSparse) != 0;
+                    // A compressed data stream is one LZNT1 unit chain: the
+                    // clusters hold back-to-back units whose length is found
+                    // by decoding. Only a single contiguous extent lets us
+                    // feed the whole stream to the decoder; sparse runs break
+                    // the chain, so those stay flagged and undecoded.
+                    if ((a.flags & kAttrCompressed) && !(a.flags & kAttrSparse) &&
+                        f.extents.size() == 1 && f.size > 0) {
+                        f.codec = "lznt1";
+                        f.decomp_sizes.assign(1, f.size);
+                    }
                     haveMain = true;
                 } else {
                     RecoveredFile ads = f;

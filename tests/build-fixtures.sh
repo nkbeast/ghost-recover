@@ -119,9 +119,16 @@ fi
 if have mkntfs && have ntfscp; then
   truncate -s 60M "$IMG/ntfs.img"
   mkntfs -Q -F -L GHOSTNTFS "$IMG/ntfs.img" >/dev/null 2>&1
-  (cd "$SRC" && find . -type f | sed 's|^\./||') | while read -r f; do
-    ntfscp -q "$IMG/ntfs.img" "$SRC/$f" "$(basename "$f")" >/dev/null 2>&1 || true
+  for f in "$SRC"/docs/* "$SRC"/media/*; do
+    ntfscp -q "$IMG/ntfs.img" "$f" "$(basename "$f")" >/dev/null 2>&1 || true
   done
+  # Rewrite compressible.bin as an LZNT1-compressed stream; recovery must
+  # decode it to match the corpus (the raw bytes are gone once this runs).
+  if python3 - "$IMG/ntfs.img" "$SRC" < tests/ntfs_compress_fixture.py
+  then :; else
+    echo "ntfs compressed-fixture patching failed" >&2
+    exit 1
+  fi
 fi
 
 if have mkfs.xfs; then
