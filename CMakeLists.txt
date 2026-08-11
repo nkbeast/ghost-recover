@@ -20,6 +20,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # is worth keeping wired up. The flags have to reach the link line too, or the
 # ASan runtime is not first in the library list and the binary refuses to run.
 option(GHOST_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+option(GHOST_BUILD_TESTS "Build lightweight unit tests" ON)
 if(GHOST_SANITIZE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_options(-fsanitize=address,undefined)
     add_link_options(-fsanitize=address,undefined)
@@ -83,3 +84,14 @@ endif()
 install(TARGETS ghost_recover RUNTIME DESTINATION bin)
 install(DIRECTORY web/ DESTINATION share/ghost-recover/web)
 install(FILES ghost-recover.desktop DESTINATION share/applications OPTIONAL)
+
+if(GHOST_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(ghost_unit_tests
+        tests/unit_util.cpp
+        src/core/util.cpp
+    )
+    target_include_directories(ghost_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_test(NAME ghost_unit_tests COMMAND ghost_unit_tests)
+endif()
