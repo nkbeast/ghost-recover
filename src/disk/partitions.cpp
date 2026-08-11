@@ -627,8 +627,11 @@ std::vector<Extent> extFree(DiskReader& disk, Progress& prog) {
         if (!bitmapBlock) continue;
         auto bm = disk.readBlock(bitmapBlock * bs, bs);
         if (bm.empty()) continue;
+        // One bitmap block can describe at most bs*8 blocks. A crafted superblock
+        // may claim more blocks per group; index only the bits we actually read.
+        u32 bMax = std::min(blocksPerGroup, (u32)bm.size() * 8u);
         u64 groupFirst = firstData + (u64)i * blocksPerGroup;
-        for (u32 b = 0; b < blocksPerGroup; b++) {
+        for (u32 b = 0; b < bMax; b++) {
             if (groupFirst + b >= blocksCount) break;
             if ((bm[b / 8] >> (b % 8)) & 1) continue;      // allocated
             i64 off = (i64)((groupFirst + b) * bs);
