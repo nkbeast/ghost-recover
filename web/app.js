@@ -113,7 +113,7 @@ async function boot() {
     S.health = await apiGet('/health');
   } catch (e) {
     document.getElementById('app').innerHTML =
-      `<div class="hero"><div class="logo">GHOST//RECOVER</div>
+      `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
        <div class="tag">engine unreachable</div>
        <div class="caps">${esc(e.message)}</div></div>`;
     return;
@@ -191,7 +191,7 @@ function viewWelcome() {
   const h = S.health || {};
   return `
   <div class="hero">
-    <div class="logo">GHOST//RECOVER</div>
+    <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
     <div class="tag">Data Recovery Suite</div>
     <div class="caps">
       ${fmtNum(h.filesystems)} filesystems · ${fmtNum(h.carvers)} carver signatures · RAID reconstruction ·
@@ -1013,7 +1013,7 @@ function shutdownEngine() {
   fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
   setTimeout(() => {
     document.body.innerHTML = `<div class="center">
-      <div class="logo">GHOST//RECOVER</div>
+      <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
       <div class="tag">Engine stopped — you may close this tab.</div>
       <div class="tag">The next launch will start a fresh session.</div>
     </div>`;

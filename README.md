@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" width="100%" alt="GHOST//RECOVER"/>
+  <img src="assets/ghost-recover-banner.png" width="100%" alt="GHOST//RECOVER"/>
 </p>
 
 <p align="center">
@@ -46,7 +46,7 @@ suites use &mdash; and some they don't:
 ## 🗺️ How it works
 
 <p align="center">
-  <img src="assets/architecture.svg" width="100%" alt="Engine architecture"/>
+  <img src="assets/ghost-recover-architecture.png" width="100%" alt="Engine architecture"/>
 </p>
 
 ---

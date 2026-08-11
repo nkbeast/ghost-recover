@@ -139,8 +139,8 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 
 .hero { display: flex; flex-direction: column; align-items: center; justify-content: center;
         height: 100%; gap: 6px; text-align: center; }
-.hero .logo { font-size: 46px; font-weight: 700; letter-spacing: .1em; color: var(--red);
-              text-shadow: 0 0 30px rgba(255,45,85,.45); }
+.hero .logo, .center .logo { display: block; border-radius: 12px;
+              box-shadow: 0 0 40px rgba(255,45,85,.28); }
 .hero .tag { color: var(--fg-dim); letter-spacing: .18em; text-transform: uppercase; font-size: 12px; }
 .hero .caps { color: var(--fg-faint); font-size: 12px; margin-top: 10px; max-width: 620px; line-height: 1.7; }
 .hero .actions { display: flex; gap: 10px; margin-top: 26px; }

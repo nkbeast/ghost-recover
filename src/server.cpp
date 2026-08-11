@@ -1870,6 +1870,12 @@ int startServer(const ServerConfig& cfg) {
     svr.Get("/styles.css", [&](const httplib::Request&, httplib::Response& res) {
         serveStatic("styles.css", "text/css; charset=utf-8", res);
     });
+    svr.Get("/logo.png", [&](const httplib::Request&, httplib::Response& res) {
+        serveStatic("logo.png", "image/png", res);
+    });
+    svr.Get("/favicon.png", [&](const httplib::Request&, httplib::Response& res) {
+        serveStatic("favicon.png", "image/png", res);
+    });
 
     g_server = &svr;
 
