@@ -552,9 +552,28 @@ bool spawnElevated(const std::string& method, const std::string& password,
 
     int pw[2] = {-1, -1};
     const bool needsPassword = (method == "sudo-password");
-    if (needsPassword && ::pipe(pw) != 0) {
-        if (err) *err = "cannot create a pipe for the password";
-        return false;
+    if (needsPassword) {
+        // A pseudo-terminal, not a pipe: sudoers with `requiretty` (Fedora's
+        // default) makes `sudo -S` refuse to read a password that does not
+        // arrive on a tty. The PTY satisfies isatty(STDIN) and still lets us
+        // feed the password directly.
+        pw[0] = ::posix_openpt(O_RDWR | O_NOCTTY);
+        if (pw[0] < 0) {
+            if (err) *err = "cannot allocate a pseudo-terminal for the password";
+            return false;
+        }
+        if (::grantpt(pw[0]) != 0 || ::unlockpt(pw[0]) != 0) {
+            ::close(pw[0]);
+            if (err) *err = "cannot set up the pseudo-terminal";
+            return false;
+        }
+        // pw[1] is borrowed to carry the slave's name across the fork/exec.
+        pw[1] = ::open(::ptsname(pw[0]), O_RDWR | O_NOCTTY);
+        if (pw[1] < 0) {
+            ::close(pw[0]);
+            if (err) *err = "cannot open the pseudo-terminal slave";
+            return false;
+        }
     }
 
     pid_t pid = ::fork();
@@ -566,8 +585,12 @@ bool spawnElevated(const std::string& method, const std::string& password,
         // Detach so the elevated instance outlives this process.
         ::setsid();
         if (needsPassword) {
+            // pw[1] is the slave the parent already opened. sudo -S only
+            // needs isatty(STDIN) (the `requiretty` sudoers default), which
+            // this dup satisfies; no open() is needed, keeping the fork/exec
+            // window free of non-async-signal-safe calls.
+            ::dup2(pw[1], STDIN_FILENO);
             ::close(pw[1]);
-            ::dup2(pw[0], STDIN_FILENO);
             ::close(pw[0]);
         } else {
             int devnull = ::open("/dev/null", O_RDONLY);
@@ -587,11 +610,11 @@ bool spawnElevated(const std::string& method, const std::string& password,
     }
 
     if (needsPassword) {
-        ::close(pw[0]);
-        std::string line = password + "\n";
-        ssize_t written = ::write(pw[1], line.data(), line.size());
-        (void)written;
         ::close(pw[1]);
+        std::string line = password + "\n";
+        ssize_t written = ::write(pw[0], line.data(), line.size());
+        (void)written;
+        ::close(pw[0]);
     }
 
     g_elevation.pending = true;
