@@ -154,7 +154,7 @@ i64 volumeSizeFromFs(DiskReader& disk, i64 start, const std::string& fs) {
 }
 
 void fillFsInfo(DiskReader& disk, PartitionInfo& p, bool detect) {
-    if (!detect || p.size_bytes < 64 * 1024) {
+    if (!detect || p.size_bytes < 64LL * 1024) {
         p.fs_status = "unknown";
         return;
     }
