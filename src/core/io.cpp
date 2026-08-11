@@ -13,7 +13,7 @@
 namespace ghost {
 
 namespace {
-constexpr i64    kCacheBlock   = 64 * 1024;   // cache granularity
+constexpr i64    kCacheBlock   = 64LL * 1024;   // cache granularity
 constexpr size_t kDefaultLines = 512;         // 512 * 64 KiB = 32 MiB
 // Reads at least this large skip the cache: sequential carving would otherwise
 // evict the metadata blocks the filesystem drivers depend on.
