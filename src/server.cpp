@@ -633,6 +633,23 @@ int startServer(const ServerConfig& cfg) {
         {"X-Content-Type-Options", "nosniff"},
     });
     svr.Options(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+    // The CORS headers above only stop a malicious page from *reading* the
+    // answer; the request still executes. A page from another origin cannot
+    // set the Origin header itself, so a mismatching Origin proves the request
+    // is cross-site — reject it outright. Plain clients (curl, the engine's
+    // own handover IPC) send no Origin header and are unaffected.
+    svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+        std::string origin = req.get_header_value("Origin");
+        if (!origin.empty()) {
+            if (origin != "http://" + req.get_header_value("Host") && origin != "null") {
+                res.status = 403;
+                res.set_content(errorJson("cross-origin requests are not allowed"),
+                                "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
     svr.set_exception_handler([](const httplib::Request&, httplib::Response& res,
                                  std::exception_ptr ep) {
         std::string msg = "unhandled error";
