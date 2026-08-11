@@ -264,6 +264,188 @@ bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out) {
 }
 
 // ---------------------------------------------------------------------------
+// XPRESS plain LZ77 (MS-XCA 2.1.1). The stream is a sequence of 32-bit flag
+// groups, each flag tested from bit 31 down: 0 = literal byte, 1 = match.
+// A match is an LE16 word ((off-1) << 3) | (len-3) with offset in [1, 8192].
+// len-3 == 7 selects the shared-nibble form: the length byte's low nibble
+// serves the first extension match, the high nibble the next consecutive one
+// (an intervening non-extension token drops the pending half). A nibble of
+// 15 means a raw length follows: byte = len-3 (must be >= 22), 255 -> LE16,
+// LE16 0 -> LE32. The final flag group is padded with 1 bits; a match flag
+// with no input left is the end-of-data marker.
+bool xpressPlainDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
+    size_t ip = 0;
+    u32 flags = 0;
+    int flagsLeft = 0;
+    size_t pendingLen = (size_t)-1;   // offset of the shared-nibble byte
+
+    auto readByte = [&]() -> int {
+        if (ip >= inLen) return -1;
+        return in[ip++];
+    };
+
+    for (;;) {
+        if (flagsLeft == 0) {
+            if (inLen - ip < 4) return false;
+            flags = (u32)(in[ip] | (in[ip + 1] << 8) | (in[ip + 2] << 16) | (in[ip + 3] << 24));
+            ip += 4;
+            flagsLeft = 32;
+        }
+        flagsLeft--;
+        if (!(flags & (1u << flagsLeft))) {
+            pendingLen = (size_t)-1;
+            int b = readByte();
+            if (b < 0) return false;
+            out.push_back((u8)b);
+            continue;
+        }
+        if (ip >= inLen) return true;           // end-of-data marker
+        if (inLen - ip < 2) return false;
+        u16 mb = (u16)(in[ip] | (in[ip + 1] << 8));
+        ip += 2;
+        size_t moff = (mb >> 3) + 1;
+        size_t mlen = (mb & 7) + 3;
+        if ((mb & 7) == 7) {
+            int nib;
+            if (pendingLen == (size_t)-1) {
+                int b = readByte();
+                if (b < 0) return false;
+                nib = b & 0x0F;
+                pendingLen = (size_t)(ip - 1);
+            } else {
+                nib = in[pendingLen] >> 4;
+                pendingLen = (size_t)-1;
+            }
+            if (nib == 15) {
+                int v = readByte();
+                if (v < 0) return false;
+                if (v == 255) {
+                    if (inLen - ip < 2) return false;
+                    v = in[ip] | (in[ip + 1] << 8);
+                    ip += 2;
+                    if (v == 0) {
+                        if (inLen - ip < 4) return false;
+                        v = (int)((u32)(in[ip] | (in[ip + 1] << 8) | (in[ip + 2] << 16) | (in[ip + 3] << 24)));
+                        ip += 4;
+                    }
+                }
+                if (v < 22) return false;
+                mlen = (size_t)v + 3;
+            } else {
+                mlen = (size_t)nib + 3;
+            }
+        }
+        if (moff > out.size()) return false;
+        size_t src = out.size() - moff;
+        for (size_t i = 0; i < mlen; i++) out.push_back(out[src + i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// XPRESS LZ77+Huffman (MS-XCA 2.1.2/2.1.4). 256 table bytes hold 512 4-bit
+// code lengths (even symbol = low nibble, odd = high nibble); canonical codes
+// are assigned in (length, symbol) order, MSB-first. The code lookup is a
+// 15-bit table over a 32-bit register fed with LE16 words MSB-first (bit 15
+// of each word first), refilled while fewer than 15 bits remain. Symbol < 256
+// is a literal; 256 is EOF (Microsoft decodes it as a match(3, 1) when the
+// output is not yet complete); a match symbol's value gives the length nibble
+// (15 = raw extension byte, 255 -> LE16, LE16 0 -> LE32, length = v + 18 or
+// v + 3) and the high-bit of the offset, whose low bits follow in the stream.
+bool xpressHuffmanDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                         size_t expectedOut) {
+    if (inLen < 256) return false;
+    u16 lens[512];
+    for (int i = 0; i < 256; i++) {
+        lens[i * 2] = in[i] & 0x0F;
+        lens[i * 2 + 1] = in[i] >> 4;
+    }
+    // 15-bit decode table, filled in canonical (length, symbol) order.
+    u16 table[32768];
+    size_t entry = 0;
+    for (int l = 1; l <= 15; l++) {
+        for (int s = 0; s < 512; s++) {
+            if (lens[s] == l) {
+                for (int k = 1 << (15 - l); k > 0; k--) table[entry++] = (u16)s;
+            }
+        }
+    }
+    if (entry != 32768) return false;
+
+    size_t ip = 256;
+    u32 bits = 0;
+    int nbits = 0;
+    while (nbits < 32) {
+        if (inLen - ip < 2) return false;
+        bits |= (u32)(in[ip] | (in[ip + 1] << 8)) << (16 - nbits);
+        ip += 2;
+        nbits += 16;
+    }
+
+    auto readRaw = [&]() -> long long {
+        if (ip >= inLen) return -1;
+        return in[ip++];
+    };
+
+    while (out.size() < expectedOut) {
+        while (nbits < 15) {
+            if (inLen - ip < 2) return false;
+            bits |= (u32)(in[ip] | (in[ip + 1] << 8)) << (16 - nbits);
+            ip += 2;
+            nbits += 16;
+        }
+        u16 sym = table[(bits >> 17) & 0x7FFF];
+        int clen = lens[sym];
+        bits = (bits << clen) & 0xFFFFFFFFu;
+        nbits -= clen;
+        if (sym < 256) {
+            out.push_back((u8)sym);
+            continue;
+        }
+        size_t mlen, moff;
+        if (sym == 256) {
+            if (out.size() == expectedOut) break;
+            mlen = 3; moff = 1;                     // Microsoft: EOF as match(3, 1)
+        } else {
+            int hb = (sym - 256) / 16;
+            mlen = (size_t)((sym - 256) % 16);          // length nibble = len-3
+            if (mlen == 15) {
+                long long v = readRaw();
+                if (v < 0) return false;
+                if (v == 255) {
+                    if (inLen - ip < 2) return false;
+                    v = in[ip] | (in[ip + 1] << 8);
+                    ip += 2;
+                    if (v == 0) {
+                        if (inLen - ip < 4) return false;
+                        v = (long long)((u32)(in[ip] | (in[ip + 1] << 8) | (in[ip + 2] << 16) | (in[ip + 3] << 24)));
+                        ip += 4;
+                    }
+                    mlen = (size_t)v + 3;
+                } else {
+                    mlen = (size_t)v + 18;
+                }
+            } else {
+                mlen += 3;
+            }
+            while (nbits < hb) {
+                if (inLen - ip < 2) return false;
+                bits |= (u32)(in[ip] | (in[ip + 1] << 8)) << (16 - nbits);
+                ip += 2;
+                nbits += 16;
+            }
+            moff = hb ? ((bits >> (32 - hb)) & ((1u << hb) - 1)) : 0;
+            bits = (bits << hb) & 0xFFFFFFFFu;
+            nbits -= hb;
+            moff += (size_t)1 << hb;
+        }
+        if (moff > out.size()) return false;
+        size_t src = out.size() - moff;
+        for (size_t i = 0; i < mlen; i++) out.push_back(out[src + i]);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
                                 size_t len, i64 expectedOut) {
     std::vector<u8> out;
@@ -278,6 +460,11 @@ std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
         if (out.empty()) return {};
     } else if (codec == "lznt1") {
         if (!lznt1Decode(data, len, out)) return {};
+    } else if (codec == "xpress") {
+        if (expectedOut <= 0) return {};
+        if (!xpressHuffmanDecode(data, len, out, (size_t)expectedOut)) return {};
+    } else if (codec == "xpress-plain") {
+        if (!xpressPlainDecode(data, len, out)) return {};
     } else {
         return {};
     }
