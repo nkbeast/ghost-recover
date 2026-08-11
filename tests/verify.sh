@@ -245,6 +245,52 @@ if [ -d "$IMG/raid10-md" ]; then
   else bad "RAID 10 md assembly does not match the original"; fi
 else skip "RAID 10 md superblock (no fixture)"; fi
 
+if [ -d "$IMG/raid6-filled" ]; then
+  out="$WORK/raid6-filled.img"
+  info=$("$BIN" raid "$IMG/raid6-filled/member0.img" "$IMG/raid6-filled/member1.img" \
+                     "$IMG/raid6-filled/member2.img" "$IMG/raid6-filled/member3.img" \
+         --out "$out" 2>/dev/null)
+  level=$(echo "$info" | awk '/^Level/{print $3}')
+  chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
+  lay=$(echo "$info" | awk '/^Layout/{print $3}')
+  if [ "$level" = raid6 ] && [ "$chunk" = 65536 ] && [ "$lay" = left-symmetric ]; then
+    ok "RAID 6 geometry recovered (level, 64 KiB chunks, left-symmetric)"
+  else bad "RAID 6 geometry wrong: level=$level chunk=$chunk layout=$lay"; fi
+  head -c "$(stat -c%s "$IMG/filled.img")" "$out" > "$WORK/raid6-trim.img"
+  if cmp -s "$WORK/raid6-trim.img" "$IMG/filled.img"; then
+    ok "assembled RAID 6 is byte-identical to the original"
+  else bad "assembled RAID 6 does not match the original"; fi
+
+  # Degraded: a data member is gone entirely and must be rebuilt from parity.
+  "$BIN" raid "$IMG/raid6-filled/member0.img" missing \
+              "$IMG/raid6-filled/member2.img" "$IMG/raid6-filled/member3.img" \
+              --level 6 --chunk 65536 --layout left-symmetric \
+              --out "$WORK/raid6-degraded.img" >/dev/null 2>&1
+  head -c "$(stat -c%s "$IMG/filled.img")" "$WORK/raid6-degraded.img" > "$WORK/raid6-deg-trim.img" 2>/dev/null
+  if cmp -s "$WORK/raid6-deg-trim.img" "$IMG/filled.img"; then
+    ok "a destroyed RAID 6 data member is rebuilt from parity, byte-perfect"
+  else bad "degraded RAID 6 rebuild does not match the original"; fi
+else skip "RAID 6 (no fixture)"; fi
+
+if [ -d "$IMG/raid6-md" ]; then
+  out="$WORK/raid6-md.img"
+  info=$("$BIN" raid "$IMG/raid6-md/member3.img" "$IMG/raid6-md/member1.img" \
+                     "$IMG/raid6-md/member0.img" "$IMG/raid6-md/member2.img" \
+         --out "$out" 2>/dev/null)
+  level=$(echo "$info" | awk '/^Level/{print $3}')
+  chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
+  lay=$(echo "$info" | awk '/^Layout/{print $3}')
+  src=$(echo "$info" | awk '/^Source/{print $3}')
+  if [ "$level" = raid6 ] && [ "$chunk" = 65536 ] && [ "$lay" = left-symmetric ] &&
+     echo "$src" | grep -q mdraid; then
+    ok "RAID 6 geometry comes from the md 1.x superblocks (members out of order)"
+  else bad "RAID 6 md 1.x superblock wrong: level=$level chunk=$chunk layout=$lay src=$src"; fi
+  head -c "$(stat -c%s "$IMG/filled.img")" "$out" > "$WORK/raid6-md-trim.img"
+  if cmp -s "$WORK/raid6-md-trim.img" "$IMG/filled.img"; then
+    ok "assembled RAID 6 from md superblocks is byte-identical to the original"
+  else bad "RAID 6 md assembly does not match the original"; fi
+else skip "RAID 6 md superblock (no fixture)"; fi
+
 if [ -d "$IMG/raid" ]; then
   # A near-empty array is genuinely ambiguous: chunk N and N/2 map its start
   # identically. The engine must say so rather than assert a guess.

@@ -304,7 +304,10 @@ i64 RaidReader::read(u64 offset, u8* buf, i64 count) {
 
                 int disk;
                 if (lay == 2 || lay == 3) {                                    // symmetric
-                    disk = (pd + 1 + idxInStripe) % n;
+                    // Data starts after P and Q; the kernel's raid5.c maps
+                    // dd = (pd + 1 + dd) for RAID5 but (pd + 2 + dd) for RAID6
+                    // (Q sits at pd + 1), see ALGORITHM_*_SYMMETRIC.
+                    disk = (pd + parityCount + idxInStripe) % n;
                 } else {                                                       // asymmetric
                     disk = idxInStripe;
                     if (disk >= pd) disk++;

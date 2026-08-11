@@ -257,6 +257,37 @@ stripe0(f'{img}/ext4.img',   f'{img}/raid')          # sparse: ambiguous by natu
 stripe0(f'{img}/filled.img', f'{img}/raid-filled')   # filled: determinable
 os.makedirs(f'{img}/raid5-filled', exist_ok=True)
 raid5(f'{img}/filled.img',   f'{img}/raid5-filled')
+def gfmul(a, b):
+    r = 0
+    for _ in range(8):
+        if b & 1: r ^= a
+        b >>= 1
+        a <<= 1
+        if a & 0x100: a ^= 0x11d
+    return r & 0xff
+def raid6(src, outdir, N=4):
+    # left-symmetric RAID 6 (the md default): P at n-1-(s%n), Q at pd+1,
+    # data chunk i at (pd+2+i)%n, Q = sum D_i * g^i over GF(2^8).
+    data = open(src,'rb').read(); dd = N-2
+    nC = (len(data)+C-1)//C; nS = (nC+dd-1)//dd
+    g = [1]
+    for i in range(1, dd+1): g.append(gfmul(g[-1], 2))
+    mem = [bytearray(nS*C) for _ in range(N)]
+    for s in range(nS):
+        pd = N-1-(s % N); qd = (pd+1) % N
+        par = bytearray(C); q = bytearray(C)
+        for i in range(dd):
+            ci = s*dd+i
+            ch = data[ci*C:(ci+1)*C].ljust(C, b'\x00')
+            mem[(pd+2+i) % N][s*C:(s+1)*C] = ch
+            for k in range(C): par[k] ^= ch[k]
+            for k in range(C): q[k] ^= gfmul(ch[k], g[i])
+        mem[pd][s*C:(s+1)*C] = par
+        mem[qd][s*C:(s+1)*C] = q
+    for i,m in enumerate(mem):
+        open(f'{outdir}/member{i}.img','wb').write(bytes(m))
+os.makedirs(f'{img}/raid6-filled', exist_ok=True)
+raid6(f'{img}/filled.img', f'{img}/raid6-filled')
 PY
 
   # Same arrays, but stamped with real Linux md superblocks (1.x and 0.90,
@@ -336,6 +367,10 @@ stamp('raid5-md', sb1, 5, 2, 4, [0, 1, 2, 3])
 # 0.90 on the RAID 0 array.
 shutil.copytree(f'{img}/raid-filled', f'{img}/raid0-md')
 stamp('raid0-md', sb090, 0, 0, 2)
+
+# 1.x on the RAID 6 array (left-symmetric, the md default).
+shutil.copytree(f'{img}/raid6-filled', f'{img}/raid6-md')
+stamp('raid6-md', sb1, 6, 2, 4, [0, 1, 2, 3])
 
 # near-2 RAID 10 (1.x) built from the filled image.
 def raid10_near2(src, outdir):
