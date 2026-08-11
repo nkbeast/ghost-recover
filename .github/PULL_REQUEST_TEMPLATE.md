@@ -8,7 +8,7 @@ Closes #issue-number (if applicable).
 
 ## What was tested
 
-- [ ] `./tests/verify.sh` passes locally (73 checks)
+- [ ] `./tests/verify.sh` passes locally (78 checks)
 - [ ] Sanitizer build (`-DCMAKE_BUILD_TYPE=Debug`) passes the suite
 - [ ] Manual test with a real image / fixture / device (describe it)
 

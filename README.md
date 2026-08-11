@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Platform-Linux-green" alt="Linux"/>
   <a href="https://github.com/nkbeast/ghost-recover/stargazers"><img src="https://img.shields.io/github/stars/nkbeast/ghost-recover?style=social" alt="Stars"/></a>
   <a href="https://github.com/nkbeast/ghost-recover/forks"><img src="https://img.shields.io/github/forks/nkbeast/ghost-recover?style=social" alt="Forks"/></a>
-  <img src="https://img.shields.io/badge/tests-73%2F73%20passing-success" alt="73/73 tests"/>
+  <img src="https://img.shields.io/badge/tests-78%2F78%20passing-success" alt="78/78 tests"/>
 </p>
 
 ---
@@ -29,7 +29,7 @@ suites use &mdash; and some they don't:
   (fragmented files come out **intact**, not corrupted).
 * **Deleted-file recovery** &mdash; journal mining, directory slack, orphan inodes, MFT slack,
   FAT1/FAT2 differencing — the techniques, not just "scan for free space".
-* **Signature carving** &mdash; 251 formats across 15 categories, one Aho-Corasick pass, structural
+* **Signature carving** &mdash; 251 formats across 14 categories, one Aho-Corasick pass, structural
   length validation, entropy screening, content-hash dedup.
 * **RAID reassembly** &mdash; 0/1/5/6/10 and linear, from md superblocks *or* blind geometry
   brute-force with honest ambiguity reporting, plus parity rebuild of dead members.
@@ -128,7 +128,7 @@ Each filesystem gets the techniques that actually apply to it:
 
 ### 🪓 Signature carving
 
-**251 signatures across 15 categories**, matched with a **single Aho-Corasick pass** over the
+**251 signatures across 14 categories**, matched with a **single Aho-Corasick pass** over the
 device rather than one search per signature.
 
 Formats that describe their own length (JPEG, PNG, GIF, TIFF, RIFF, MP4/ISO-BMFF, EBML, Ogg,
@@ -216,11 +216,11 @@ the host.
 ## 🧪 Testing
 
 ```sh
-./tests/verify.sh        # end-to-end fixtures: 73 automated checks
+./tests/verify.sh        # end-to-end fixtures: 78 automated checks
 ./tests/verify.sh /tmp/ghost-fixtures   # reuse a previously built fixture set
 ```
 
-**73 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
+**78 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
 SquashFS/cramfs/MINIX/JFFS2 filesystems from a known corpus (no mounting, no root), deletes files
 from some of them, then checks that the engine identifies each filesystem, finds the deleted
 files, and writes every recovered file back out **byte-for-byte identical** to the original —
