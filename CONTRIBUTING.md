@@ -46,9 +46,10 @@ tests/           fixture builder + end-to-end verification
 
 Look for the `good-first-issue` label. Good candidates that are always welcome:
 
-* **Fixture coverage** — e.g. a populated exFAT volume, or fixtures for the
-  drivers currently verified only for identification (APFS, HFS+, F2FS, UFS,
-  ReiserFS, JFS, JFFS2). These are worth more than a new feature.
+* **Fixture coverage** — the drivers verified only for identification (APFS,
+  HFS+, F2FS, UFS, ReiserFS, JFS) are the current gap. A populated fixture is
+  worth more than a new feature. exFAT, JFFS2, Btrfs compressed extents and
+  NTFS LZNT1 are already covered by the suite.
 * **Format validators** — a new signature is only as good as its structural
   walker in `src/carve/signatures.cpp`.
 * **Robustness** — corrupt a fixture byte by byte and find what crashes.

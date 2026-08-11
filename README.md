@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Platform-Linux-green" alt="Linux"/>
   <a href="https://github.com/nkbeast/ghost-recover/stargazers"><img src="https://img.shields.io/github/stars/nkbeast/ghost-recover?style=social" alt="Stars"/></a>
   <a href="https://github.com/nkbeast/ghost-recover/forks"><img src="https://img.shields.io/github/forks/nkbeast/ghost-recover?style=social" alt="Forks"/></a>
-  <img src="https://img.shields.io/badge/tests-61%2F61%20passing-success" alt="61/61 tests"/>
+  <img src="https://img.shields.io/badge/tests-73%2F73%20passing-success" alt="73/73 tests"/>
 </p>
 
 ---
@@ -216,15 +216,18 @@ the host.
 ## 🧪 Testing
 
 ```sh
-./tests/verify.sh        # end-to-end fixtures: 61 automated checks
+./tests/verify.sh        # end-to-end fixtures: 73 automated checks
 ./tests/verify.sh /tmp/ghost-fixtures   # reuse a previously built fixture set
 ```
 
-**61 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
-SquashFS/cramfs/MINIX filesystems from a known corpus (no mounting, no root), deletes files from
-some of them, then checks that the engine identifies each filesystem, finds the deleted files, and
-writes every recovered file back out **byte-for-byte identical** to the original — verified by
-**MD5, not by the engine's own reporting**.
+**73 automated checks, 0 failures.** Builds real ext4/ext2/NTFS/FAT32/exFAT/Btrfs/XFS/ISO/UDF/
+SquashFS/cramfs/MINIX/JFFS2 filesystems from a known corpus (no mounting, no root), deletes files
+from some of them, then checks that the engine identifies each filesystem, finds the deleted
+files, and writes every recovered file back out **byte-for-byte identical** to the original —
+verified by **MD5, not by the engine's own reporting**. The Btrfs fixture rewrites real extents
+as compressed ones (inline zlib/lzo/zstd, regular zlib extents) and the NTFS fixture stores one
+file as an LZNT1 stream, so the compressed-content paths are proven against the same corpus, not
+against the engine's own output.
 
 Also covered: MBR logical partitions, partition recovery after wiping both GPT copies, RAID 0/5
 geometry recovery from data alone, parity rebuild of a destroyed member, superblock repair (dry
@@ -250,14 +253,14 @@ the data:
 
 * **ZFS** is identified but not walked — file recovery needs a full DMU traversal plus block
   decompression. Import the pool read-only instead.
-* **exFAT** has a complete driver, but the automated suite cannot populate an exFAT volume without
-  mounting (which needs root), so its directory walk is exercised only against an empty volume.
-  The FAT, NTFS and exFAT parsers share no code, so treat exFAT results as less proven than the rest.
-* **APFS, HFS+, F2FS, UFS, ReiserFS, JFS and JFFS2** are implemented but their fixtures are empty
-  or unavailable on Linux, so they are verified for identification and for not crashing, not for
+* **APFS, HFS+, F2FS, UFS, ReiserFS, JFS** are implemented but their fixtures are empty or
+  unavailable on Linux, so they are verified for identification and for not crashing, not for
   recovery fidelity.
-* **Compressed Btrfs/ZFS extents and NTFS compressed streams** are reported and located, but their
-  contents are not decompressed.
+* **Compressed ZFS blocks** cannot be decoded (see the ZFS bullet above); the Btrfs zlib/lzo/zstd
+  extent codecs, the Btrfs inline codecs and NTFS LZNT1 are decoded and covered by fixtures.
+  NTFS **LZX** (WIM-format compression) and XPRESS are identified but not decoded.
+* **JFFS2** is populated by `mkfs.jffs2` (every node zlib-compressed), so compressed and raw
+  paths are both exercised.
 
 ---
 
@@ -279,8 +282,8 @@ tests/           fixture builder and end-to-end verification
 
 ## 🧭 Roadmap
 
-* exFAT fixture coverage (populated volume) and real-world recovery fidelity tests
-* NTFS LZX / Btrfs lzo+zstd content decompression
+* NTFS LZX / XPRESS content decompression
+* Real-world recovery fidelity tests beyond synthetic fixtures
 * Forensics extras: PST/Outlook, browser artifacts, deeper Windows app-data coverage
 * Windows and macOS builds
 * Bad-block retry heuristics (multi-pass like ddrescue)
