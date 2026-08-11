@@ -8,7 +8,7 @@ Closes #issue-number (if applicable).
 
 ## What was tested
 
-- [ ] `./tests/verify.sh` passes locally (52 checks)
+- [ ] `./tests/verify.sh` passes locally (73 checks)
 - [ ] Sanitizer build (`-DCMAKE_BUILD_TYPE=Debug`) passes the suite
 - [ ] Manual test with a real image / fixture / device (describe it)
 
@@ -18,7 +18,6 @@ Closes #issue-number (if applicable).
 - [ ] No new compiler warnings (`-Wall -Wextra`)
 - [ ] New behavior has a test in `tests/` (bug fixes ship with a
       failing-then-passing case)
-- [ ] README "Known limits" updated if this changes what the engine can do
 - [ ] I have not attached any image containing personal data
 
 ## Notes for reviewers

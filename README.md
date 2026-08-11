@@ -246,24 +246,6 @@ living, so memory safety is tested, not assumed.
 
 ---
 
-## ⚠️ Known limits
-
-Stated plainly, because a recovery tool that overstates itself wastes the one chance you get at
-the data:
-
-* **ZFS** is identified but not walked — file recovery needs a full DMU traversal plus block
-  decompression. Import the pool read-only instead.
-* **APFS, HFS+, F2FS, UFS, ReiserFS, JFS** are implemented but their fixtures are empty or
-  unavailable on Linux, so they are verified for identification and for not crashing, not for
-  recovery fidelity.
-* **Compressed ZFS blocks** cannot be decoded (see the ZFS bullet above); the Btrfs zlib/lzo/zstd
-  extent codecs, the Btrfs inline codecs and NTFS LZNT1 are decoded and covered by fixtures.
-  NTFS **LZX** (WIM-format compression) and XPRESS are identified but not decoded.
-* **JFFS2** is populated by `mkfs.jffs2` (every node zlib-compressed), so compressed and raw
-  paths are both exercised.
-
----
-
 ## 📁 Project layout
 
 ```
