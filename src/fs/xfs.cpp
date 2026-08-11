@@ -394,7 +394,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             u16 numrecs = f.be16(2);
             size_t maxrecs = (n.fork.size() - 4) / 16;
             std::vector<u64> children;
-            for (u16 i = 0; i < numrecs && i < maxrecs; i++) {
+            for (size_t i = 0; i < (size_t)numrecs && i < maxrecs; i++) {
                 size_t p = 4 + maxrecs * 8 + (size_t)i * 8;
                 if (!f.has(p, 8)) break;
                 children.push_back(f.be64(p));
