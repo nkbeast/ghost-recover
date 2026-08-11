@@ -356,6 +356,28 @@ if [ -f "$IMG/ext4.img" ]; then
                  *) bad "did not refuse to carve onto the source";; esac
 fi
 
+# --------------------------------------------------------------- web API
+if command -v curl >/dev/null; then
+  head2 "Web API"
+  PORT=$((31000 + ($$ % 200)))
+  "$BIN" --port "$PORT" > "$WORK/server.log" 2>&1 &
+  SRV=$!
+  sleep 0.7
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/health" || true)
+  [ "$code" = 200 ] && ok "health endpoint answers 200" || bad "health endpoint answered $code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://evil.example' \
+         "http://127.0.0.1:$PORT/api/health" || true)
+  [ "$code" = 403 ] && ok "cross-origin requests are refused with 403" \
+                    || bad "cross-origin request answered $code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+         "http://127.0.0.1:$PORT/api/hex?job=missing&index=0&offset=999999999999&length=16" || true)
+  [ "$code" = 404 ] && ok "out-of-range hex-view requests are refused" \
+                    || bad "out-of-range hex request answered $code"
+  kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+else
+  skip "web API checks (curl not installed)"
+fi
+
 # --------------------------------------------------------------- summary
 printf '\n\033[1m%d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"
 echo "fixtures kept in $FIX"
