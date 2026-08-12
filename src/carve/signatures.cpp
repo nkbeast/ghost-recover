@@ -204,6 +204,24 @@ i64 vGif(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return -1;
 }
 
+// --- QOI (Quite OK Image): op stream ended by the 8-byte end marker. -------
+i64 vQoi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be32(off + 4) == 0 || s.be32(off + 8) == 0) return -1;   // width/height
+    u8 ch = s.byte(off + 12);
+    if (ch < 3 || ch > 4) return -1;
+    i64 p = off + 14;
+    while (p + 8 <= off + max) {
+        // The end marker (7 zero bytes + 0x01) must be checked before
+        // decoding — its own zero bytes read back-to-back as index ops.
+        if (s.be32(p) == 0 && s.be32(p + 4) == 1) return (p + 8) - off;
+        u8 b = s.byte(p);
+        if (b == 0xFE) { p += 4; continue; }   // QOI_OP_RGB
+        if (b == 0xFF) { p += 5; continue; }   // QOI_OP_RGBA
+        p += ((b >> 6) == 2) ? 2 : 1;          // luma takes 2 bytes, others 1
+    }
+    return -1;
+}
+
 // --- BMP: the header carries the file size. --------------------------------
 i64 vBmp(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u32 size = s.le32(off + 2);
@@ -836,6 +854,14 @@ i64 vAmr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     while (p < off + max && frames < 2000000) {
         u8 toc = s.byte(p);
         int mode = (toc >> 3) & 0xF;
+        // NO_DATA (mode 15) terminates most streams. A run of all-zero frame
+        // units after at least four real frames is padding (files are padded
+        // with zeroes to 20 ms / 40 ms boundaries or with whole dropped
+        // frames); without this rule a zero-filled free region is consumed
+        // as legal FT0 speech frames forever.
+        u8 b1 = s.byte(p + 1), b2 = s.byte(p + 2), b3 = s.byte(p + 3);
+        if (mode == 15) break;
+        if (frames >= 4 && toc == 0 && b1 == 0 && b2 == 0 && b3 == 0) break;
         int sz = wb ? kWb[mode] : kNb[mode];
         if (sz == 0) break;
         p += 1 + sz;
@@ -843,6 +869,233 @@ i64 vAmr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     if (frames < 4) return -1;
     return p - off;
+}
+
+// --- AU (Sun/NeXT .snd) ----------------------------------------------------
+i64 vAu(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 dataOff = s.be32(off + 4);
+    u32 dataSize = s.be32(off + 8);
+    u32 encoding = s.be32(off + 12);
+    u32 rate = s.be32(off + 16);
+    u32 chans = s.be32(off + 20);
+    if (encoding > 27) return -1;
+    if (rate == 0 || rate > 200000 || chans == 0 || chans > 256) return -1;
+    if (dataSize == 0xFFFFFFFFu) return -1;         // unknown: can't size it
+    if (dataOff < 24 || dataOff > 32 * 1024) return -1;
+    i64 end = off + (i64)dataOff + (i64)dataSize;
+    return (end <= off + max) ? end - off : -1;
+}
+
+// --- CAF (Apple Core Audio Format) ------------------------------------------
+i64 vCaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be16(off + 4) != 1) return -1;
+    i64 p = off + 8;
+    while (p + 12 <= off + max) {
+        auto t = s.read(p, 4);
+        if (t.size() < 4) return -1;
+        auto szb = s.read(p + 4, 8);
+        if (szb.size() < 8) return -1;
+        u64 sz = 0;
+        for (int k = 0; k < 8; k++) sz = sz << 8 | szb[k];
+        if (sz > (u64)max) return -1;
+        bool dataChunk = (t[0] == 'd' && t[1] == 'a' && (t[2] == 't' || t[2] == 'a'));
+        p += 12 + (i64)sz;
+        if (dataChunk) break;
+    }
+    if (p > off + max) return -1;
+    return p - off;
+}
+
+// --- VOC (Creative Voice) ---------------------------------------------------
+i64 vVoc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 24);
+    if (h.size() < 24) return -1;
+    if (std::memcmp(h.data(), "Creative Voice File\x1a", 20) != 0) return -1;
+    i64 p = off + 24;                       // 20-byte magic + version + checksum
+    i64 terminator = -1;
+    int blocks = 0;
+    while (p + 4 <= off + max && blocks < 2000000) {
+        u8 type = s.byte(p);
+        u32 size = (u32)s.le16(p + 1);
+        if (type == 0) { terminator = p + 4; break; }
+        if (type > 9) return -1;            // unknown block type: not ours
+        p += 4 + (i64)size;
+        blocks++;
+    }
+    if (blocks < 1 || terminator < 0) return -1;
+    return terminator - off;
+}
+
+// --- IVF (Intel Video Format) -----------------------------------------------
+i64 vIvf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 32);
+    if (h.size() < 32) return -1;
+    if (h[0] != 'D' || h[1] != 'K' || h[2] != 'I' || h[3] != 'F') return -1;
+    u16 hdrSize = s.le16(off + 6);
+    if (hdrSize < 32 || hdrSize > 4096) return -1;
+    u32 nframes = s.le32(off + 24);
+    if (nframes == 0 || nframes > 2000000) return -1;
+    i64 p = off + (i64)hdrSize;
+    for (u32 f = 0; f < nframes; f++) {
+        if (p + 12 > off + max) return -1;
+        u32 frame = s.le32(p);
+        if (frame == 0 || frame > 512 * MB) return -1;
+        p += 12 + (i64)frame;
+    }
+    return (p <= off + max) ? p - off : -1;
+}
+
+// --- PCX (RLE walk) ---------------------------------------------------------
+i64 vPcx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 end = off + 128;
+    if (end > off + max) return -1;
+    u8 bpp = s.byte(off + 3);
+    u8 planes = s.byte(off + 65);
+    u16 bytesPerLine = s.le16(off + 66);
+    u16 xmax = s.le16(off + 8), ymax = s.le16(off + 10);
+    u16 xmin = s.le16(off + 4), ymin = s.le16(off + 6);
+    if (xmax < xmin || ymax < ymin) return -1;
+    if (bpp != 1 && bpp != 2 && bpp != 4 && bpp != 8 && bpp != 24) return -1;
+    if (planes == 0 || planes > 4) return -1;
+    if (bytesPerLine == 0 || bytesPerLine > 64 * 1024) return -1;
+    u64 lines = (u64)(ymax - ymin) + 1;
+    // Decoded units = rows x bytes-per-row x planes. RLE data expands to that
+    // count; walk the RLE stream over the exact byte count. A 256-color
+    // palette (0x0C + 768) may follow.
+    u64 units = lines * (u64)bytesPerLine * planes;
+    i64 p = end;
+    bool any = false;
+    for (u64 u = 0; u < units; u++) {
+        if (p >= off + max) return -1;
+        u8 c = s.byte(p++);
+        if (c & 0xC0) {
+            if (p >= off + max) return -1;
+            p++;                                    // one run value byte
+            u += (u64)(c & 0x3F) - 1;
+            if (u >= units) break;
+        }
+        any = true;
+    }
+    if (!any) return -1;
+    // 8-bit single-plane images end with a 768-byte VGA palette preceded by
+    // the 0x0C marker.
+    if (bpp == 8 && planes == 1 && s.byte(p) == 0x0C) {
+        if (p + 769 > off + max) return -1;
+        p += 769;
+    }
+    return (p <= off + max) ? p - off : -1;
+}
+
+// --- ASCII STL (bounded by the endsolid marker) -----------------------------
+i64 vStlAscii(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    static const char* kLineTokens[] = {
+        "facet normal", "solid ", "endsolid", "outer loop", "inner loop",
+        "vertex", "endloop", "endfacet", "color", "sourcestatcode", "aoutstatcode"};
+    i64 p = off;
+    int facets = 0;
+    while (p < off + max) {
+        i64 q = p;
+        while (q < off + max && (s.byte(q) == ' ' || s.byte(q) == '\t')) q++;
+        auto tok = s.read(q, 13);
+        // endsolid closes the file; its line end is the last byte.
+        if (tok.size() >= 8 && std::memcmp(tok.data(), "endsolid", 8) == 0) {
+            i64 e = q + 8;
+            while (e < off + max && s.byte(e) != '\n') e++;
+            return std::min<i64>(e + 1, off + max) - off;
+        }
+        bool known = false;
+        for (const char* t : kLineTokens) {
+            size_t n = strlen(t);
+            if (tok.size() >= n && std::memcmp(tok.data(), t, n) == 0) { known = true; break; }
+        }
+        if (std::memcmp(tok.data(), "facet normal", 12) == 0) facets++;
+        if (!known) break;                             // foreign line: not ours
+        while (q < off + max && s.byte(q) != '\n') q++;
+        if (q >= off + max) break;
+        p = q + 1;
+    }
+    return (facets >= 1) ? p - off : -1;
+}
+
+// --- cpio (newc / crc / odc / binary) ---------------------------------------
+i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto hdr = s.read(off, 26);
+    if (hdr.size() < 26) return -1;
+    auto oct = [&](i64 at, int n) -> i64 {
+        i64 v = 0;
+        for (int i = 0; i < n; i++) {
+            u8 c = s.byte(at + i);
+            if (c < '0' || c > '7') return -1;
+            v = v * 8 + (c - '0');
+        }
+        return v;
+    };
+    auto hexn = [&](i64 at, int n) -> i64 {
+        i64 v = 0;
+        for (int i = 0; i < n; i++) {
+            u8 c = s.byte(at + i);
+            if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+            else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
+            else return -1;
+        }
+        return v;
+    };
+    bool ascii = std::memcmp(hdr.data(), "070701", 6) == 0 ||
+                 std::memcmp(hdr.data(), "070702", 6) == 0 ||
+                 std::memcmp(hdr.data(), "070707", 6) == 0;
+    bool bin = hdr[0] == (u8)0xC7 && hdr[1] == (u8)0x71;
+    if (!ascii && !bin) return -1;
+    // newc/crc use a 110-byte header, odc 76 bytes, binary 26 bytes.
+    const int hdrLen = bin ? 26 : (std::memcmp(hdr.data(), "070707", 6) == 0 ? 76 : 110);
+    i64 p = off;
+    int entries = 0;
+    while (p + hdrLen <= off + max && entries < 1000000) {
+        i64 ns = 0, fs = 0;
+        if (ascii) {
+            if (s.byte(p) != '0' || s.byte(p + 1) != '7' || s.byte(p + 2) != '0' ||
+                s.byte(p + 3) != '7' || s.byte(p + 4) != '0') return -1;
+            u8 c5 = s.byte(p + 5);
+            if (c5 != '1' && c5 != '2' && c5 != '7') return -1;   // 070701/070702/070707
+            // odc: namesize at +59, filesize at +65 (76-byte header, octal).
+            // newc/crc: namesize at +94, filesize at +54 (110-byte header,
+            // 8-digit lowercase hex).
+            bool odc = std::memcmp(hdr.data(), "070707", 6) == 0;
+            if (odc) {
+                ns = oct(p + 59, 6);
+                fs = oct(p + 65, 11);
+            } else {
+                ns = hexn(p + 94, 8);
+                fs = hexn(p + 54, 8);
+            }
+        } else {
+            ns = s.le16(p + 20);
+            fs = s.le16(p + 22) | ((i64)s.le16(p + 24) << 16);
+        }
+        if (ns < 1 || ns > 65536 || fs < 0 || fs > 4LL * GB) return -1;
+        // newc/crc pad names and data to 4 bytes; odc and binary to 2.
+        const int recAlign = (hdrLen == 110) ? 4 : 2;
+        auto padUp = [&](i64 at) -> i64 {
+            i64 rel = at - off;
+            i64 rem = rel % recAlign;
+            return rem ? (at + (recAlign - rem)) : at;
+        };
+        p += hdrLen;
+        if (p + ns > off + max) return -1;
+        size_t want = (size_t)std::min<i64>(ns, 32);
+        auto name = s.read(p, want);
+        if (name.size() < want) return -1;
+        bool trailer = ns >= 10 && std::memcmp(name.data(), "TRAILER!!!", 10) == 0;
+        p = padUp(p + ns);
+        if (!trailer) {
+            i64 q = padUp(p + fs);
+            if (q > off + max) return -1;
+            p = q;
+        }
+        entries++;
+        if (trailer) return p - off;
+    }
+    return -1;
 }
 
 // --- MIDI ------------------------------------------------------------------
@@ -1091,21 +1344,7 @@ i64 vTar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (h.size() < 512) break;
         bool allZero = true;
         for (u8 c : h) if (c) { allZero = false; break; }
-        if (allZero) {
-            // End-of-archive padding: GNU tar zero-fills to a 10 KiB block.
-            // The zeros belong to the file — skip them, and end where the
-            // first foreign byte appears.
-            i64 q = p;
-            while (q + 512 <= off + max) {
-                bool z = true;
-                auto zz = s.read(q, 512);
-                if (zz.size() < 512) { q = off + max; break; }
-                for (u8 c : zz) if (c) { z = false; break; }
-                if (!z) break;
-                q += 512;
-            }
-            return q - off;
-        }
+        if (allZero) break;                       // end-of-archive terminator
         if (std::memcmp(h.data() + 257, "ustar", 5) != 0) break;
         // size is an octal string at +124, 12 bytes
         u64 size = 0;
@@ -1118,7 +1357,23 @@ i64 vTar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         members++;
     }
     if (members < 1) return -1;
-    return (p + 512) - off;
+    // Writers pad the archive to a record size (GNU tar and Python's
+    // tarfile both default to 10 KiB). The file ends on that boundary —
+    // everything beyond it (usually the next file's area) is foreign, so
+    // never walk the zero run looking for it.
+    i64 end = p;
+    i64 rel = end - off;
+    if (rel % 10240 != 0) {
+        i64 rounded = off + ((rel / 10240) + 1) * 10240;
+        if (rounded <= off + max && rounded > end) {
+            // Only extend when the rounding really is archive padding.
+            bool zeroOk = true;
+            for (i64 q = end; q < rounded && zeroOk; q++)
+                if (s.byte(q)) zeroOk = false;
+            if (zeroOk) end = rounded;
+        }
+    }
+    return end - off;
 }
 
 // --- ar / deb --------------------------------------------------------------
@@ -1481,17 +1736,23 @@ i64 vWasm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     while (p < max && sections < 4096) {
         u8 id = s.byte(off + p);
         if (id > 13) break;
-        p++;
-        // LEB128 section length
+        // LEB128 section length — peek without consuming so a zero-length
+        // section (padding after the last real section) does not inflate the
+        // carved size.
+        i64 leb = p + 1;
         u64 len = 0;
         int shift = 0;
-        while (p < max && shift < 35) {
-            u8 b = s.byte(off + p++);
+        bool done = false;
+        while (leb < max && shift < 35) {
+            u8 b = s.byte(off + leb++);
             len |= (u64)(b & 0x7F) << shift;
-            if (!(b & 0x80)) break;
+            if (!(b & 0x80)) { done = true; break; }
             shift += 7;
         }
-        if (p + (i64)len > max) break;
+        if (!done || shift >= 35) break;      // unterminated LEB -> not ours
+        if (len == 0) break;                  // empty section: stop, not run
+        p = leb;
+        if (p - 8 + (i64)len > max) break;
         p += (i64)len;
         sections++;
     }
@@ -1559,7 +1820,8 @@ i64 vQcow(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     // The L1 table itself is part of the file even when no L2 entry refers
     // beyond it (qemu sparsifies exactly this way: the L1 cluster is written
     // last, at the physical end of the image).
-    end = std::max(end, endOf(l1Off, std::max<i64>(512, (i64)l1Size * 8)));
+    if (l1Off > 0 && l1Off < (u64)max && l1Size > 0 && (i64)l1Size * 8 <= max - (i64)l1Off)
+        end = std::max(end, endOf(l1Off, (i64)l1Size * 8));
     if (snapCount <= 0x10000) end = std::max(end, endOf(snapOff, snapCount * 184));
     if (l1Size > 0 && l1Off == 0) return -1;
     if (l1Size > 0x100000) l1Size = 0x100000;   // don't chase absurd tables
@@ -1588,9 +1850,10 @@ i64 vQcow(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         for (size_t j = 0; j < n; j++) {
             u64 e = be64v(rt.data() + j * 8);
             if (e == 0) continue;
-            u64 bOff = (e >> 9) & 0x3FFFFFFFFFFFFFULL;
-            if (bOff == 0 || bOff * cluster >= (u64)max) continue;
-            end = std::max(end, endOf(bOff * cluster, cluster));
+            // Refcount table entries are byte offsets of refcount blocks.
+            u64 bOff = e;
+            if (bOff == 0 || bOff >= (u64)max) continue;
+            end = std::max(end, endOf(bOff, cluster));
         }
     }
     if (end < 512) return -1;
@@ -2496,11 +2759,11 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("J2K", "j2k", "image", B({0xFF,0x4F,0xFF,0x51}), 256*MB));
     add(mk("JXL", "jxl", "image", B({0xFF,0x0A}), 256*MB));
     add(mk("JXL_ISO", "jxl", "image", B({0x00,0x00,0x00,0x0C,'J','X','L',0x20}), 256*MB));
-    add(mk("QOI", "qoi", "image", S("qoif"), 256*MB));
+    add(mk("QOI", "qoi", "image", S("qoif"), 256*MB, SizeMode::Heuristic, vQoi));
     add(mk("DDS", "dds", "image", S("DDS "), 512*MB));
     add(mk("EXR", "exr", "image", B({0x76,0x2F,0x31,0x01}), 512*MB));
     add(mk("HDR", "hdr", "image", S("#?RADIANCE"), 256*MB));
-    add(mk("PCX", "pcx", "image", B({0x0A,0x05,0x01,0x08}), 64*MB));
+    add(mk("PCX", "pcx", "image", B({0x0A,0x05,0x01,0x08}), 64*MB, SizeMode::Container, vPcx));
     add(mk("ICNS", "icns", "image", S("icns"), 64*MB));
     add(mk("EMF", "emf", "image", B({0x01,0x00,0x00,0x00,0x58,0x00,0x00,0x00}), 64*MB));
     add(mk("WMF", "wmf", "image", B({0xD7,0xCD,0xC6,0x9A}), 64*MB));
@@ -2553,7 +2816,7 @@ std::vector<CarveSpec> buildRegistry() {
     { auto c = mk("MPEG_VES", "mpv", "video", B({0x00,0x00,0x01,0xB3}), 4*GB); c.min_size = 2048; add(c); }
     add(mk("RM", "rm", "video", S(".RMF"), 4*GB));
     add(mk("MXF", "mxf", "video", B({0x06,0x0E,0x2B,0x34,0x02,0x05,0x01,0x01}), 32*GB));
-    add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB));
+    add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB, SizeMode::Container, vIvf));
     add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB));
     add(mk("BIK", "bik", "video", S("BIK"), 4*GB));
     add(mk("SWF", "swf", "video", S("FWS"), 256*MB, SizeMode::Header, vSwf));
@@ -2602,9 +2865,9 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("WV", "wv", "audio", S("wvpk"), 1*GB));
     add(mk("MPC", "mpc", "audio", S("MPCK"), 512*MB));
     add(mk("MPC_SV7", "mpc", "audio", S("MP+"), 512*MB));
-    add(mk("AU", "au", "audio", B({0x2E,'s','n','d'}), 512*MB));
-    add(mk("CAF", "caf", "audio", S("caff"), 2*GB));
-    add(mk("VOC", "voc", "audio", S("Creative Voice File"), 256*MB));
+    add(mk("AU", "au", "audio", B({0x2E,'s','n','d'}), 512*MB, SizeMode::Container, vAu));
+    add(mk("CAF", "caf", "audio", S("caff"), 2*GB, SizeMode::Container, vCaf));
+    add(mk("VOC", "voc", "audio", S("Creative Voice File"), 256*MB, SizeMode::Container, vVoc));
     add(mk("MOD_IT", "it", "audio", S("IMPM"), 128*MB));
     { auto c = mk("MOD_S3M", "s3m", "audio", S("SCRM"), 128*MB);
       c.magic_offset = 44; add(c); }
@@ -2688,9 +2951,9 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("LZIP", "lz", "archive", S("LZIP"), 8*GB));
     add(mk("LZMA_ALONE", "lzma", "archive", B({0x5D,0x00,0x00}), 8*GB));
     add(mk("RPM", "rpm", "archive", B({0xED,0xAB,0xEE,0xDB}), 2*GB));
-    add(mk("CPIO_ASCII", "cpio", "archive", S("070701"), 2*GB));
-    add(mk("CPIO_ODC", "cpio", "archive", S("070707"), 2*GB));
-    add(mk("CPIO_BIN", "cpio", "archive", B({0xC7,0x71}), 2*GB));
+    add(mk("CPIO_ASCII", "cpio", "archive", S("070701"), 2*GB, SizeMode::Container, vCpio));
+    add(mk("CPIO_ODC", "cpio", "archive", S("070707"), 2*GB, SizeMode::Container, vCpio));
+    add(mk("CPIO_BIN", "cpio", "archive", B({0xC7,0x71}), 2*GB, SizeMode::Container, vCpio));
     add(mk("LZH", "lzh", "archive", S("-lh"), 512*MB));
     add(mk("ACE", "ace", "archive", S("**ACE**"), 512*MB));
     add(mk("SIT", "sit", "archive", S("StuffIt"), 512*MB));
@@ -2842,7 +3105,7 @@ std::vector<CarveSpec> buildRegistry() {
     // ---------------- CAD / 3D ----------------
     add(mk("DWG", "dwg", "misc", S("AC10"), 512*MB));
     add(mk("DXF", "dxf", "misc", S("  0\r\nSECTION"), 512*MB));
-    add(mk("STL_ASCII", "stl", "misc", S("solid "), 512*MB));
+    add(mk("STL_ASCII", "stl", "misc", S("solid "), 512*MB, SizeMode::Container, vStlAscii));
     add(mk("BLEND", "blend", "misc", S("BLENDER"), 4*GB));
     add(mk("FBX", "fbx", "misc", S("Kaydara FBX Binary"), 2*GB));
     add(mk("GLTF_BIN", "glb", "misc", S("glTF"), 2*GB, SizeMode::Header, vGlb));
