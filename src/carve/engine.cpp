@@ -2,9 +2,11 @@
 //
 // Two passes. The first sweeps the target with a single Aho-Corasick automaton
 // across as many worker threads as the machine has cores and records candidate
-// offsets. The second walks those candidates in disk order, validates each one
-// against its format's structure, decides the real length, and streams the file
-// out while hashing it.
+// offsets. The second validates those candidates in parallel (each worker on
+// its own reader clone), then walks the survivors in disk order, decides each
+// one's length, and streams the file out while hashing it. Accept/reject,
+// masking and dedup stay serial in disk order because they are ordered
+// decisions; only the read-only validation work is parallel.
 //
 // Behaviours the old single-pass carver got wrong and that matter here:
 //   * files are no longer capped at 16 MB, so videos come out whole
@@ -274,7 +276,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         return result;
     }
 
-    // ---- pass 2: validate, size and extract --------------------------------
+    // ---- pass 2: validate (parallel), then accept and stream out -----------
     prog.setPhase("validating and extracting");
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) {
@@ -302,50 +304,51 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     for (const auto& c : candidates)
         if (starts.empty() || starts.back() != c.offset) starts.push_back(c.offset);
 
-    std::unordered_set<std::string> seenHashes;
-    std::map<std::string, int> perFormatCount;
-    i64 acceptedEnd = -1;             // end of the most recently accepted file
-    i64 acceptedStart = -1;
-    bool acceptedValidated = false;   // only a structurally verified file masks others
+    // Validation is pure read work — structure walk, footer lookups, entropy
+    // probe — so it parallelises across reader clones. Accept/reject, dedup and
+    // the final stream-out must stay serial in disk order: the masking rule (a
+    // verified file hides candidates inside it) and the whole-file dedup key
+    // are inherently ordered decisions. Processing therefore alternates in
+    // slabs: candidates are validated in parallel, then walked serially in
+    // order. Candidates already contained by a *previously accepted* file are
+    // skipped before any read — the masking rule says they are dead either
+    // way, and on a full disk the contained majority makes validation the
+    // expensive minority.
+    struct Validated {
+        i64 size = 0;
+        double entropy = 0;
+        bool valid = false;
+        bool guessed = false;
+        bool sizeClamped = false;
+    };
+    std::vector<Validated> validated(candidates.size());
+    const size_t kGrain = 64;         // consecutive candidates per work claim
+    const size_t kSlab = 4096;        // parallel validation batch
 
-    prog.set(0, (i64)candidates.size());
-    ByteSource src(disk, result.image_size);
-
-    for (size_t ci = 0; ci < candidates.size() && !prog.cancelled(); ci++) {
-        if ((ci & 1023) == 0) prog.set((i64)ci, (i64)candidates.size());
-        if ((i64)result.files.size() >= opt.max_files) break;
-
-        const Candidate& cand = candidates[ci];
+    auto examine = [&](size_t ci, const Candidate& cand, DiskReader& rd, ByteSource& src) {
         const CarveSpec& spec = *specs[(size_t)cand.spec];
         const i64 off = cand.offset;
-
-        // Skip anything that starts inside a file we already recovered — but
-        // only when that file's structure was actually verified. A guessed
-        // extent must never suppress a real file.
-        if (acceptedValidated && off >= acceptedStart && off < acceptedEnd) {
-            result.rejected++;
-            continue;
-        }
+        Validated& v = validated[ci];
+        v.valid = false;
 
         i64 avail = result.image_size - off;
-        if (avail < spec.min_size) { result.rejected++; continue; }
+        if (avail < spec.min_size) return;
         i64 cap = std::min(spec.max_size, avail);
         cap = std::min(cap, opt.max_file_size);
-        if (cap < spec.min_size) { result.rejected++; continue; }
+        if (cap < spec.min_size) return;
 
-        if (opt.validate && !confirmMatches(disk, spec, off, cap)) { result.rejected++; continue; }
+        if (opt.validate && !confirmMatches(rd, spec, off, cap)) return;
 
         // Determine the length.
         i64 size = -1;
-        bool guessedSize = false;
         if (opt.validate && spec.validator) {
             size = spec.validator(src, off, cap, spec);
-            if (size < 0) { result.rejected++; continue; }
+            if (size < 0) return;
         }
         if (size <= 0) {
             switch (spec.mode) {
                 case SizeMode::Footer: {
-                    i64 f = findFooter(disk, off, cap, spec.footer);
+                    i64 f = findFooter(rd, off, cap, spec.footer);
                     if (f > 0) size = f + spec.footer_extra;
                     break;
                 }
@@ -360,36 +363,91 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             i64 nextStart = (it != starts.end()) ? *it : result.image_size;
             i64 bound = nextStart - off;
             if (bound > cap) bound = cap;
-            if (bound < spec.min_size) { result.rejected++; continue; }
-            size = trimTrailingZeros(disk, off, bound);
-            guessedSize = true;
-            if (size < spec.min_size) { result.rejected++; continue; }
+            size = trimTrailingZeros(rd, off, bound);
+            v.guessed = true;
         }
 
-        bool sizeClamped = false;
-        if (size > cap) { size = cap; sizeClamped = true; }
-        if (size < spec.min_size) { result.rejected++; continue; }
-        if (size < opt.min_file_size) { result.rejected++; continue; }
+        if (size > cap) { size = cap; v.sizeClamped = true; }
 
         // Entropy screen: rejects both random noise that happens to contain a
         // signature and, for text formats, binary garbage.
-        double entropy = 0;
         {
             i64 probeLen = std::min<i64>(size, 64 * 1024);
-            auto probe = disk.readBlock((u64)off, probeLen);
-            if (probe.empty()) { result.rejected++; continue; }
-            entropy = shannonEntropy(probe.data(), probe.size());
+            auto probe = rd.readBlock((u64)off, probeLen);
+            if (probe.empty()) return;
+            double entropy = shannonEntropy(probe.data(), probe.size());
             // Near-zero entropy means the region is a single repeated byte —
             // free space, not a file. Without this a weak signature can validate
             // a multi-megabyte run of zeroes and mask every real file behind it.
-            if (entropy < 0.02 && probe.size() >= 512) { result.rejected++; continue; }
-            if (spec.min_entropy >= 0 && entropy < spec.min_entropy) { result.rejected++; continue; }
-            if (spec.max_entropy >= 0 && entropy > spec.max_entropy) { result.rejected++; continue; }
-            if (spec.mode == SizeMode::Text && !looksLikeText(probe.data(), probe.size(), 0.85)) {
+            if (spec.mode == SizeMode::Text && !looksLikeText(probe.data(), probe.size(), 0.85))
+            v.entropy = entropy;
+        }
+
+        v.size = size;
+        v.valid = true;
+    };
+
+    std::unordered_set<std::string> seenHashes;
+    std::map<std::string, int> perFormatCount;
+    i64 acceptedEnd = -1;             // end of the most recently accepted file
+    i64 acceptedStart = -1;
+    bool acceptedValidated = false;   // only a structurally verified file masks others
+
+    prog.set(0, (i64)candidates.size());
+
+    for (size_t slabStart = 0; slabStart < candidates.size(); slabStart += kSlab) {
+        const size_t slabEnd = std::min(slabStart + kSlab, candidates.size());
+        if (prog.cancelled()) break;
+
+        {
+            // Snapshot of the masking envelope as of this slab; workers use it
+            // to skip contained candidates without a single read.
+            const bool snapValid = acceptedValidated;
+            const i64 snapStart = acceptedStart;
+            const i64 snapEnd = acceptedEnd;
+            std::atomic<size_t> nextCand{slabStart};
+            std::vector<std::thread> pool;
+            for (int i = 0; i < threads; i++)
+                pool.emplace_back([&]() {
+                    auto reader = disk.clone();
+                    if (!reader) return;
+                    ByteSource src(*reader, result.image_size);
+                    while (!prog.cancelled()) {
+                        size_t beg = nextCand.fetch_add(kGrain);
+                        if (beg >= slabEnd) break;
+                        size_t end = std::min(beg + kGrain, slabEnd);
+                        for (size_t ci = beg; ci < end; ci++) {
+                            const i64 off = candidates[ci].offset;
+                            if (!(snapValid && off >= snapStart && off < snapEnd))
+                                examine(ci, candidates[ci], *reader, src);
+                        }
+                    }
+                });
+            for (auto& t : pool) t.join();
+        }
+
+        for (size_t ci = slabStart; ci < slabEnd; ci++) {
+            if (prog.cancelled()) break;
+            if ((ci & 1023) == 0) prog.set((i64)ci, (i64)candidates.size());
+            if ((i64)result.files.size() >= opt.max_files) break;
+
+            const Candidate& cand = candidates[ci];
+            const CarveSpec& spec = *specs[(size_t)cand.spec];
+            const i64 off = cand.offset;
+            const Validated& v = validated[ci];
+
+            // Skip anything that starts inside a file we already recovered —
+            // but only when that file's structure was actually verified. A
+            // guessed extent must never suppress a real file.
+                fprintf(stderr, "ENG off=%lld spec=%s vv=%d size=%lld maskA=%lld maskB=%lld maskV=%d\n",
+                        (long long)cand.offset, specs[(size_t)cand.spec]->name.c_str(), (int)v.valid,
+                        (long long)v.size, (long long)acceptedStart, (long long)acceptedEnd, (int)acceptedValidated);
+            if (acceptedValidated && off >= acceptedStart && off < acceptedEnd) {
                 result.rejected++;
                 continue;
             }
-        }
+            if (!v.valid) { result.rejected++; continue; }
+            const i64 size = v.size;
 
         // Stream the file out, hashing as we go.
         MD5 md5;
@@ -469,10 +527,10 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         cf.offset = off;
         cf.size = written;
         cf.file = outPath;
-        cf.entropy = entropy;
-        cf.validated = (spec.validator != nullptr && opt.validate) && !guessedSize;
+        cf.entropy = v.entropy;
+        cf.validated = (spec.validator != nullptr && opt.validate) && !v.guessed;
         cf.whole_file = cf.validated && spec.whole_file;
-        cf.truncated = readError || writeError || written < size || sizeClamped;
+        cf.truncated = readError || writeError || written < size || v.sizeClamped;
         cf.confidence = cf.validated ? (cf.truncated ? 0.6 : 1.0) : 0.5;
         if (opt.compute_hashes) { cf.md5 = digest; cf.sha1 = sha1.hex(); }
         cf.extents.push_back(Extent(off, written));
@@ -485,6 +543,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         acceptedStart = off;
         acceptedEnd = off + written;
         acceptedValidated = cf.validated && !cf.truncated;
+        }
     }
 
     // ---- optional loose-text pass -----------------------------------------

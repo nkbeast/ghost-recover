@@ -117,6 +117,41 @@ else
   skip "carving (no fixture)"
 fi
 
+# Signature-carving compressed formats must reproduce the exact bytes: gzip
+# needs the deflate end (walked by inflate), bzip2 needs the bit-packed
+# stream end (walked by decompression), xz needs its footer.
+head2 "Carved compressed formats are byte-exact"
+python3 - "$WORK/cfmt.bin" <<'PY'
+import sys, zlib, struct, lzma, bz2, hashlib, json
+big   = (b"the quick brown fox jumps over the lazy dog. " * 12000)
+small = big[:12345]
+def gz_member(d):
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)
+    body = co.compress(d) + co.flush()
+    return (b'\x1f\x8b\x08\x00' + b'\x00' * 6 + body
+            + struct.pack('<II', zlib.crc32(d) & 0xffffffff, len(d) & 0xffffffff))
+files = [("multi.gz", gz_member(big) + gz_member(small)),
+         ("data.bz2", bz2.compress(big)),
+         ("data.xz",  lzma.compress(big))]
+img = bytearray(2 * 1024 * 1024)
+pos = 256 * 1024
+expect = {}
+for name, blob in files:
+    img[pos:pos + len(blob)] = blob
+    expect[name] = hashlib.md5(blob).hexdigest()
+    pos += len(blob) + 65536
+open(sys.argv[1], 'wb').write(img)
+json.dump(expect, open(sys.argv[1] + '.expect', 'w'))
+print()
+PY
+"$BIN" carve "$WORK/cfmt.bin" --out "$WORK/cfmt-out" >/dev/null 2>&1
+for name in multi.gz data.bz2 data.xz; do
+  want=$(python3 -c "import json;print(json.load(open('$WORK/cfmt.bin.expect'))['$name'])")
+  got=$(find "$WORK/cfmt-out" -type f -exec md5sum {} \; 2>/dev/null | awk '{print $1}' | grep -cx "$want")
+  if [ "$got" -ge 1 ]; then ok "$name carved byte-identical"
+  else bad "$name not carved byte-identical"; fi
+done
+
 # --------------------------------------------------------------- partitions
 head2 "Partition tables"
 if [ -f "$IMG/disk-gpt.img" ]; then

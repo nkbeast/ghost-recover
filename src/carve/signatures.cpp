@@ -15,6 +15,13 @@
 
 #include "ghost/util.h"
 
+#ifdef GHOST_HAVE_ZLIB
+#include <zlib.h>
+#endif
+#ifdef GHOST_HAVE_BZIP2
+#include <bzlib.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 
@@ -52,7 +59,25 @@ constexpr i64 GB = 1024 * MB;
 i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 2;
     int segments = 0;
+    bool sawSOF = false;
+    // A start-of-frame header is the only reliable anchor for the size of a
+    // JPEG: the compressed data is bounded by the uncompressed image mass,
+    // W x H pixels x ~2 bytes. Everything the walk does must stay inside a
+    // generous envelope of that mass, or the walk is following an FF xx
+    // pattern inside unrelated data (zip/gzip/xz payloads are full of them)
+    // and would run to the first coincidental EOI — previously a few MB of
+    // junk per false hit, masking whatever was stored after it.
+    i64 sofLimit = 0;
+    auto markerOk = [](u8 m) {
+        if (m == 0x01 || m == 0xC4 || m == 0xD8 || m == 0xD9 || m == 0xDA ||
+            m == 0xDB || m == 0xDD || m == 0xFE) return true;
+        if (m >= 0xC0 && m <= 0xCF) return true;       // SOF0..SOF15
+        if (m >= 0xD0 && m <= 0xD7) return true;       // restart
+        if (m >= 0xE0 && m <= 0xEF) return true;       // APPn
+        return false;
+    };
     while (p + 4 <= off + max && segments < 65536) {
+        if (sofLimit && p - off > sofLimit) return -1;
         if (s.byte(p) != 0xFF) {
             // Resync: entropy-coded data can contain stuffed bytes.
             i64 q = p;
@@ -64,13 +89,50 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (marker == 0xFF) { p++; continue; }
         if (marker == 0xD9) return (p + 2) - off;            // EOI
         if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
+        if (!markerOk(marker)) {
+            // A byte that is not a real marker at all: random data that
+            // merely contains FF xx. Do not trust segment lengths here —
+            // step to the next candidate marker byte.
+            p++;
+            if (p - off > 512 * 1024 && !sawSOF) return -1;
+            continue;
+        }
         u16 len = s.be16(p + 2);
         if (len < 2) return -1;
         segments++;
+        if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC) {
+            // A start-of-frame marker is only credible with the full frame
+            // header being sane: 8-bit precision, 1-4 components whose ids,
+            // sampling factors and quantisation tables all fall in range.
+            // Compressed payloads (zip/gzip/xz) contain countless FF C0
+            // coincidences; without this gate a false SOF with a mid-sized
+            // fake W x H sails past every mass-based bound.
+            auto d = s.read(p + 4, len);
+            if (d.size() >= (size_t)len && len >= 7) {
+                u8 prec = d[0];
+                u32 h = (u32)d[2] << 8 | d[3];
+                u32 w = (u32)d[4] << 8 | d[5];
+                u8 n = d[6];
+                bool sane = prec == 8 && n >= 1 && n <= 4 && (size_t)len == 8 + 3u * n &&
+                            w > 0 && w <= 20000 && h > 0 && h <= 20000;
+                for (int i = 0; sane && i < n; i++) {
+                    u8 id = d[7 + 3 * i];
+                    u8 samp = d[8 + 3 * i];
+                    u8 qt = d[9 + 3 * i];
+                    if (id > 4 || (samp >> 4) > 4 || (samp & 0x0F) > 4 || qt > 3) sane = false;
+                }
+                if (sane) {
+                    sawSOF = true;
+                    sofLimit = (i64)w * h * 2 + 512 * 1024;
+                }
+            }
+        }
         if (marker == 0xDA) {
             // Start of scan: entropy data follows until the next real marker.
             i64 q = p + 2 + len;
             while (q + 1 < off + max) {
+                if (sofLimit && q - p > sofLimit) { p = off + max; break; }
+                if (q - p > 64 * 1024 * 1024) { p = off + max; break; }
                 if (s.byte(q) == 0xFF) {
                     u8 m = s.byte(q + 1);
                     if (m == 0xD9) return (q + 2) - off;
@@ -82,8 +144,9 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             continue;
         }
         p += 2 + len;
+        if (sofLimit && p - off > sofLimit) return -1;
     }
-    return segments >= 2 ? 0 : -1;   // structurally plausible, length unknown
+    return segments >= 2 && sawSOF ? 0 : -1;   // structurally plausible, length unknown
 }
 
 // --- PNG: walk chunks to IEND. ---------------------------------------------
@@ -323,6 +386,36 @@ bool knownEbmlId(u64 id) {
     }
 }
 
+// Elements whose content is a nest of further elements rather than raw data.
+// Descending into these is what makes a MKV carvable: real-world muxers
+// (ffmpeg in particular) write the Segment with an explicit size, and the
+// old walker skipped explicit-size elements entirely, so it saw the EBML
+// header and the Segment, found "no more elements", and rejected every
+// normally-sized MKV (nothing was ever carved for the format).
+static bool ebmlContainerId(u64 id) {
+    switch (id) {
+        case 0x18538067:   // Segment
+        case 0x114D9B74:   // SeekHead
+        case 0x4DBB:       // Seek
+        case 0x1549A966:   // Info
+        case 0x1654AE6B:   // Tracks
+        case 0xAE:         // TrackEntry
+        case 0x1F43B675:   // Cluster
+        case 0xA0:         // BlockGroup
+        case 0x1C53BB6B:   // Cues
+        case 0xBB:         // CuePoint
+        case 0xB7:         // CueTrackPositions
+        case 0x1043A770:   // Chapters
+        case 0x1254C367:   // Tags
+        case 0x7373:       // Tag
+        case 0x1941A469:   // Attachments
+        case 0x61A7:       // AttachedFile
+        case 0x1A45DFA3:   // EBML header
+            return true;
+        default: return false;
+    }
+}
+
 i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off, lastValid = off;
     int elems = 0, valid = 0;
@@ -337,18 +430,43 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         int idW = 0;
         u64 id = ebmlNum(s, p, idW, false);
         if (idW == 0 || id == 0) break;
-        if (!knownEbmlId(id)) {
-            if (++unknownStreak > 2) break;
+        i64 szW = 0;
+        u64 sz = 0;
+        bool leaf = !knownEbmlId(id);
+        if (leaf) {
+            // Unknown id: most likely raw payload data inside a container.
+            // Skip its body by its size field when that reads cleanly; bail
+            // after a long run of these so junk cannot walk the disk.
+            int lszW = 0;
+            sz = ebmlNum(s, p + idW, lszW, true);
+            if (lszW > 0 && sz != 0) {
+                i64 end = p + idW + lszW + (i64)sz;
+                if (end > p && end <= limits[depth]) {
+                    p = end;
+                    if (++unknownStreak > 512) break;
+                    elems++;
+                    continue;
+                }
+            }
+            if (++unknownStreak > 512) break;
+            // One-byte resync: covers size fields that won't parse, the old
+            // fallback, and cleans up multi-byte misreads.
+            for (int k = 0; k < 7; k++) {
+                u8 b = s.byte(p);
+                if (b == 0) { p++; break; }
+                if (!(b & 0x80)) { p++; } else break;
+            }
             p++;
             elems++;
             continue;
         }
         unknownStreak = 0;
         valid++;
-        int szW = 0;
-        u64 sz = ebmlNum(s, p + idW, szW, true);
-        if (szW == 0) break;
-        i64 hdr = idW + szW;
+        int kszW = 0;
+        sz = ebmlNum(s, p + idW, kszW, true);
+        szW = kszW;
+        if (kszW == 0) break;
+        i64 hdr = idW + kszW;
         bool unknownSize = true;
         {
             // All-ones size field means "unknown length".
@@ -356,6 +474,7 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             unknownSize = (sz >= allOnes);
         }
         if (unknownSize) {
+            if (!ebmlContainerId(id)) { p += hdr; elems++; continue; }
             if (depth < kMaxDepth - 1) {
                 depth++;
                 limits[depth] = limits[depth - 1];
@@ -370,6 +489,17 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (end <= p || end > limits[depth]) break;
         lastValid = end;
         p = end;
+        if (ebmlContainerId(id)) {
+            if (depth < kMaxDepth - 1) {
+                // Walk the container's children; the depth/limit bookkeeping
+                // pops back out the moment the content runs out.
+                depth++;
+                limits[depth] = end;
+                p = p - (i64)sz;        // back to the content start
+                elems++;
+                continue;
+            }
+        }
         elems++;
     }
     if (valid < 3) return -1;
@@ -404,6 +534,8 @@ i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 4;
     bool last = false;
     int blocks = 0;
+    u32 minBlocksize = 0, maxFramesize = 0;
+    u64 totalSamples = 0;
     while (!last && p + 4 <= off + max && blocks < 128) {
         auto h = s.read(p, 4);
         if (h.size() < 4) break;
@@ -412,16 +544,43 @@ i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (type > 6 && type != 127) return -1;
         u32 len = (u32)h[1] << 16 | (u32)h[2] << 8 | h[3];
         if (p + 4 + (i64)len > off + max) break;
+        // STREAMINFO (type 0) gives the true length envelope: the file holds
+        // at most frameCount x maxFrameSize bytes of encoded data, where
+        // frameCount = ceil(totalSamples / minBlockSize). Sample-count bounds
+        // are worthless here — FLAC compresses a sine to ~7% of its raw size,
+        // so the previous bound over-ran by an order of magnitude, and with
+        // no bound at all the frame-sync walk chased 0xFFF8-0xFFFB patterns
+        // through video and archive data across the whole disk, leaving one
+        // 94 KB FLAC masking everything behind it.
+        if (type == 0 && len >= 18) {
+            auto si = s.read(p + 4, 18);
+            if (si.size() >= 18) {
+                minBlocksize = (u32)si[0] << 8 | si[1];
+                maxFramesize = (u32)si[7] << 16 | (u32)si[8] << 8 | si[9];
+                totalSamples = ((u64)(si[13] & 0x0F) << 32) | ((u64)si[14] << 24) |
+                               ((u64)si[15] << 16) | ((u64)si[16] << 8) | si[17];
+            }
+        }
         p += 4 + len;
         blocks++;
     }
     if (blocks == 0) return -1;
-    // Frames follow: sync 0xFF 0xF8/0xF9. Track the last one and stop after a
-    // long run without a sync word.
+    // Tight length envelope: frameCount x biggest frame, plus one frame and
+    // a little rounding. The walk below may still chase a false sync a short
+    // way into what follows a deleted file, but it can no longer swallow it.
+    i64 bound = max;
+    i64 frameGap = 512 * 1024;
+    if (totalSamples > 0 && minBlocksize > 0 && maxFramesize > 0) {
+        i64 frames = (i64)((totalSamples + minBlocksize - 1) / minBlocksize);
+        bound = std::min(bound, (i64)(p - off) + frames * maxFramesize + maxFramesize + 4096);
+        frameGap = std::max<i64>(frameGap, (i64)maxFramesize * 4);
+    }
+    // Frames follow: sync 0xFF 0xF8/0xF9/0xFA/0xFB. Track the last one and
+    // stop after a long run without a sync word.
     i64 lastSync = p;
     i64 q = p;
-    const i64 kMaxGap = 1 << 20;
-    while (q + 2 < off + max) {
+    const i64 kMaxGap = frameGap;
+    while (q + 2 < off + bound) {
         auto chunk = s.read(q, 64 * KB);
         if (chunk.empty()) break;
         bool any = false;
@@ -436,7 +595,7 @@ i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     if (lastSync == p) return p - off;
     i64 size = lastSync + 8192 - off;
-    return std::min(size, max);
+    return std::min(size, bound);
 }
 
 // --- MP3 / MPEG audio ------------------------------------------------------
@@ -736,33 +895,128 @@ i64 vZip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return -1;
 }
 
-// --- gzip: walk deflate members is expensive; use the member chain. --------
+// --- gzip: walk the deflate member chain with inflate. ---------------------
+// The compressed stream has no length field, but inflate can verify the
+// member end exactly: with windowBits | 16 zlib checks the CRC32 and ISIZE
+// trailer itself, so a candidate that passes is a real gzip member of the
+// reported length. Random data that merely starts with 1F 8B fails the
+// deflate decoding within a few hundred bytes.
 i64 vGzip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    auto h = s.read(off, 10);
-    if (h.size() < 10 || h[0] != 0x1F || h[1] != 0x8B || h[2] != 8) return -1;
-    if (h[3] & 0xE0) return -1;                 // reserved flags must be zero
-    return 0;                                    // structurally valid, size unknown
+#ifdef GHOST_HAVE_ZLIB
+    const i64 kInBudget = 1 * 1024LL * 1024 * 1024;    // compressed bytes per member
+    const i64 kOutBudget = 32 * 1024LL * 1024 * 1024;  // decompressed cap
+    i64 pos = off;
+    i64 outTotal = 0;
+    std::vector<u8> buf;
+    for (int member = 0; member < 64; member++) {
+        z_stream zs;
+        std::memset(&zs, 0, sizeof(zs));
+        if (inflateInit2(&zs, 15 + 16) != Z_OK) return -1;
+        int rc = Z_OK;
+        u8 out[64 * 1024];
+        while (rc != Z_STREAM_END) {
+            if (zs.avail_in == 0) {
+                if (pos - off >= max || (i64)zs.total_in >= kInBudget) {
+                    rc = Z_BUF_ERROR;
+                    break;
+                }
+                i64 want = std::min<i64>(
+                    64 * 1024,
+                    std::min(max - (pos - off), kInBudget - (i64)zs.total_in));
+                buf = s.read(pos, want);
+                if (buf.empty()) {
+                    // Input exhausted: one last inflate call lets zlib report
+                    // a stream that ended flush against the read boundary.
+                    zs.next_in = nullptr;
+                    zs.avail_in = 0;
+                    zs.next_out = out;
+                    zs.avail_out = sizeof(out);
+                    rc = inflate(&zs, Z_NO_FLUSH);
+                    break;
+                }
+                zs.next_in = buf.data();
+                zs.avail_in = (uInt)buf.size();
+            }
+            zs.next_out = out;
+            zs.avail_out = sizeof(out);
+            rc = inflate(&zs, Z_NO_FLUSH);
+            outTotal += (i64)(sizeof(out) - zs.avail_out);
+            if (outTotal > kOutBudget) { rc = Z_BUF_ERROR; break; }
+            if (rc == Z_STREAM_ERROR || rc == Z_MEM_ERROR || rc == Z_DATA_ERROR) break;
+        }
+        i64 consumed = (i64)zs.total_in;
+        bool ok = (rc == Z_STREAM_END);
+        inflateEnd(&zs);
+        if (!ok) return -1;
+        pos += consumed;                               // trailer included
+        if (pos - off > max) return -1;
+        auto nx = s.read(pos, 2);                      // concatenated member?
+        if (nx.size() < 2 || nx[0] != 0x1F || nx[1] != 0x8B) return pos - off;
+    }
+    return pos - off;
+#else
+    (void)s; (void)off; (void)max;
+    return 0;
+#endif
 }
 
 // --- bzip2 -----------------------------------------------------------------
+// The stream is bit-packed, so the end-of-stream magic is not byte-aligned
+// and cannot be located by scanning; decompression finds the exact end.
 i64 vBzip2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    auto h = s.read(off, 10);
-    if (h.size() < 10) return -1;
-    if (h[3] < '1' || h[3] > '9') return -1;
-    // Blocks start with the pi magic 0x314159265359; the stream ends with
-    // 0x177245385090 followed by a CRC.
-    static const u8 kEnd[6] = {0x17, 0x72, 0x45, 0x38, 0x50, 0x90};
-    const i64 kStep = 1 * MB;
-    for (i64 base = 0; base < max; base += kStep - 8) {
-        auto buf = s.read(off + base, std::min(kStep, max - base));
-        if (buf.size() < 6) break;
-        for (size_t i = 0; i + 6 <= buf.size(); i++) {
-            if (std::memcmp(buf.data() + i, kEnd, 6) == 0)
-                return base + (i64)i + 10;       // end magic + CRC, rounded up
+#ifdef GHOST_HAVE_BZIP2
+    const i64 kInBudget = 1 * 1024LL * 1024 * 1024;
+    const i64 kOutBudget = 32 * 1024LL * 1024 * 1024;
+    auto h = s.read(off, 4);
+    if (h.size() < 4 || h[0] != 'B' || h[1] != 'Z' || h[2] != 'h'
+        || h[3] < '1' || h[3] > '9') return -1;
+    bz_stream zs;
+    std::memset(&zs, 0, sizeof(zs));
+    if (BZ2_bzDecompressInit(&zs, 0, 0) != BZ_OK) return -1;
+    auto bzIn = [](bz_stream* z) { return (i64)z->total_in_hi32 << 32 | (u32)z->total_in_lo32; };
+    i64 pos = off;
+    i64 outTotal = 0;
+    int rc = BZ_OK;
+    u8 out[64 * 1024];
+    std::vector<u8> buf;
+    while (rc != BZ_STREAM_END) {
+        if (zs.avail_in == 0) {
+            if (pos - off >= max || bzIn(&zs) >= kInBudget) {
+                rc = BZ_UNEXPECTED_EOF;
+                break;
+            }
+            i64 want = std::min<i64>(
+                64 * 1024,
+                std::min(max - (pos - off), kInBudget - bzIn(&zs)));
+            buf = s.read(pos, want);
+            if (buf.empty()) {
+                zs.next_in = nullptr;
+                zs.avail_in = 0;
+                zs.next_out = reinterpret_cast<char*>(out);
+                zs.avail_out = sizeof(out);
+                rc = BZ2_bzDecompress(&zs);
+                break;
+            }
+            zs.next_in = reinterpret_cast<char*>(buf.data());
+            zs.avail_in = (unsigned)buf.size();
         }
-        if ((i64)buf.size() < std::min(kStep, max - base)) break;
+        zs.next_out = reinterpret_cast<char*>(out);
+        zs.avail_out = sizeof(out);
+        rc = BZ2_bzDecompress(&zs);
+        outTotal += (i64)(sizeof(out) - zs.avail_out);
+        if (outTotal > kOutBudget) { rc = BZ_UNEXPECTED_EOF; break; }
+        if (rc != BZ_OK && rc != BZ_STREAM_END) break;
     }
+    i64 consumed = bzIn(&zs);
+    bool ok = (rc == BZ_STREAM_END);
+    BZ2_bzDecompressEnd(&zs);
+    if (!ok) return -1;
+    pos += consumed;                                 // EOS + CRC included
+    return (pos - off <= max) ? pos - off : -1;
+#else
+    (void)s; (void)off; (void)max;
     return 0;
+#endif
 }
 
 // --- xz --------------------------------------------------------------------
