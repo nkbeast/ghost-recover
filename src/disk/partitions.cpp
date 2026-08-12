@@ -168,6 +168,13 @@ void fillFsInfo(DiskReader& disk, PartitionInfo& p, bool detect) {
     } else if (d.detected) {
         p.fs_status = "healthy";
         if (d.is_container) p.note = d.note;
+    } else if (p.type_guid == "E3C9E316-0B5C-4DB8-817D-F92DF00215AE" ||   // MSR
+               p.type_guid == "21686148-6449-6E6F-744E-656564454649") {  // BIOS boot
+        // These partitions are never formatted: they reserve space for GPT
+        // management structures or stage-1 boot code. No filesystem here is
+        // the healthy state, not damage.
+        p.fs_status = "unknown";
+        p.note = "reserved area — no filesystem to detect";
     } else {
         p.fs_status = "damaged";
     }
