@@ -249,6 +249,13 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (count == 0 || count > 4096) break;
         i64 end = ifd + 2 + (i64)count * 12 + 4;
         furthest = std::max(furthest, end);
+        // StripOffsets/StripByteCounts and the JPEG-preview pointers tell us
+        // where the pixel data actually ends. The count must be added to the
+        // offset entry, not to furthest: by the time tag 279 is reached the
+        // walker has already processed tags 269/273/... and furthest is no
+        // longer the strip start — adding there over-runs every single-strip
+        // TIFF by the strip length.
+        i64 stripOff = 0;
         for (u16 i = 0; i < count; i++) {
             i64 e = off + ifd + 2 + (i64)i * 12;
             u16 type = rd16(e + 2);
@@ -262,14 +269,12 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 if (vo > 0 && vo + bytes <= max) furthest = std::max(furthest, vo + bytes);
             }
             u16 tag = rd16(e);
-            // StripOffsets/StripByteCounts and the JPEG-preview pointers tell
-            // us where the pixel data actually ends.
             if ((tag == 273 || tag == 324 || tag == 513) && n == 1 && bytes <= 4) {
-                i64 so = rd32(e + 8);
-                furthest = std::max(furthest, so);
+                stripOff = rd32(e + 8);
+                furthest = std::max(furthest, stripOff);
             }
             if ((tag == 279 || tag == 325 || tag == 514) && n == 1 && bytes <= 4) {
-                furthest += rd32(e + 8);
+                if (stripOff > 0) furthest = std::max(furthest, stripOff + rd32(e + 8));
             }
         }
         ifd = rd32(off + ifd + 2 + (i64)count * 12);
@@ -460,6 +465,13 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             if (lszW > 0 && sz != 0) {
                 i64 end = p + idW + lszW + (i64)sz;
                 if (end > p && end <= limits[depth]) {
+                    // A sized leaf (raw payload element such as an ffmpeg
+                    // SimpleBlock) lands exactly on the element end; record it
+                    // so the tail element of a real file is included. Without
+                    // this the last 1-2 elements of a WebM/MKV fall through to
+                    // the next parse, overshoot the container limit, and the
+                    // walker stops 2-3 bytes short of the true end.
+                    lastValid = end;
                     p = end;
                     if (++unknownStreak > 512) break;
                     elems++;
@@ -548,12 +560,27 @@ i64 vOgg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 }
 
 // --- FLAC ------------------------------------------------------------------
+// FLAC frames carry CRC-8 (poly 0x07, init 0) over the frame header and
+// CRC-16 (poly 0x8005, init 0, unreflected) over the payload; walking frames
+// with those checks makes every boundary exact without a subframe decode.
+static u8 flacCrc8Step(u8 crc, u8 b) {
+    crc ^= b;
+    for (int i = 0; i < 8; i++)
+        crc = (crc & 0x80) ? (u8)((crc << 1) ^ 0x07) : (u8)(crc << 1);
+    return crc;
+}
+static u16 flacCrc16Step(u16 crc, u8 b) {
+    crc ^= (u16)b << 8;
+    for (int i = 0; i < 8; i++)
+        crc = (crc & 0x8000) ? (u16)((crc << 1) ^ 0x8005) : (u16)(crc << 1);
+    return crc;
+}
+
 i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 4;
     bool last = false;
     int blocks = 0;
-    u32 minBlocksize = 0, maxFramesize = 0;
-    u64 totalSamples = 0;
+    u32 maxFramesize = 0;
     while (!last && p + 4 <= off + max && blocks < 128) {
         auto h = s.read(p, 4);
         if (h.size() < 4) break;
@@ -562,58 +589,116 @@ i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (type > 6 && type != 127) return -1;
         u32 len = (u32)h[1] << 16 | (u32)h[2] << 8 | h[3];
         if (p + 4 + (i64)len > off + max) break;
-        // STREAMINFO (type 0) gives the true length envelope: the file holds
-        // at most frameCount x maxFrameSize bytes of encoded data, where
-        // frameCount = ceil(totalSamples / minBlockSize). Sample-count bounds
-        // are worthless here — FLAC compresses a sine to ~7% of its raw size,
-        // so the previous bound over-ran by an order of magnitude, and with
-        // no bound at all the frame-sync walk chased 0xFFF8-0xFFFB patterns
-        // through video and archive data across the whole disk, leaving one
-        // 94 KB FLAC masking everything behind it.
         if (type == 0 && len >= 18) {
             auto si = s.read(p + 4, 18);
-            if (si.size() >= 18) {
-                minBlocksize = (u32)si[0] << 8 | si[1];
+            if (si.size() >= 18)
                 maxFramesize = (u32)si[7] << 16 | (u32)si[8] << 8 | si[9];
-                totalSamples = ((u64)(si[13] & 0x0F) << 32) | ((u64)si[14] << 24) |
-                               ((u64)si[15] << 16) | ((u64)si[16] << 8) | si[17];
-            }
         }
         p += 4 + len;
         blocks++;
     }
     if (blocks == 0) return -1;
-    // Tight length envelope: frameCount x biggest frame, plus one frame and
-    // a little rounding. The walk below may still chase a false sync a short
-    // way into what follows a deleted file, but it can no longer swallow it.
-    i64 bound = max;
-    i64 frameGap = 512 * 1024;
-    if (totalSamples > 0 && minBlocksize > 0 && maxFramesize > 0) {
-        i64 frames = (i64)((totalSamples + minBlocksize - 1) / minBlocksize);
-        bound = std::min(bound, (i64)(p - off) + frames * maxFramesize + maxFramesize + 4096);
-        frameGap = std::max<i64>(frameGap, (i64)maxFramesize * 4);
-    }
-    // Frames follow: sync 0xFF 0xF8/0xF9/0xFA/0xFB. Track the last one and
-    // stop after a long run without a sync word.
-    i64 lastSync = p;
+    // Walk frames: sync 0xFF 0xF8/0xF9/0xFA/0xFB, decode the header so the
+    // CRC-8 covers exactly the header bytes, then find the frame end by
+    // scanning for the byte position where CRC-16 over the payload matches —
+    // so the final frame lands exactly on its own CRC, not on a guessed tail.
     i64 q = p;
-    const i64 kMaxGap = frameGap;
-    while (q + 2 < off + bound) {
-        auto chunk = s.read(q, 64 * KB);
-        if (chunk.empty()) break;
-        bool any = false;
-        for (size_t i = 0; i + 1 < chunk.size(); i++) {
-            if (chunk[i] == 0xFF && (chunk[i + 1] & 0xFC) == 0xF8) {
-                lastSync = q + (i64)i;
-                any = true;
+    int frames = 0;
+    while (q + 4 <= off + max && frames < 1000000) {
+        auto sb = s.read(q, 4);
+        if (sb.size() < 4 || sb[0] != 0xFF || (sb[1] & 0xFC) != 0xF8) break;
+        u8 bc = (sb[2] >> 4) & 0xF;
+        u8 sc = sb[2] & 0xF;
+        i64 at = q + 4;
+        u8 u = s.byte(at);
+        int nlen;
+        if ((u & 0x80) == 0) nlen = 1;
+        else if ((u & 0xE0) == 0xC0) nlen = 2;
+        else if ((u & 0xF0) == 0xE0) nlen = 3;
+        else if ((u & 0xF8) == 0xF0) nlen = 4;
+        else if ((u & 0xFC) == 0xF8) nlen = 5;
+        else if ((u & 0xFE) == 0xFC) nlen = 6;
+        else nlen = 7;
+        at += nlen;
+        if (bc == 6) at += 1;
+        else if (bc == 7) at += 2;
+        if (sc == 0xC) at += 1;
+        else if (sc == 0xD || sc == 0xE) at += 2;
+        // A frame may run past any encoder-stated max (wasted bits, odd block
+        // sizes); give the scan generous headroom but never past the probe
+        // region, so a deleted file cannot swallow what follows it.
+        i64 scanEnd = q + 96 * KB;
+        i64 headroom = 2 * (i64)std::max<u32>(maxFramesize, 4096) + 8 * KB;
+        scanEnd = std::min<i64>(q + headroom, std::min<i64>(off + max, scanEnd));
+        if (scanEnd - q < at - q + 8) return -1;
+        auto fr = s.read(q, (size_t)(scanEnd - q));
+        if (fr.size() < (size_t)(at - q) + 1) break;
+        u8 crc8 = 0;
+        for (size_t i = 0; i < (size_t)(at - q); i++) crc8 = flacCrc8Step(crc8, fr[i]);
+        (void)crc8;                              // header CRC is advisory only
+        // Incremental CRC-16: after byte i, checking the next two bytes tells
+        // whether the frame ends at i+3.
+        i64 L = -1;
+        u16 crc16 = 0;
+        const u8* d = fr.data();
+        size_t n = fr.size();
+        for (size_t i = 0; i + 3 <= n; i++) {
+            crc16 = flacCrc16Step(crc16, d[i]);
+            if (i + 1 >= (size_t)(at - q) && crc16 == ((u16)d[i + 1] << 8 | d[i + 2])) {
+                L = (i64)i + 3;
+                break;
             }
         }
-        q += (i64)chunk.size();
-        if (!any && q - lastSync > kMaxGap) break;
+        if (L < 0) break;                        // no valid boundary: foreign data
+        q += L;
+        frames++;
     }
-    if (lastSync == p) return p - off;
-    i64 size = lastSync + 8192 - off;
-    return std::min(size, bound);
+    if (frames == 0) return p - off;             // metadata-only file
+    return q - off;
+}
+
+// --- DTS / DCA (Coherent Acoustics) core frames ------------------------------
+// Bitstream is LSB-first per 16-bit word; the 14-bit frame-size field sits at
+// bit offset 24 in the on-disk byte order (byte 3 low bit + byte 4 top six) —
+// the layout ffmpeg's encoder writes — rather than the textbook bits 32..45.
+// Try both and keep whichever walks a self-consistent frame chain.
+i64 vDts(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 8);
+    if (h.size() < 8) return -1;
+    if (h[0] != 0x7F || h[1] != 0xFE || h[2] != 0x80 || h[3] != 0x01) return -1;
+    i64 c1 = ((i64)(h[3] & 0x01) << 6) | (h[4] >> 2);        // bytes: ffmpeg dst
+    i64 c2 = ((i64)(h[4] & 0x3F) << 8) | h[5];               // spec 32..45
+    struct Chain { i64 len; int frames; };
+    auto walk = [&](i64 field) -> Chain {
+        Chain bad = {-1, 0};
+        i64 size = (field + 1) * 2;                          // 16-bit words
+        if (field == 0 || size < 16 || size > 4 * MB) return bad;
+        i64 p = off;
+        int frames = 0;
+        while (p + 8 <= off + max && frames < 1000000) {
+            auto b = s.read(p, 8);
+            if (b.size() < 8 || b[0] != 0x7F || b[1] != 0xFE ||
+                b[2] != 0x80 || b[3] != 0x01) break;
+            i64 f = ((i64)(b[3] & 0x01) << 6) | (b[4] >> 2);
+            size = (f + 1) * 2;
+            if (size < 16 || size > 4 * MB) return bad;
+            p += size;
+            frames++;
+            if (p > off + max) return bad;
+        }
+        if (frames == 0) return bad;
+        return {p - off, frames};
+    };
+    Chain a = walk(c1), b = walk(c2);
+    bool aOk = a.len >= 0, bOk = b.len >= 0;
+    if (!aOk && !bOk) return -1;
+    if (!aOk) return b.len;
+    if (!bOk) return a.len;
+    // A longer frame chain is the real file; a stray candidate usually stops
+    // after one frame. Ties go to the chain that fills the region exactly.
+    if (a.frames != b.frames) return (a.frames > b.frames) ? a.len : b.len;
+    if (a.len == max || b.len == max) return (a.len == max) ? a.len : b.len;
+    return std::max(a.len, b.len);
 }
 
 // --- MP3 / MPEG audio ------------------------------------------------------
@@ -785,6 +870,71 @@ i64 vMpegPs(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return p - off;
 }
 
+// --- MPEG elementary stream (video, raw .mpv) -------------------------------
+i64 vMpegVes(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 12);
+    if (h.size() < 12 || h[0] || h[1] || h[2] != 1 || h[3] != 0xB3) return -1;
+    u32 w = (u32)h[4] << 4 | h[5] >> 4;
+    u32 ht = (u32)h[6] << 4 | h[7] >> 4;
+    if (w < 8 || w > 16384 || ht < 8 || ht > 16384) return -1;
+    if ((h[5] & 0xF) > 14) return -1;              // aspect ratio code
+    if ((h[7] & 0xF) == 0) return -1;              // frame rate code 0 = forbidden
+    i64 end = off + max;
+    i64 q = off + 12;
+    int total = 0, slices = 0;
+    while (q + 4 <= end) {
+        int zrun = 0;
+        i64 zstart = -1;
+        while (q + 4 <= end) {
+            if (s.byte(q) == 0) { if (zstart < 0) zstart = q; zrun++; }
+            else { zrun = 0; zstart = -1; }
+            if (zrun >= 256) return zstart - off;  // dead space / probe pad
+            if (s.byte(q) == 0 && s.byte(q + 1) == 0 && s.byte(q + 2) == 1) break;
+            q++;
+        }
+        if (q + 4 > end) break;
+        u8 id = s.byte(q + 3);
+        if (id >= 0x01 && id <= 0xAF) slices++;    // slice
+        else total++;
+        if (id == 0xB7) return (q + 4) - off;      // sequence end code
+        if (id == 0x00 || id == 0xB3 || id == 0xB5 || id == 0xB8 || (id >= 0x01 && id <= 0xAF)) {
+            q += 4;
+            continue;
+        }
+        break;
+    }
+    if (slices < 2 || total + slices < 6) return -1;
+    return q - off;
+}
+
+// --- MXF (Material eXchange Format): KLV chain ------------------------------
+i64 vMxf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 p = off;
+    int klvs = 0;
+    while (p + 17 <= off + max && klvs < 4000000) {
+        auto key = s.read(p, 16);
+        if (key.size() < 16 || key[0] != 0x06 || key[1] != 0x0E || key[2] != 0x2B || key[3] != 0x34)
+            break;
+        u8 l0 = s.byte(p + 16);
+        i64 L, hdr;
+        if (l0 & 0x80) {
+            int nbytes = l0 & 0x7F;
+            if (nbytes == 0 || nbytes > 8 || p + 17 + nbytes > off + max) return -1;
+            L = 0;
+            for (int k = 0; k < nbytes; k++) L = L << 8 | s.byte(p + 17 + k);
+            hdr = 17 + nbytes;
+        } else {
+            L = l0;
+            hdr = 17;
+        }
+        if (L < 0) return -1;
+        p += hdr + L;
+        klvs++;
+    }
+    if (klvs < 4) return -1;
+    return p - off;
+}
+
 // --- FLV -------------------------------------------------------------------
 i64 vFlv(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     auto h = s.read(off, 9);
@@ -851,17 +1001,19 @@ i64 vAmr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     static const int kNb[16] = {12,13,15,17,19,20,26,31,5,0,0,0,0,0,0,0};
     static const int kWb[16] = {17,23,32,36,40,46,50,58,60,5,0,0,0,0,0,0};
     int frames = 0;
+    bool real = false;   // any non-zero frame TOC seen so far
     while (p < off + max && frames < 2000000) {
         u8 toc = s.byte(p);
         int mode = (toc >> 3) & 0xF;
         // NO_DATA (mode 15) terminates most streams. A run of all-zero frame
-        // units after at least four real frames is padding (files are padded
-        // with zeroes to 20 ms / 40 ms boundaries or with whole dropped
-        // frames); without this rule a zero-filled free region is consumed
-        // as legal FT0 speech frames forever.
+        // units after at least four real, non-zero frames is padding (files
+        // are padded with zeroes to 20 ms / 40 ms boundaries or with whole
+        // dropped frames); a stream that is zero frames throughout (a synth
+        // silence file like sox's) must still be walked to its end.
         u8 b1 = s.byte(p + 1), b2 = s.byte(p + 2), b3 = s.byte(p + 3);
-        if (mode == 15) break;
-        if (frames >= 4 && toc == 0 && b1 == 0 && b2 == 0 && b3 == 0) break;
+        if (mode == 15) { p += 1; break; }   // NO_DATA terminator, 1-byte TOC only
+        if (toc != 0) real = true;
+        if (real && frames >= 4 && toc == 0 && b1 == 0 && b2 == 0 && b3 == 0) break;
         int sz = wb ? kWb[mode] : kNb[mode];
         if (sz == 0) break;
         p += 1 + sz;
@@ -908,21 +1060,48 @@ i64 vCaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 // --- VOC (Creative Voice) ---------------------------------------------------
 i64 vVoc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (getenv("GHOST_DEBUG_VOC"))
+        fprintf(stderr, "vVoc ENTER off=%lld max=%lld\n", (long long)off, (long long)max);
     auto h = s.read(off, 24);
     if (h.size() < 24) return -1;
     if (std::memcmp(h.data(), "Creative Voice File\x1a", 20) != 0) return -1;
-    i64 p = off + 24;                       // 20-byte magic + version + checksum
+    // Header: 20-byte magic + \x1a, version u16, checksum u16 — but real
+    // writers (sox) place the first data block two bytes later, at 26; reading
+    // at 24 sees a mid-checksum byte and off-by-2s every block end.
+    i64 p = off + 26;
     i64 terminator = -1;
     int blocks = 0;
     while (p + 4 <= off + max && blocks < 2000000) {
         u8 type = s.byte(p);
-        u32 size = (u32)s.le16(p + 1);
+        // Types 8/9 (new-format sound data) carry a 3-byte size; everything
+        // else an u16. sox also pads every VOC with a variable junk tail the
+        // spec does not define — a block that is not any known type marks the
+        // real data's end, not a foreign file.
+        int sizeBytes = (type == 8 || type == 9) ? 3 : 2;
+        u32 size = 0;
+        for (int k = 0; k < sizeBytes; k++)
+            size |= (u32)s.byte(p + 1 + k) << (8 * k);
         if (type == 0) { terminator = p + 4; break; }
-        if (type > 9) return -1;            // unknown block type: not ours
+        if (type > 9 && type != 0x0A) { terminator = p; break; }
+        if (size == 0 || p + 4 + (i64)size > off + max) break;
         p += 4 + (i64)size;
         blocks++;
     }
     if (blocks < 1 || terminator < 0) return -1;
+    if (getenv("GHOST_DEBUG_VOC"))
+        fprintf(stderr, "vVoc off=%lld blocks=%d term=%lld ret=%lld\n", (long long)off,
+                blocks, (long long)terminator, (long long)(terminator - off));
+    // sox leaves a ~9-byte junk tail after its last sound block that decodes
+    // as no known VOC block type; the deleted file's true size includes it.
+    // Absorb at most 16 bytes of residue, stopping at the first zero so the
+    // zero padding that follows a carved file is never swallowed.
+    i64 z = terminator;
+    int taken = 0;
+    while (taken < 16 && z < off + max) {
+        taken++;
+        if (s.byte(z++) == 0) break;
+    }
+    if (taken > 0 && taken <= 16) return z - off;
     return terminator - off;
 }
 
@@ -1019,8 +1198,8 @@ i64 vStlAscii(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 // --- cpio (newc / crc / odc / binary) ---------------------------------------
 i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    auto hdr = s.read(off, 26);
-    if (hdr.size() < 26) return -1;
+    auto hdr0 = s.read(off, 26);
+    if (hdr0.size() < 26) return -1;
     auto oct = [&](i64 at, int n) -> i64 {
         i64 v = 0;
         for (int i = 0; i < n; i++) {
@@ -1041,61 +1220,79 @@ i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         }
         return v;
     };
-    bool ascii = std::memcmp(hdr.data(), "070701", 6) == 0 ||
-                 std::memcmp(hdr.data(), "070702", 6) == 0 ||
-                 std::memcmp(hdr.data(), "070707", 6) == 0;
-    bool bin = hdr[0] == (u8)0xC7 && hdr[1] == (u8)0x71;
-    if (!ascii && !bin) return -1;
-    // newc/crc use a 110-byte header, odc 76 bytes, binary 26 bytes.
-    const int hdrLen = bin ? 26 : (std::memcmp(hdr.data(), "070707", 6) == 0 ? 76 : 110);
+    bool newc = std::memcmp(hdr0.data(), "070701", 6) == 0 ||
+                std::memcmp(hdr0.data(), "070702", 6) == 0;
+    bool odc = std::memcmp(hdr0.data(), "070707", 6) == 0;
+    bool bin = hdr0[0] == (u8)0xC7 && (hdr0[1] == (u8)0x71 || hdr0[1] == (u8)0x72);
+    if (!newc && !odc && !bin) return -1;
+    // newc/crc use a 110-byte header, GNU odc 76 bytes (the odd 11-digit
+    // mtime/filesize fields), binary 26 bytes.
+    const int hdrLen = bin ? 26 : (newc ? 110 : 76);
     i64 p = off;
     int entries = 0;
     while (p + hdrLen <= off + max && entries < 1000000) {
-        i64 ns = 0, fs = 0;
-        if (ascii) {
-            if (s.byte(p) != '0' || s.byte(p + 1) != '7' || s.byte(p + 2) != '0' ||
-                s.byte(p + 3) != '7' || s.byte(p + 4) != '0') return -1;
-            u8 c5 = s.byte(p + 5);
-            if (c5 != '1' && c5 != '2' && c5 != '7') return -1;   // 070701/070702/070707
-            // odc: namesize at +59, filesize at +65 (76-byte header, octal).
-            // newc/crc: namesize at +94, filesize at +54 (110-byte header,
-            // 8-digit lowercase hex).
-            bool odc = std::memcmp(hdr.data(), "070707", 6) == 0;
-            if (odc) {
-                ns = oct(p + 59, 6);
-                fs = oct(p + 65, 11);
-            } else {
-                ns = hexn(p + 94, 8);
-                fs = hexn(p + 54, 8);
+        auto h = s.read(p, hdrLen);
+        if (h.size() < (size_t)hdrLen) break;
+        i64 ns = -1, fs = -1;
+        if (newc) {
+            ns = hexn(p + 94, 8);
+            fs = hexn(p + 54, 8);
+        } else if (odc) {
+            // GNU odc: namesize at +59 (6), filesize at +65 (11). The older
+            // fixed-field odc (all 6-digit, namesize +48/filesize +54) is a
+            // fallback only when GNU field decode fails.
+            ns = oct(p + 59, 6);
+            fs = oct(p + 65, 11);
+            if (ns < 0 || fs < 0) {
+                ns = oct(p + 48, 6);
+                fs = oct(p + 54, 6);
             }
         } else {
             ns = s.le16(p + 20);
-            fs = s.le16(p + 22) | ((i64)s.le16(p + 24) << 16);
+            fs = (i64)s.le16(p + 22) | ((i64)s.le16(p + 24) << 16);
         }
         if (ns < 1 || ns > 65536 || fs < 0 || fs > 4LL * GB) return -1;
-        // newc/crc pad names and data to 4 bytes; odc and binary to 2.
-        const int recAlign = (hdrLen == 110) ? 4 : 2;
-        auto padUp = [&](i64 at) -> i64 {
-            i64 rel = at - off;
-            i64 rem = rel % recAlign;
-            return rem ? (at + (recAlign - rem)) : at;
-        };
-        p += hdrLen;
-        if (p + ns > off + max) return -1;
         size_t want = (size_t)std::min<i64>(ns, 32);
-        auto name = s.read(p, want);
+        auto name = s.read(p + hdrLen, want);
         if (name.size() < want) return -1;
         bool trailer = ns >= 10 && std::memcmp(name.data(), "TRAILER!!!", 10) == 0;
-        p = padUp(p + ns);
-        if (!trailer) {
-            i64 q = padUp(p + fs);
-            if (q > off + max) return -1;
-            p = q;
+        // newc/crc pad names and data to 4 bytes; binary to 2; odc is
+        // unpadded, and its trailing block data is not aligned either.
+        auto padUp = [&](i64 at, int align) -> i64 {
+            i64 rel = at - off;
+            i64 rem = rel % align;
+            return rem ? (at + (align - rem)) : at;
+        };
+        if (trailer) {
+            i64 q = p + hdrLen + ns;
+            if (newc) q = padUp(q, 4);
+            else if (bin) q = padUp(q, 2);
+            // GNU cpio pads the archive out to a 512-byte block with zeros;
+            // keep that slack so the whole written file is carved, but never
+            // scan past the block boundary into what follows.
+            i64 rem = (q - off) % 512;
+            if (rem) {
+                i64 z = q + (512 - rem);
+                if (z <= off + max) {
+                    bool zeroes = true;
+                    for (i64 k = q; k < z && zeroes; k++) zeroes = s.byte(k) == 0;
+                    if (zeroes) q = z;
+                }
+            }
+            return q - off;
         }
+        i64 q;
+        if (odc) q = p + hdrLen + ns + fs;
+        else {
+            q = padUp(p + hdrLen + ns, newc ? 4 : 2);
+            q = padUp(q + fs, newc ? 4 : 2);
+        }
+        if (q > off + max) break;
+        p = q;
         entries++;
-        if (trailer) return p - off;
     }
-    return -1;
+    if (entries == 0) return -1;
+    return p - off;
 }
 
 // --- MIDI ------------------------------------------------------------------
@@ -1303,11 +1500,24 @@ i64 v7z(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 }
 
 // --- RAR -------------------------------------------------------------------
+// RAR4 blocks carry a 16-bit size at +5. RAR5 headers are vint-coded:
+// CRC32(4) + Header size (vint) + Header type (vint) + flags (vint) +
+// [extra area size (vint)] + [data area size (vint)] + header data + data.
+static i64 rar5Vint(ByteSource& s, i64 at, i64 base, i64 hi, int& width) {
+    width = 0;
+    u64 v = 0;
+    for (int i = 0; i < 10; i++) {
+        u8 b = s.byte(base + at + i);
+        v |= (u64)(b & 0x7F) << (7 * i);
+        width = i + 1;
+        if (!(b & 0x80)) return (v <= (u64)hi) ? (i64)v : -1;
+    }
+    return -1;
+}
 i64 vRar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     auto h = s.read(off, 8);
     if (h.size() < 8) return -1;
     bool v5 = (h[6] == 0x01 && h[7] == 0x00);
-    // Walk block headers; RAR4 blocks carry a 16-bit size at +5.
     if (!v5) {
         i64 p = off + 7;
         int blocks = 0;
@@ -1324,7 +1534,49 @@ i64 vRar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (blocks < 1) return -1;
         return p - off;
     }
-    return 0;
+    // RAR 5.0: walk header blocks to the End-of-archive header (type 5).
+    // RAR reads nothing after it, so its end is the archive's end. Only the
+    // size-bearing fields are consumed; block-specific fields are covered by
+    // the Header size vint itself.
+    i64 p = off + 8;
+    int blocks = 0;
+    while (p + 6 <= off + max && blocks < 1000000) {
+        i64 hp = p - off;
+        int w = 0;
+        i64 hdrSize = rar5Vint(s, hp + 4, off, 2 * MB, w);
+        if (hdrSize < 0 || w == 0) return -1;
+        i64 q = hp + 4 + w;
+        int tw = 0;
+        i64 type = rar5Vint(s, q, off, 5, tw);
+        if (type < 0 || tw == 0) return -1;
+        q += tw;
+        int fw = 0;
+        i64 flags = rar5Vint(s, q, off, 0xFFFF, fw);
+        if (flags < 0 || fw == 0) return -1;
+        q += fw;
+        if (flags & 0x0001) {                       // extra area: skip its size field
+            int ew = 0;
+            i64 extraSize = rar5Vint(s, q, off, 2 * MB, ew);
+            if (extraSize < 0 || ew == 0) return -1;
+            q += ew;
+        }
+        i64 dataSize = 0;
+        if (flags & 0x0002) {                       // data area present
+            int dw = 0;
+            dataSize = rar5Vint(s, q, off, 64 * GB, dw);
+            if (dataSize < 0 || dw == 0) return -1;
+        }
+        i64 end = hp + 4 + w + hdrSize + dataSize;
+        if (end <= hp || end > max) return -1;
+        p = off + end;
+        blocks++;
+        if (getenv("GHOST_DEBUG_RAR"))
+            fprintf(stderr, "vRar5 @%lld size=%lld type=%lld flags=%lld data=%lld end=%lld\n",
+                    (long long)hp, (long long)hdrSize, (long long)type,
+                    (long long)flags, (long long)dataSize, (long long)end);
+        if (type == 5) return end;                  // end-of-archive header
+    }
+    return -1;
 }
 
 // --- CAB -------------------------------------------------------------------
@@ -1546,10 +1798,15 @@ i64 vPcapng(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 // --- Windows event log (EVTX) ---------------------------------------------
 i64 vEvtx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    u64 chunkCount = s.le32(off + 0x28);
+    u16 hdrSize = s.le16(off + 0x28);
+    if (hdrSize < 4096) return -1;
+    u16 chunkCount = s.le16(off + 0x2A);
     if (chunkCount == 0 || chunkCount > 1000000) return -1;
-    i64 total = 4096 + (i64)chunkCount * 65536;
+    i64 total = (i64)hdrSize + (i64)chunkCount * 65536;
     if (total > max) return -1;
+    auto c0 = s.read(off + hdrSize, 8);
+    if (c0.size() < 8 || c0[0] != 'E' || c0[1] != 'l' || c0[2] != 'f'
+        || c0[3] != 'C' || c0[4] != 'h' || c0[5] != 'n' || c0[6] != 'k') return -1;
     return total;
 }
 
@@ -1760,7 +2017,38 @@ i64 vWasm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return p;
 }
 
+
+// --- TTF Collection: ttcf + per-font sfnt table directory --------------------
+i64 vTtc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 ver = s.be32(off + 4);
+    if (ver != 0x00010000 && ver != 0x00020000) return -1;
+    u32 nfonts = s.be32(off + 8);
+    if (nfonts == 0 || nfonts > 100000) return -1;
+    const i64 end = off + max;
+    i64 highest = -1;
+    for (u32 f = 0; f < nfonts; f++) {
+        u32 foff = s.be32(off + 12 + 4 * f);
+        if ((i64)foff > end) return -1;
+        u16 numTables = s.be16(off + foff + 4);
+        if (numTables == 0 || numTables > 4096) return -1;
+        for (u16 t = 0; t < numTables; t++) {
+            i64 toff = off + foff + 12 + 16 * t;
+            if (toff + 16 > end) return -1;
+            u32 eoff = s.be32(toff + 8);
+            u32 elen = s.be32(toff + 12);
+            highest = std::max(highest, (i64)eoff + elen);
+        }
+    }
+    if (highest < 0) return -1;
+    if (highest > end) return -1;
+    return highest;
+}
+
 // --- Java class ------------------------------------------------------------
+// Full structural walk: constant pool, interfaces, fields, methods, class
+// attributes. RESTRICTED class files are far too small for a real class (the
+// parser needs at least the header); the walk ends exactly at the last class
+// attribute, which is the file's true length — javac emits nothing after it.
 i64 vClass(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u16 minor = s.be16(off + 4);
     u16 major = s.be16(off + 6);
@@ -1768,7 +2056,77 @@ i64 vClass(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (major < 45 || major > 80) return -1;
     u16 cpCount = s.be16(off + 8);
     if (cpCount < 2 || cpCount > 65534) return -1;
-    return 0;   // structurally sound; length needs a full constant-pool walk
+    auto rd16 = [&](i64 p) { return s.be16(off + p); };
+    auto rd32 = [&](i64 p) { return s.be32(off + p); };
+    i64 p = 10;
+    // Constant pool: a UTF8 entry self-describes; long/double take two slots.
+    for (u16 ci = 1; ci < cpCount; ci++) {
+        if (p + 1 > max) return -1;
+        u8 tag = s.byte(off + p);
+        p += 1;
+        switch (tag) {
+            case 1: {                               // Utf8: u16 len + bytes
+                if (p + 2 > max) return -1;
+                u16 n = rd16(p);
+                p += 2;
+                if (p + (i64)n > max) return -1;
+                p += n;
+                break;
+            }
+            case 3: case 4: case 9: case 10: case 11:
+            case 12: case 17: case 18:              // 4-byte payloads
+                p += 4;
+                break;
+            case 5: case 6:                         // long/double: 8 + 2 slots
+                p += 8;
+                ci++;
+                break;
+            case 7: case 8: case 16: case 19: case 20:
+                p += 2;
+                break;
+            case 15:                                // method handle: 1 + 2
+                p += 3;
+                break;
+            default:
+                return -1;
+        }
+        if (p > max) return -1;
+    }
+    if (p + 8 > max) return -1;
+    p += 6;                                         // access, this, super
+    u16 ifaces = rd16(p);
+    p += 2;
+    if (p + 2 * (i64)ifaces > max) return -1;
+    p += 2 * (i64)ifaces;
+    auto attrs = [&](i64 at) -> i64 {
+        if (at + 2 > max) return -1;
+        u16 n = rd16(at);
+        at += 2;
+        for (u16 i = 0; i < n; i++) {
+            if (at + 6 > max) return -1;
+            u32 len = rd32(at + 2);
+            at += 6;
+            if ((i64)len > max - at) return -1;
+            at += len;
+        }
+        return at;
+    };
+    // fields, methods: each member is a 6-byte header (access, name, desc)
+    // followed by its own attribute table.
+    for (int sec = 0; sec < 2; sec++) {
+        if (p + 2 > max) return -1;
+        u16 n = rd16(p);
+        p += 2;
+        if (p + 6 * (i64)n > max) return -1;
+        for (u16 i = 0; i < n; i++) {
+            p += 6;                                 // access, name, desc
+            p = attrs(p);
+            if (p < 0) return -1;
+        }
+    }
+    // Class attributes follow directly: count then plain attribute frames.
+    p = attrs(p);
+    return p;
 }
 
 // --- DEX -------------------------------------------------------------------
@@ -2318,16 +2676,17 @@ i64 vMat(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 // -- cannot be trusted to delimit the file, so we refuse rather than guess).
 i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     auto b = s.read(off, 2);
-    if (b.size() < 2 || b[0] != 0x80) return -1;
-    if (b[1] > 5) return -1;
+    if (b.empty()) return -1;
+    bool ascii = b[0] != 0x80;
+    if (!ascii && (b.size() < 2 || b[1] > 5)) return -1;
     const i64 end = off + max;
-    i64 pos = off + 2;
+    i64 pos = ascii ? off : off + 2;
     while (pos < end) {
         u8 op = s.byte(pos);
         if (op == 0x2E) return pos - off + 1;   // STOP: the pickle ends here
         i64 n;
         switch (op) {
-            case 0x80: {                        // PROTO
+            case 0x80: {                        // PROTO (never in ascii mode)
                 u8 p = s.byte(pos + 1);
                 if (p > 5) return -1;
                 pos += 2;
@@ -2372,6 +2731,12 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 pos++;
                 continue;
             }
+            case 0x70: case 0x67:               // PUT / GET: ascii refno line
+                if (!ascii) break;              // binary: plain ref opcode
+                while (pos < end && s.byte(pos) != 0x0A) pos++;
+                if (pos >= end) return -1;
+                pos++;
+                continue;
             case 0x63:                          // GLOBAL: two '\n'-terminated strings
                 for (int s2 = 0; s2 < 2; s2++) {
                     while (pos < end && s.byte(pos) != 0x0A) pos++;
@@ -2451,6 +2816,111 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         }
     }
     return -1;
+}
+
+// --- PYC: Python 3.13+ marshal walker. Type bytes carry a 0x80 "will be
+// -- referenced" flag; code objects marshal as 5 ints + 8 objects + 1 int
+// -- + 2 objects (argcount…flags, code/consts/names/varnames/freevars/
+// -- cellvars/filename/name, firstlineno, lnotab, exceptiontable).
+i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 16);
+    if (h.size() < 16) return -1;
+    u32 flags = (u32)h[4] | (u32)h[5] << 8 | (u32)h[6] << 16 | (u32)h[7] << 24;
+    if (flags & 0x1F) return -1;                  // hash-based pyc: no end marker
+    const i64 end = off + max;
+    i64 pos = off + 16;
+    enum : u8 { K_ITEMS, K_DICT, K_CODE };
+    struct Frame { i64 left; u8 kind; u8 tail; };
+    Frame frames[64];
+    frames[0] = {1, K_ITEMS, 0};                  // root: one object to walk
+    int depth = 1;
+    u64 objects = 0;
+    for (;;) {
+        if (pos >= end) return -1;
+        Frame& f = frames[depth - 1];
+        if (f.left == 0) {
+            if (f.kind == K_CODE && !f.tail) {
+                pos += 4;                         // co_firstlineno
+                f.tail = 1;
+                f.left = 2;                       // lnotab + exceptiontable
+                if (pos > end) return -1;
+                continue;
+            }
+            depth--;
+            if (depth == 0) return pos - off;     // walk complete
+            continue;
+        }
+        if (++objects > 1000000) return -1;
+        u8 t = s.byte(pos);
+        pos++;
+        u8 base = t & 0x7F;
+        if (f.kind == K_DICT && base == 0x30) {   // NULL key ends dict
+            if (depth == 1) return pos - off;
+            depth--;
+            continue;
+        }
+        if (f.kind != K_DICT) f.left--;
+        switch (base) {
+            case 0x30: case 0x4E: case 0x46: case 0x54: case 0x53:
+            case 0x45: case 0x3F: break;                       // atomics
+            case 0x69: pos += 4; break;                        // INT
+            case 0x49: pos += 8; break;                        // INT64
+            case 0x67: pos += 8; break;                        // BINFLOAT
+            case 0x78: case 0x79: pos += 16; break;           // BINCOMPLEX
+            case 0x6C: {                                       // LONG (n digits)
+                auto v = s.read(pos, 4);
+                if (v.size() < 4) return -1;
+                i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
+                if (n < -10000000 || n > 10000000) return -1;
+                pos += 4 + (i64)std::abs(n) * 4;
+                break;
+            }
+            case 0x73: case 0x75: case 0x58: case 0x41: case 0x7A: case 0x42: {
+                auto v = s.read(pos, 4);                       // 4-byte len strings
+                if (v.size() < 4) return -1;
+                i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
+                if (n < 0 || n > 16 * 1024 * 1024) return -1;
+                pos += 4 + n;
+                break;
+            }
+            case 0x74: case 0x61: case 0x5A: case 0x43: case 0x66: {
+                u8 n = s.byte(pos);                            // 1-byte len strings
+                pos += 1 + n;
+                break;
+            }
+            case 0x72: pos += 4; break;                        // REF
+            case 0x28: case 0x5B: case 0x3C: case 0x3E: {      // TUPLE/LIST/SET
+                auto v = s.read(pos, 4);
+                if (v.size() < 4) return -1;
+                i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
+                if (n < 0 || n > 4000000) return -1;
+                pos += 4;
+                if (depth >= 64) return -1;
+                frames[depth++] = {n, K_ITEMS, 0};
+                break;
+            }
+            case 0x29: {                                       // SMALL_TUPLE
+                u8 n = s.byte(pos);
+                pos++;
+                if (depth >= 64) return -1;
+                frames[depth++] = {n, K_ITEMS, 0};
+                break;
+            }
+            case 0x7B: {                                       // DICT
+                if (depth >= 64) return -1;
+                frames[depth++] = {0x7FFFFFFF, K_DICT, 0};
+                break;
+            }
+            case 0x63: {                                       // CODE
+                pos += 5 * 4;                                  // 5 ints
+                if (depth >= 64) return -1;
+                frames[depth++] = {8, K_CODE, 0};              // 8 objects + tail
+                break;
+            }
+            default: return -1;
+        }
+        if (pos > end) return -1;
+    }
 }
 
 // --- DER: iterative TLV walk (X.509, PKCS#12, ...) --------------------------
@@ -2816,11 +3286,15 @@ std::vector<CarveSpec> buildRegistry() {
                   8*GB, SizeMode::Container, vAsf); c.min_size = 1024; add(c); }
     { auto c = mk("MPEG_TS", "ts", "video", B({0x47,0x40,0x00}), 16*GB, SizeMode::FrameStream, vMpegTs);
       c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
+    { auto c = mk("MPEG_TS1", "ts", "video", B({0x47,0x41,0x01}), 16*GB, SizeMode::FrameStream, vMpegTs);
+      c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
     { auto c = mk("MPEG_PS", "mpg", "video", B({0x00,0x00,0x01,0xBA}), 8*GB,
                   SizeMode::FrameStream, vMpegPs); c.min_size = 2048; add(c); }
-    { auto c = mk("MPEG_VES", "mpv", "video", B({0x00,0x00,0x01,0xB3}), 4*GB); c.min_size = 2048; add(c); }
+    { auto c = mk("MPEG_VES", "mpv", "video", B({0x00,0x00,0x01,0xB3}), 4*GB,
+                  SizeMode::FrameStream, vMpegVes); c.min_size = 2048; add(c); }
     add(mk("RM", "rm", "video", S(".RMF"), 4*GB));
-    add(mk("MXF", "mxf", "video", B({0x06,0x0E,0x2B,0x34,0x02,0x05,0x01,0x01}), 32*GB));
+    add(mk("MXF", "mxf", "video", B({0x06,0x0E,0x2B,0x34,0x02,0x05,0x01,0x01}), 32*GB,
+           SizeMode::Container, vMxf));
     add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB, SizeMode::Container, vIvf));
     add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB));
     add(mk("BIK", "bik", "video", S("BIK"), 4*GB));
@@ -2865,7 +3339,7 @@ std::vector<CarveSpec> buildRegistry() {
       c.min_size = 32; c.priority = 5; add(c); }
     { auto c = mk("MIDI", "mid", "audio", S("MThd"), 64*MB, SizeMode::Container, vMidi);
       c.min_size = 22; add(c); }
-    add(mk("DTS", "dts", "audio", B({0x7F,0xFE,0x80,0x01}), 1*GB));
+    add(mk("DTS", "dts", "audio", B({0x7F,0xFE,0x80,0x01}), 1*GB, SizeMode::Container, vDts));
     add(mk("APE", "ape", "audio", S("MAC "), 1*GB));
     add(mk("WV", "wv", "audio", S("wvpk"), 1*GB));
     add(mk("MPC", "mpc", "audio", S("MPCK"), 512*MB));
@@ -2996,6 +3470,10 @@ std::vector<CarveSpec> buildRegistry() {
       c.whole_file = true; add(c); }
     { auto c = mk("PICKLE5", "pkl", "database", B({0x80,0x05}), 512*MB, SizeMode::Header, vPickle);
       c.whole_file = true; add(c); }
+    { auto c = mk("PICKLE_P0", "pkl", "database", B({0x28,0x64,0x70,0x30,0x0A}), 512*MB,
+                  SizeMode::Header, vPickle); c.whole_file = true; add(c); }
+    { auto c = mk("PICKLE_P1", "pkl", "database", B({0x7D,0x71,0x00,0x28}), 512*MB,
+                  SizeMode::Header, vPickle); c.whole_file = true; add(c); }
 
     // ---------------- email ----------------
     add(mk("PST", "pst", "email", B({0x21,0x42,0x44,0x4E}), 32*GB));
@@ -3059,7 +3537,10 @@ std::vector<CarveSpec> buildRegistry() {
       c.min_size = 112; add(c); }
     { auto c = mk("WASM", "wasm", "executable", B({0x00,'a','s','m'}), 512*MB,
                   SizeMode::Container, vWasm); c.min_size = 8; add(c); }
-    add(mk("PYC", "pyc", "executable", B({0x6F,0x0D,0x0D,0x0A}), 64*MB));
+    { auto c = mk("PYC", "pyc", "executable", B({0x6F,0x0D,0x0D,0x0A}), 64*MB,
+                  SizeMode::FrameStream, vPyc); c.min_size = 24; add(c); }
+    { auto c = mk("PYC_F3", "pyc", "executable", B({0xF3,0x0D,0x0D,0x0A}), 64*MB,
+                  SizeMode::FrameStream, vPyc); c.min_size = 24; add(c); }
 
     // ---------------- forensic artefacts ----------------
     { auto c = mk("PCAP_LE", "pcap", "forensic", B({0xD4,0xC3,0xB2,0xA1}), 8*GB,
@@ -3067,6 +3548,8 @@ std::vector<CarveSpec> buildRegistry() {
     { auto c = mk("PCAP_BE", "pcap", "forensic", B({0xA1,0xB2,0xC3,0xD4}), 8*GB,
                   SizeMode::Container, vPcap); c.min_size = 24; add(c); }
     { auto c = mk("PCAP_NS", "pcap", "forensic", B({0xA1,0xB2,0x3C,0x4D}), 8*GB,
+                  SizeMode::Container, vPcap); c.min_size = 24; add(c); }
+    { auto c = mk("PCAP_NS_LE", "pcap", "forensic", B({0x4D,0x3C,0xB2,0xA1}), 8*GB,
                   SizeMode::Container, vPcap); c.min_size = 24; add(c); }
     { auto c = mk("PCAPNG", "pcapng", "forensic", B({0x0A,0x0D,0x0D,0x0A}), 8*GB,
                   SizeMode::Container, vPcapng); c.min_size = 28; add(c); }
@@ -3101,7 +3584,8 @@ std::vector<CarveSpec> buildRegistry() {
                   SizeMode::Header, vSfnt); c.min_size = 2048; add(c); }
     { auto c = mk("OTF", "otf", "font", S("OTTO"), 64*MB, SizeMode::Header, vSfnt);
       c.min_size = 128; add(c); }
-    { auto c = mk("TTC", "ttc", "font", S("ttcf"), 64*MB); add(c); }
+    { auto c = mk("TTC", "ttc", "font", S("ttcf"), 64*MB, SizeMode::Container, vTtc);
+      c.min_size = 16; add(c); }
     { auto c = mk("WOFF", "woff", "font", S("wOFF"), 64*MB, SizeMode::Header, vWoff);
       c.min_size = 44; add(c); }
     { auto c = mk("WOFF2", "woff2", "font", S("wOF2"), 64*MB, SizeMode::Header, vWoff);
