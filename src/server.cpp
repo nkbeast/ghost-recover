@@ -35,6 +35,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -718,7 +719,9 @@ bool spawnElevated(const std::string& method, const std::string& password,
     }
 
     if (needsPassword) {
-        ::close(pw[1]);
+        // Keep the slave fd open until the line is consumed: closing the pty
+        // master before sudo reads flushes the slave's input queue, so sudo
+        // sees EOF instead of the password ("no password was provided").
         std::string line = password + "\n";
         // The password reaches sudo through this pty master/slave pair on the
         // local host; it is never written to a network socket, and the
@@ -727,6 +730,15 @@ bool spawnElevated(const std::string& method, const std::string& password,
         // codeql[cpp/cleartext-transmission]
         ssize_t written = ::write(pw[0], line.data(), line.size());
         (void)written;
+        // Wait for sudo to read the whole line (unread bytes are still queued
+        // on the slave), then close so a retry after a wrong password reads
+        // EOF and fails cleanly instead of hanging on the next prompt.
+        for (int i = 0; i < 500; i++) {
+            int queued = -1;
+            if (::ioctl(pw[1], FIONREAD, &queued) != 0 || queued <= 0) break;
+            ::usleep(20000);
+        }
+        ::close(pw[1]);
         ::close(pw[0]);
     }
 
