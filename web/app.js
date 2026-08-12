@@ -819,6 +819,112 @@ function contentUrl(index, max) {
          (max ? `&max=${max}` : '');
 }
 
+// Decode an ICO entry that is a BMP-style DIB into a canvas. Icon DIBs are
+// bottom-up BGRA rows with a trailing monochrome AND mask (transparent where
+// the mask bit is 1); paletted entries resolve through the color table.
+function dibToCanvas(buf, off) {
+  const view = new DataView(buf, off);
+  if (buf.length - off < 40 || view.getUint32(0, true) !== 40) return null;
+  const bpp = view.getUint16(14, true);
+  const w = view.getInt32(4, true);
+  const rawH = view.getInt32(8, true);
+  const topDown = rawH < 0;
+  // Icon DIBs store twice the display height: pixels then the AND mask.
+  const h = topDown ? -rawH : Math.floor(rawH / 2);
+  if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return null;
+  const stride = Math.ceil((w * bpp) / 32) * 4;
+  const palSize = bpp <= 8 ? (1 << bpp) * 4 : 0;
+  const pxStart = 40 + palSize;
+  const pxEnd = pxStart + stride * h;
+  const maskStride = Math.ceil(w / 32) * 4;
+  const maskStart = pxEnd;
+  if (pxEnd + (topDown ? 0 : maskStride * h) > buf.length) return null;
+  const pal = [];
+  if (bpp <= 8) {
+    for (let i = 0; i < (1 << bpp); i++) {
+      const o = 40 + i * 4;
+      pal.push([buf[off + o + 2], buf[off + o + 1], buf[off + o], buf[off + o + 3]]);
+    }
+  }
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(w, h);
+  for (let y = 0; y < h; y++) {
+    const sy = topDown ? y : h - 1 - y;
+    for (let x = 0; x < w; x++) {
+      let r = 0, g = 0, b = 0, a = 255;
+      if (bpp === 32) {
+        const o = off + pxStart + sy * stride + x * 4;
+        b = buf[o]; g = buf[o + 1]; r = buf[o + 2]; a = buf[o + 3];
+      } else if (bpp === 24) {
+        const o = off + pxStart + sy * stride + x * 3;
+        b = buf[o]; g = buf[o + 1]; r = buf[o + 2];
+      } else if (bpp <= 8) {
+        const o = off + pxStart + sy * stride + ((x * bpp) >> 3);
+        const idx = (buf[o] >> (8 - bpp - (x * bpp & 7))) & ((1 << bpp) - 1);
+        [r, g, b, a] = pal[idx];
+      } else {
+        return null;
+      }
+      if (!topDown) {
+        const m = off + maskStart + sy * maskStride + (x >> 3);
+        if ((buf[m] >> (7 - (x & 7))) & 1) a = 0;
+      }
+      const di = (y * w + x) * 4;
+      img.data[di] = r; img.data[di + 1] = g; img.data[di + 2] = b; img.data[di + 3] = a;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+// Fetches a recovered .ico and returns a PNG data URL it can preview with.
+// Browsers do not all render ICO files inside <img> (Firefox only uses them
+// as favicons), so the best entry — PNG or BMP DIB — is decoded to a canvas.
+function icoPngUrl(index) {
+  return fetch(contentUrl(index, 0))
+    .then(r => {
+      if (!r.ok) throw 0;
+      return r.arrayBuffer();
+    })
+    .then(arb => {
+      const dv = new DataView(arb);
+      const buf = new Uint8Array(arb);
+      if (arb.byteLength < 6 || dv.getUint16(0, true) !== 0 || dv.getUint16(2, true) !== 1) throw 0;
+      const n = dv.getUint16(4, true);
+      if (n === 0 || arb.byteLength < 6 + n * 16) throw 0;
+      let best = -1, bestArea = 0;
+      for (let i = 0; i < n; i++) {
+        const o = 6 + i * 16;
+        const w = dv.getUint8(o) || 256, h = dv.getUint8(o + 1) || 256;
+        const area = w * h;
+        if (area > bestArea) { bestArea = area; best = i; }
+      }
+      const o = 6 + best * 16;
+      const size = dv.getUint32(o + 8, true), entryOff = dv.getUint32(o + 12, true);
+      if (entryOff + size > arb.byteLength) throw 0;
+      const png = size > 8 && buf[entryOff] === 0x89 && buf[entryOff + 1] === 0x50 &&
+                  buf[entryOff + 2] === 0x4E && buf[entryOff + 3] === 0x47;
+      const canvas = png ? null : dibToCanvas(buf, entryOff);
+      const done = src => {
+        const c = document.createElement('canvas');
+        c.width = src.naturalWidth || 256; c.height = src.naturalHeight || 256;
+        c.getContext('2d').drawImage(src, 0, 0);
+        return c.toDataURL('image/png');
+      };
+      if (canvas) return Promise.resolve(canvas.toDataURL('image/png'));
+      const img = new Image();
+      const obj = URL.createObjectURL(new Blob([buf.slice(entryOff, entryOff + size)],
+                                               {type: 'image/png'}));
+      return new Promise((resolve, reject) => {
+        img.onload = () => { URL.revokeObjectURL(obj); try { resolve(done(img)); } catch (e) { reject(0); } };
+        img.onerror = () => { URL.revokeObjectURL(obj); reject(0); };
+        img.src = obj;
+      });
+    });
+}
+
 async function loadPreview(f, host) {
   const ext = (f.ext || '').toLowerCase();
   // Media and PDFs must receive the complete file: the server streams plain
@@ -834,7 +940,19 @@ async function loadPreview(f, host) {
       released or overwritten.</div>`;
     return;
   }
-  if (IMG.includes(ext)) { host.innerHTML = `<img src="${url}" ${bail}>`; return; }
+  if (IMG.includes(ext)) {
+    if (ext === 'ico') {
+      // ICO is not reliably renderable in <img> across browsers; decode the
+      // largest entry to a PNG first, falling back to the raw file if the
+      // decode fails (Chrome renders it natively).
+      host.innerHTML = '<div class="empty">Loading…</div>';
+      icoPngUrl(f.index).then(src => {
+        host.innerHTML = src ? `<img src="${src}">` : `<img src="${url}" ${bail}>`;
+      }).catch(() => { host.innerHTML = `<img src="${url}" ${bail}>`; });
+      return;
+    }
+    host.innerHTML = `<img src="${url}" ${bail}>`; return;
+  }
   if (VID.includes(ext)) { host.innerHTML = `<video src="${unlimited}" controls ${bail}></video>`; return; }
   if (AUD.includes(ext)) {
     host.innerHTML = `<div style="text-align:center;padding:24px;width:100%">

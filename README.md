@@ -9,13 +9,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/nkbeast/ghost-recover/actions"><img src="https://img.shields.io/github/actions/workflow/status/nkbeast/ghost-recover/ci.yml?branch=main&label=CI&logo=github" alt="CI"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nkbeast/ghost-recover" alt="License"/></a>
   <img src="https://img.shields.io/badge/C%2B%2B-17-blue" alt="C++17"/>
   <img src="https://img.shields.io/badge/Platform-Linux-green" alt="Linux"/>
-  <a href="https://github.com/nkbeast/ghost-recover/stargazers"><img src="https://img.shields.io/github/stars/nkbeast/ghost-recover?style=social" alt="Stars"/></a>
-  <a href="https://github.com/nkbeast/ghost-recover/forks"><img src="https://img.shields.io/github/forks/nkbeast/ghost-recover?style=social" alt="Forks"/></a>
-  <img src="https://img.shields.io/badge/tests-78%2F78%20passing-success" alt="78/78 tests"/>
+  <a href="https://github.com/nkbeast/ghost-recover/releases"><img src="https://img.shields.io/github/downloads/nkbeast/ghost-recover/total" alt="Downloads"/></a>
 </p>
 
 ---
