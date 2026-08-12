@@ -2277,7 +2277,12 @@ i64 vMat(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (type == 14 || type == 15) {
             u32 size = rd32(p + 4);
             if (size > (u32)max) return -1;
-            i64 next = p + 16 + (i64)size;
+            // The tag's size field counts the element body from right after
+            // the 8-byte tag: for a miCOMPRESSED/miMATRIX element the file
+            // ends exactly at p + 8 + size (e.g. scipy's savemat). Stepping
+            // 16 bytes skips the trailing 4-byte data-length pair INSIDE the
+            // body and over-runs every such file by 8.
+            i64 next = p + 8 + (i64)size;
             if (next <= p || next > max) break;
             p = next;
             els++;

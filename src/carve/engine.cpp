@@ -424,14 +424,24 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
     // Offsets of genuine candidates — only these may bound an end-less walker.
     // A junk signature hit (ICO/CUR/DER magic inside another file's payload)
-    // never validated and must not truncate the file around it.
+    // never validated and must not truncate the file around it. A candidate
+    // that WAS validated at an offset inside another validated candidate's
+    // span is likewise not a real boundary: DER files are self-similar, so a
+    // nested 30 81/30 82 sub-TLV inside a certificate validates as its own
+    // little DER and, left in this list, clamps the real 4 KB certificate to
+    // a 4-byte stub. The serial masking pass would hide it anyway.
     std::vector<i64> bounds;
     bounds.reserve(candidates.size());
+    i64 coverEnd = -1;
     for (size_t ci = 0; ci < candidates.size(); ci++) {
         const Validated& v = validated[ci];
         if (!v.valid || v.size <= 0) continue;
-        if (bounds.empty() || bounds.back() != candidates[ci].offset) {
-            bounds.push_back(candidates[ci].offset);
+        const i64 off = candidates[ci].offset;
+        if (bounds.empty() || bounds.back() != off) {
+            if (off >= coverEnd) bounds.push_back(off);
+            const CarveSpec& sp = *specs[(size_t)candidates[ci].spec];
+            if (sp.validator)
+                coverEnd = std::max(coverEnd, off + v.size);
         }
     }
 
