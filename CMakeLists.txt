@@ -118,4 +118,13 @@ if(GHOST_BUILD_TESTS)
     )
     target_include_directories(ghost_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME ghost_unit_tests COMMAND ghost_unit_tests)
+
+    add_executable(ghost_io_tests
+        tests/unit_io.cpp
+        src/core/io.cpp
+        src/core/util.cpp
+    )
+    target_include_directories(ghost_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(ghost_io_tests PRIVATE Threads::Threads)
+    add_test(NAME ghost_io_tests COMMAND ghost_io_tests)
 endif()
