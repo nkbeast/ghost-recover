@@ -170,20 +170,62 @@ i64 DiskReader::rawPread(u64 abs_off, u8* dst, i64 count) {
 }
 
 i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
+    // Multi-pass bad-block retry (ddrescue-style).
+    //
+    // Pass 0: native sector-size chunks  — fastest; recovers most data in one sweep.
+    // Pass 1: 512-byte sub-sector chunks — only when sector_size_ > 512 (4Kn drives).
+    // Pass 2: 1-byte chunks             — last resort; maximum salvage before zero-fill.
+    //
+    // Regions that fail at one granularity are queued for the next smaller size.
+    struct Range { u64 off; i64 len; i64 dst_off; };
+    std::vector<Range> pending = {{abs_off, count, 0}};
+
     const i64 ss = sector_size_ > 0 ? sector_size_ : 512;
-    i64 done = 0;
-    while (done < count) {
-        const i64 chunk = std::min(ss, count - done);
-        const ssize_t n = ::pread(fd_, dst + done, (size_t)chunk, (off_t)(abs_off + done));
-        if (n == chunk) { done += chunk; continue; }
-        if (n > 0) { done += n; continue; }
-        if (n == 0) break;                      // EOF
-        if (errno == EINTR) continue;
-        std::memset(dst + done, 0, (size_t)chunk);
-        noteBad(abs_off + done, chunk);
-        done += chunk;
+    std::vector<i64> passes;
+    passes.push_back(ss);
+    if (ss > 512) passes.push_back(512);
+    passes.push_back(1);
+
+    i64 max_processed = 0;
+
+    for (size_t p = 0; p < passes.size(); p++) {
+        const i64 chunk_size = passes[p];
+        const bool last_pass = (p == passes.size() - 1);
+        std::vector<Range> next_pending;
+
+        for (const auto& r : pending) {
+            i64 done = 0;
+            while (done < r.len) {
+                const i64     try_len = std::min(chunk_size, r.len - done);
+                const ssize_t n       = ::pread(fd_,
+                                                dst + r.dst_off + done,
+                                                (size_t)try_len,
+                                                (off_t)(r.off + done));
+                if (n > 0) {
+                    done += n;
+                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                } else if (n == 0) {
+                    // EOF — stop processing this range.
+                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                    break;
+                } else {
+                    if (errno == EINTR) continue;
+                    if (last_pass) {
+                        std::memset(dst + r.dst_off + done, 0, (size_t)try_len);
+                        noteBad(r.off + done, try_len);
+                    } else {
+                        next_pending.push_back({r.off + done, try_len, r.dst_off + done});
+                    }
+                    done += try_len;
+                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                }
+            }
+        }
+        pending = std::move(next_pending);
+        if (pending.empty()) break;
     }
-    return done;
+
+    return max_processed;
 }
 
 i64 DiskReader::read(u64 offset, void* buf, i64 count) {
