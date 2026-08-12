@@ -947,7 +947,9 @@ async function loadPreview(f, host) {
   // recovered video or PDF over that size played only its first third.
   const unlimited = contentUrl(f.index, 0);
   const url = contentUrl(f.index, 256 * 1024 * 1024);
-  const bail = `onerror="this.parentElement.innerHTML='<div class=empty>This file could not be rendered.<br>Switch to Hex to inspect the bytes.</div>'"`;
+  const bail = () => {
+    host.innerHTML = '<div class="empty">This file could not be rendered.<br>Switch to Hex to inspect the bytes.</div>';
+  };
 
   function partialWarn(f) {
     if (f.recoverable >= f.size || f.size <= 0) return '';
@@ -963,30 +965,71 @@ async function loadPreview(f, host) {
     return;
   }
   if (IMG.includes(ext)) {
+    host.innerHTML = '';
     if (ext === 'ico') {
       // ICO is not reliably renderable in <img> across browsers; decode the
       // largest entry to a PNG first, falling back to the raw file if the
       // decode fails (Chrome renders it natively).
       host.innerHTML = '<div class="empty">Loading…</div>';
       icoPngUrl(f.index).then(src => {
-        host.innerHTML = src ? `<img src="${src}">` : `<img src="${url}" ${bail}>`;
-      }).catch(() => { host.innerHTML = `<img src="${url}" ${bail}>`; });
+        const img = document.createElement('img');
+        img.src = src || url;
+        img.onerror = bail;
+        host.innerHTML = '';
+        host.appendChild(img);
+      }).catch(() => {
+        const img = document.createElement('img');
+        img.src = url;
+        img.onerror = bail;
+        host.innerHTML = '';
+        host.appendChild(img);
+      });
       return;
     }
-    host.innerHTML = `<img src="${url}" ${bail}>`; return;
+    const img = document.createElement('img');
+    img.src = url;
+    img.onerror = bail;
+    host.appendChild(img);
+    return;
   }
   if (VID.includes(ext)) {
-    host.innerHTML = partialWarn(f) + `<video src="${unlimited}" controls preload="metadata" ${bail}></video>`;
+    const video = document.createElement('video');
+    video.src = unlimited;
+    video.controls = true;
+    video.preload = 'metadata';
+    video.onerror = bail;
+    host.innerHTML = partialWarn(f);
+    host.appendChild(video);
     return;
   }
   if (AUD.includes(ext)) {
-    host.innerHTML = partialWarn(f) + `<div style="text-align:center;padding:24px;width:100%">
-      <div style="font-size:40px;margin-bottom:14px">♪</div>
-      <div class="muted" style="margin-bottom:12px;word-break:break-all">${esc(f.name)}</div>
-      <audio src="${unlimited}" controls preload="metadata" ${bail}></audio></div>`;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'text-align:center;padding:24px;width:100%';
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size:40px;margin-bottom:14px';
+    note.textContent = '♪';
+    const muted = document.createElement('div');
+    muted.className = 'muted';
+    muted.style.cssText = 'margin-bottom:12px;word-break:break-all';
+    muted.textContent = f.name;
+    const audio = document.createElement('audio');
+    audio.src = unlimited;
+    audio.controls = true;
+    audio.preload = 'metadata';
+    audio.onerror = bail;
+    wrap.appendChild(note);
+    wrap.appendChild(muted);
+    wrap.appendChild(audio);
+    host.innerHTML = partialWarn(f);
+    host.appendChild(wrap);
     return;
   }
-  if (ext === 'pdf') { host.innerHTML = `<iframe src="${unlimited}"></iframe>`; return; }
+  if (ext === 'pdf') {
+    const frame = document.createElement('iframe');
+    frame.src = unlimited;
+    host.appendChild(frame);
+    return;
+  }
   if (TXT.includes(ext) || !ext) {
     host.innerHTML = '<div class="empty">Loading…</div>';
     try {
