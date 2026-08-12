@@ -821,7 +821,11 @@ function contentUrl(index, max) {
 
 async function loadPreview(f, host) {
   const ext = (f.ext || '').toLowerCase();
-  const url = contentUrl(f.index, 64 * 1024 * 1024);
+  // Media and PDFs must receive the complete file: the server streams plain
+  // files in windows, so there is no reason to cap them — a 64 MB cap meant a
+  // recovered video or PDF over that size played only its first third.
+  const unlimited = contentUrl(f.index, 0);
+  const url = contentUrl(f.index, 256 * 1024 * 1024);
   const bail = `onerror="this.parentElement.innerHTML='<div class=empty>This file could not be rendered.<br>Switch to Hex to inspect the bytes.</div>'"`;
 
   if (f.recoverable === 0 && f.size > 0) {
@@ -831,15 +835,15 @@ async function loadPreview(f, host) {
     return;
   }
   if (IMG.includes(ext)) { host.innerHTML = `<img src="${url}" ${bail}>`; return; }
-  if (VID.includes(ext)) { host.innerHTML = `<video src="${url}" controls ${bail}></video>`; return; }
+  if (VID.includes(ext)) { host.innerHTML = `<video src="${unlimited}" controls ${bail}></video>`; return; }
   if (AUD.includes(ext)) {
     host.innerHTML = `<div style="text-align:center;padding:24px;width:100%">
       <div style="font-size:40px;margin-bottom:14px">♪</div>
       <div class="muted" style="margin-bottom:12px;word-break:break-all">${esc(f.name)}</div>
-      <audio src="${url}" controls ${bail}></audio></div>`;
+      <audio src="${unlimited}" controls ${bail}></audio></div>`;
     return;
   }
-  if (ext === 'pdf') { host.innerHTML = `<iframe src="${url}"></iframe>`; return; }
+  if (ext === 'pdf') { host.innerHTML = `<iframe src="${unlimited}"></iframe>`; return; }
   if (TXT.includes(ext) || !ext) {
     host.innerHTML = '<div class="empty">Loading…</div>';
     try {
