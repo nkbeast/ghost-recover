@@ -214,12 +214,13 @@ std::vector<u8> base64Decode(const std::string& s) {
     }
     std::vector<u8> out;
     out.reserve(s.size() * 3 / 4 + 3);
-    int val = 0, bits = 0;
+    u32 val = 0;
+    int bits = 0;
     for (char ch : s) {
         if (ch == '=') break;
         i8 d = tbl[(u8)ch];
         if (d < 0) continue;
-        val = (val << 6) | d;
+        val = (val << 6) | (u32)d;
         bits += 6;
         if (bits >= 8) { bits -= 8; out.push_back((u8)((val >> bits) & 0xFF)); }
     }

@@ -1063,8 +1063,8 @@ function modalShell(title, inner, footer, width) {
 /* ---- attach image ---- */
 function modalAttach() {
   const rows = S.browseEntries.map(e => `
-    <div class="row" onclick="${e.is_dir ? `browseTo('${esc(joinPath(S.browsePath, e.name))}')`
-                                         : `pickFile('${esc(joinPath(S.browsePath, e.name))}')`}">
+    <div class="row" data-path="${esc(joinPath(S.browsePath, e.name))}"
+         data-dir="${e.is_dir ? '1' : '0'}" onclick="browsePick(this)">
       <span>${e.is_dir ? '📁' : '📄'}</span>
       <span class="grow nowrap" style="color:${e.is_dir ? 'var(--blue)' : 'var(--fg)'}">${esc(e.name)}</span>
       ${e.is_dir ? '' : `<span class="faint">${fmtSize(e.size)}</span>`}
@@ -1101,6 +1101,11 @@ async function browseTo(path) {
 }
 
 function pickFile(p) { S.modalData.path = p; render(); }
+
+function browsePick(row) {
+  const p = row.dataset.path;
+  (row.dataset.dir === '1' ? browseTo : pickFile)(p);
+}
 
 async function attachConfirm() {
   const p = (S.modalData.path || '').trim();
@@ -1640,7 +1645,7 @@ Object.assign(window, {
   S, go, render, loadDisks, pickDisk, mountSelected, openSource, loadPartitions,
   usePartition, useRegion, useWholeDisk, startJob, cancelJob, loadResults, setSort,
   selectFile, toggleSel, selectAllShown, setPreview, downloadFile, showFileInfo,
-  openModal, closeModal, browseTo, pickFile, attachConfirm, toggleCat, runCarve,
+  openModal, closeModal, browseTo, pickFile, browsePick, attachConfirm, toggleCat, runCarve,
   runExtract, runImage, detectRaid, assembleRaid, runRepair, toggleLog, shutdownEngine,
   backToVolumes,
   loadPrivileges, elevate

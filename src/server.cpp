@@ -756,6 +756,14 @@ bool pathAllowedForRawHex(const std::string& p) {
     return fileExists(sys + "/size") || fileExists(sys + "/partition");
 }
 
+// Output destinations (write sinks) may only point inside the output root.
+// Reads stay open-by-path — the UI is meant to open devices and images
+// anywhere — but without this check the unauthenticated API could write
+// files anywhere the engine's user (possibly root after elevation) can.
+bool outputPathAllowed(const std::string& p) {
+    return pathIsWithin(p, outputRoot());
+}
+
 // ---------------------------------------------------------------------------
 int startServer(const ServerConfig& cfg) {
     setOutputRoot(cfg.output_root.empty() ? defaultOutputRoot() : cfg.output_root);
@@ -788,15 +796,44 @@ int startServer(const ServerConfig& cfg) {
         {"X-Content-Type-Options", "nosniff"},
     });
     svr.Options(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
-    // The CORS headers above only stop a malicious page from *reading* the
-    // answer; the request still executes. A page from another origin cannot
-    // set the Origin header itself, so a mismatching Origin proves the request
-    // is cross-site — reject it outright. Plain clients (curl, the engine's
-    // own handover IPC) send no Origin header and are unaffected.
-    svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-        std::string origin = req.get_header_value("Origin");
-        if (!origin.empty()) {
-            if (origin != "http://" + req.get_header_value("Host") && origin != "null") {
+    // Local mode: every request must arrive with a loopback Host header and,
+    // when an Origin is present, a loopback origin. This blocks cross-site
+    // requests from other websites (their Origin cannot be forged), including
+    // sandboxed iframes and data:/file: pages whose Origin is literally
+    // "null" — those are rejected too. Requiring a loopback Host also defeats
+    // DNS rebinding: a rebinding attacker's requests carry the attacker's own
+    // domain as Host. Plain clients (curl, the engine's own handover IPC)
+    // send no Origin header and remain unaffected. Remote mode opts into
+    // wide-open LAN access on purpose.
+    auto looksLoopback = [](const std::string& value, bool isOrigin) {
+        std::string v = toLower(trim(value));
+        if (isOrigin) {
+            if (v.rfind("http://", 0) != 0) return false;
+            v = v.substr(7);
+        }
+        for (const char* base : {"localhost", "127.0.0.1", "[::1]"}) {
+            if (v == base) return true;
+            std::string prefix = std::string(base) + ":";
+            if (v.rfind(prefix, 0) != 0) continue;
+            const std::string port = v.substr(prefix.size());
+            if (port.empty()) return false;
+            bool digits = true;
+            for (char c : port)
+                if (!::isdigit((unsigned char)c)) { digits = false; break; }
+            if (digits) return true;
+        }
+        return false;
+    };
+    svr.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+        if (!cfg.allow_remote) {
+            if (!looksLoopback(req.get_header_value("Host"), false)) {
+                res.status = 403;
+                res.set_content(errorJson("only connections to localhost are allowed"),
+                                "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            std::string origin = req.get_header_value("Origin");
+            if (!origin.empty() && !looksLoopback(origin, true)) {
                 res.status = 403;
                 res.set_content(errorJson("cross-origin requests are not allowed"),
                                 "application/json");
@@ -1203,6 +1240,8 @@ int startServer(const ServerConfig& cfg) {
         ScanOptions sopt = readScanOptions(body);
         std::string defaultOut = joinPath(outputRoot(), "carved");
         CarveOptions copt = readCarveOptions(body, defaultOut);
+        if (!outputPathAllowed(copt.output_dir))
+            return {std::string(), "output_dir must be inside " + outputRoot()};
         bool unallocOnly = copt.skip_allocated;
 
         std::string kind = withScan && withCarve ? "deep" : (withCarve ? "carve" : "scan");
@@ -1632,6 +1671,12 @@ int startServer(const ServerConfig& cfg) {
         opt.compute_hashes = body.getBool("compute_hashes", true);
         opt.overwrite      = body.getBool("overwrite", false);
 
+        if (!outputPathAllowed(opt.output_dir)) {
+            res.set_content(errorJson("output_dir must be inside " + outputRoot()),
+                            "application/json");
+            return;
+        }
+
         std::vector<size_t> indices;
         if (const json::Value* arr = body.getArray("indices"))
             for (const auto& v : arr->arr) {
@@ -1687,6 +1732,12 @@ int startServer(const ServerConfig& cfg) {
         opt.verify      = body.getBool("verify", false);
         opt.start       = t.offset;
         opt.length      = t.length;
+
+        if (!outputPathAllowed(opt.output_path) || !outputPathAllowed(opt.mapfile)) {
+            res.set_content(errorJson("output_path must be inside " + outputRoot()),
+                            "application/json");
+            return;
+        }
 
         std::string err;
         { auto probe = openTarget(t.path, 0, 0, &err); if (!probe) {
@@ -1783,6 +1834,12 @@ int startServer(const ServerConfig& cfg) {
         std::string outPath = body.getStr("output_path", joinPath(outputRoot(), "raid/array.img"));
         i64 maxBytes = body.getInt("max_bytes", 0);
 
+        if (!outputPathAllowed(outPath)) {
+            res.set_content(errorJson("output_path must be inside " + outputRoot()),
+                            "application/json");
+            return;
+        }
+
         std::string id = JobManager::instance().submit("raid", outPath,
             [layout, outPath, maxBytes](Job& job) -> std::string {
                 RaidBuildResult r = assembleRaid(layout, outPath, maxBytes, job.progress);
@@ -1809,6 +1866,12 @@ int startServer(const ServerConfig& cfg) {
         opt.apply = body.getBool("apply", false);
         opt.backup = body.getBool("backup", true);
         opt.backup_dir = body.getStr("backup_dir", joinPath(outputRoot(), "repair-backups"));
+
+        if (!outputPathAllowed(opt.backup_dir)) {
+            res.set_content(errorJson("backup_dir must be inside " + outputRoot()),
+                            "application/json");
+            return;
+        }
 
         if (opt.apply && !g_allowWrites) {
             res.set_content(errorJson(

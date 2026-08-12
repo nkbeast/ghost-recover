@@ -13,6 +13,7 @@
 #include <cstring>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ghost {
@@ -270,8 +271,15 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     std::vector<Chunk> chunks;
     u32 currentAg = 0;
 
+    // A damaged or hostile tree can point back at a block already on the
+    // way down (a cycle) or anywhere else in the tree; without this set the
+    // walk re-reads the same blocks forever. Block numbers are unique
+    // across AGs because every pointer is offset by ag*agblocks.
+    std::unordered_set<u64> visitedBlocks;
+
     auto walkInobt = [&](u64 blockNo, int depth, auto&& self) -> void {
         if (depth > 16 || chunks.size() > 4000000) return;
+        if (!visitedBlocks.insert(blockNo).second) return;
         i64 off = (i64)blockNo * fs.sb.blocksize;
         if (off < 0 || off + (i64)fs.sb.blocksize > fs.volume) return;
         auto raw = disk.readBlock((u64)off, fs.sb.blocksize);
