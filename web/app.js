@@ -171,7 +171,17 @@ function render() {
     if (S.logOpen) html += viewLog();
   }
   if (S.modal) html += viewModal();
+  // innerHTML replacement destroys every scrollable pane (the file table in
+  // .tablewrap, the sidebar, the preview), so remember where each one was and
+  // put it back — otherwise clicking a file re-renders and jumps to the top.
+  const scrollables = $$('#app *').filter(el => el.scrollTop > 0 || el.scrollLeft > 0)
+    .map(el => [el.className, el.scrollTop, el.scrollLeft]);
   app.innerHTML = html;
+  scrollables.forEach(([cls, top, left]) => {
+    if (!cls) return;
+    const els = $$('.' + cls.split(' ').filter(Boolean).join('.'));
+    els.forEach(el => { el.scrollTop = top; el.scrollLeft = left; });
+  });
 
   if (S.logOpen) {
     const body = $('#logbody');
