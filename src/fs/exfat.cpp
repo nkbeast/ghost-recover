@@ -112,6 +112,12 @@ struct ExFatFs {
         std::vector<u64> out;
         if (first < 2 || size <= 0) return out;
         u64 need = ((u64)size + clusterSize() - 1) / clusterSize();
+        // `size` comes from a 64-bit untrusted directory-entry field (up to
+        // 2^63) and `need` can reach billions of clusters on paper — one u64
+        // per cluster adds up to gigabytes. Real filesystems satisfy this with
+        // far fewer clusters (a 4 MiB cluster gives 2^41 bytes of reach).
+        // Cap the scan; the tail of an absurdly claimed run is dropped.
+        if (need > (1ull << 22)) need = (1ull << 22);
         for (u64 i = 0; i < need && first + i < (u64)cluster_count + 2; i++)
             out.push_back(first + i);
         return out;

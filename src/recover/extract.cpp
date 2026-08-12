@@ -111,6 +111,34 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
 }
 
 // ---------------------------------------------------------------------------
+std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off, i64 len) {
+    std::vector<u8> out;
+    if (len <= 0) return out;
+    out.reserve((size_t)len);
+    i64 pos = 0;
+    for (const auto& e : f.extents) {
+        i64 eLen = std::max<i64>(0, e.length);
+        if (eLen <= 0) continue;
+        const i64 eEnd = pos + eLen;
+        if (eEnd > off) {
+            const i64 from = std::max(pos, off);
+            const i64 to = std::min(eEnd, off + len);
+            if (to > from) {
+                if (e.sparse) {
+                    out.insert(out.end(), (size_t)(to - from), 0);
+                } else {
+                    auto chunk = disk.readBlock((u64)(e.offset + (from - pos)), to - from);
+                    out.insert(out.end(), chunk.begin(), chunk.end());
+                }
+            }
+        }
+        pos = eEnd;
+        if (pos >= off + len) break;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& files,
                            const ExtractOptions& opt, Progress& prog) {
     ExtractResult res;
@@ -235,15 +263,26 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                 const i64 decompSize = (!f.decomp_sizes.empty() && ei < f.decomp_sizes.size())
                                            ? f.decomp_sizes[ei] : 0;
                 while (pos < take && !failed) {
-                    i64 want = coded ? (take - pos)
-                                     : std::min(kChunk, take - pos);
+                    // A coded extent must be read whole (it decodes as one
+                    // block), but the on-disk length is a u32 — a crafted
+                    // extent of up to 4 GiB must not force one allocation
+                    // that big. Real coded blocks are at most a few MiB;
+                    // anything implausible fails the file cleanly.
+                    i64 want;
+                    if (coded) {
+                        want = take - pos;
+                        if (want > 128 * 1024 * 1024) { failed = true; break; }
+                    } else {
+                        want = std::min(kChunk, take - pos);
+                    }
                     auto chunk = disk.readBlock((u64)(e.offset + pos), want);
                     if (chunk.empty()) break;
                     const std::vector<u8>* payload = &chunk;
                     std::vector<u8> decoded;
                     if (coded) {
                         decoded = decompressBlock(f.codec, chunk.data(), chunk.size(),
-                                                  decompSize);
+                                                  decompSize,
+                                                  f.sectorsize ? f.sectorsize : 4096);
                         if (decoded.empty()) break;
                         payload = &decoded;
                         pos = take;   // one extent == one independently coded block

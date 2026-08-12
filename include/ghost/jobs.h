@@ -64,6 +64,7 @@ private:
 
     mutable std::mutex mu_;
     std::map<std::string, std::shared_ptr<Job>> jobs_;
+    std::vector<std::thread> workers_;   // joined on shutdown, guarded by mu_
     u64  counter_ = 0;
     bool stopping_ = false;
 };

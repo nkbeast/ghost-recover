@@ -687,6 +687,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             i64 revived = 0;
             for (const auto& hit : hits) {
                 if (prog.cancelled()) break;
+                // The journal can nominate inodes with no live counterpart;
+                // cap the map exactly like the main scan does.
+                if ((i64)inodes.size() >= (i64)opt.max_files * 2) break;
                 u32 grp = 0;
                 u64 firstIno = 0;
                 if (!inodeForBlock(hit.fs_block, grp, firstIno)) continue;

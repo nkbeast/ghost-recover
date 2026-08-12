@@ -398,7 +398,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                                     if (codec) {
                                         n.inlineData = decompressBlock(
                                             codec, blob.data(), blob.size(),
-                                            (i64)ramBytes > 0 ? (i64)ramBytes : 0);
+                                            (i64)ramBytes > 0 ? (i64)ramBytes : 0,
+                                            fs.sectorsize);
                                     }
                                 }
                             }
@@ -411,6 +412,14 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         u64 extOffset  = b.le64(dp + 37);
                         u64 numBytes   = b.le64(dp + 45);
                         if (diskBytenr == 0 || numBytes == 0) break;   // hole
+                        // Both fields are caller-controlled u64s. A crafted
+                        // extent item may claim a blob of up to 16 EiB; the
+                        // scan would allocate that at extract time. Real
+                        // btrfs extents cap out around 128 KiB, so anything
+                        // pasting 128 MiB (or 1 GiB decompressed) is bogus —
+                        // refuse the extent.
+                        if (diskNumBytes > 128 * 1024 * 1024 ||
+                            numBytes > 1024 * 1024 * 1024) break;
                         if (compression != 0) {
                             // Compressed extent: the on-disk blob (diskNumBytes
                             // bytes) decompresses to numBytes. Decompression
@@ -518,6 +527,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             if (!n.codec.empty()) {
                 f.codec = n.codec;
                 f.is_compressed = true;
+                f.sectorsize = fs.sectorsize;
                 f.decomp_sizes = n.decompSizes;
             }
             f.method = n.stale ? "cow_stale_leaf_recovery" : "extent_data_items";

@@ -9,13 +9,18 @@
 namespace ghost {
 
 // LZO1X raw stream decoder (instruction set from lzo1x_d.ch, LZO 2.10).
-// Appends the decompressed bytes to `out`; returns true on success.
-bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out);
+// Appends the decompressed bytes to `out`; returns true on success. `maxOut`
+// (> 0) aborts once the output would grow past it.
+bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                 i64 maxOut = 0);
 
 // Btrfs LZO framing (fs/btrfs/lzo.c): a LE32 total-size header followed by
 // segments of [LE32 size, payload], with 1-3 zero pad bytes inserted when a
 // segment header would cross a sector boundary. Each segment is raw LZO1X.
-bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out);
+// `sectorsize` is the filesystem's own sector size (default 4096); `maxOut`
+// is passed through to the segment decoder.
+bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                    u32 sectorsize = 4096, i64 maxOut = 0);
 
 // zlib stream (btrfs zlib extents, squashfs-style zlib blocks).
 bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out);
@@ -32,9 +37,11 @@ std::vector<u8> zstdFrameDecode(const u8* in, size_t inLen);
 bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out);
 
 // Dispatches one independently compressed block on its codec id. `expectedOut`
-// (when > 0) truncates the result to that length. Empty vector on failure.
+// (when > 0) truncates the result to that length. `sectorsize` (default 4096)
+// is passed to the btrfs LZO frame decoder. Empty vector on failure.
 std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
-                                size_t len, i64 expectedOut);
+                                size_t len, i64 expectedOut,
+                                u32 sectorsize = 4096);
 
 namespace selftest {
 // Exercises every codec decoder against embedded, independently produced

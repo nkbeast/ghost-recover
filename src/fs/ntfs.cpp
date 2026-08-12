@@ -119,7 +119,16 @@ struct NtfsFs {
     std::vector<Run> mft_runs;
     u64  mft_records = 0;
 
-    i64 clusterOffset(i64 lcn) const { return lcn * (i64)cluster_size; }
+    i64 clusterOffset(i64 lcn) const {
+        // A crafted run list can carry an LCN far outside the volume; the
+        // multiplication would overflow (UB) before the caller's range checks
+        // reject it. Saturate at the int64 edges so the subsequent bounds
+        // checks always reject the offset safely.
+        const i64 c = (i64)cluster_size;
+        if (lcn > 0 && c > 0 && lcn > INT64_MAX / c) return INT64_MAX;
+        if (lcn < 0 && c > 0 && lcn < INT64_MIN / c) return INT64_MIN;
+        return lcn * c;
+    }
 
     bool readBoot(std::string* err) {
         auto raw = d->readBlock(0, 512);
@@ -518,6 +527,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     // Attributes can live in child records referenced by $ATTRIBUTE_LIST; those
     // children are visited too, and their $DATA is folded into the base record.
     std::unordered_map<u64, std::vector<Attr>> childAttrs;
+    i64 childAttrItems = 0;
 
     // Read the MFT in large chunks rather than one record at a time.
     const u64 recordsPerChunk = std::max<u64>(1, (4 * 1024 * 1024) / fs.record_size);
@@ -552,8 +562,14 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             u64 baseNo = r.base_ref & 0x0000FFFFFFFFFFFFull;
             if (baseNo != 0 && baseNo != recNo) {
                 // Continuation record — stash its attributes for the base.
-                auto& v = childAttrs[baseNo];
-                for (auto& a : r.attrs) v.push_back(std::move(a));
+                // Bounded like the node table: a crafted $MFT can nominate an
+                // unbounded number of children, and the map must not grow
+                // without limit just to honor every one of them.
+                if (childAttrItems < (i64)opt.max_files * 2) {
+                    auto& v = childAttrs[baseNo];
+                    for (auto& a : r.attrs) v.push_back(std::move(a));
+                    childAttrItems += (i64)r.attrs.size();
+                }
                 continue;
             }
 

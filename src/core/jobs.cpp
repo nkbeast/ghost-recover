@@ -26,9 +26,21 @@ JobManager& JobManager::instance() {
 JobManager::~JobManager() { shutdown(); }
 
 void JobManager::shutdown() {
-    const std::lock_guard<std::mutex> lk(mu_);
-    stopping_ = true;
-    for (auto& [id, j] : jobs_) j->progress.cancel();
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        stopping_ = true;
+        for (auto& [id, j] : jobs_) j->progress.cancel();
+    }
+    // Join the workers rather than leaving them detached: after shutdown()
+    // returns the caller's process may tear down, and a still-running worker
+    // (mid-scan, mid-extract) touching engine state would crash the exit.
+    std::vector<std::thread> workers;
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        workers.swap(workers_);
+    }
+    for (auto& t : workers)
+        if (t.joinable()) t.join();
 }
 
 std::string JobManager::submit(const std::string& kind, const std::string& target, JobFn fn) {
@@ -46,8 +58,15 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
     }
 
     std::thread worker([job, fn]() {
-        job->state = JobState::Running;
-        job->started_ms = nowMs();
+        {
+            // State and timing are recorded under the same lock as the
+            // terminal store below; a concurrent cancel()/prune() therefore
+            // never sees a job mid-transition or stuck on "running" after it
+            // already stored its result.
+            const std::lock_guard<std::mutex> lk(job->mu);
+            job->state = JobState::Running;
+            job->started_ms = nowMs();
+        }
         std::string out;
         std::string err;
         try {
@@ -72,10 +91,16 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
         job->progress.setPhase(jobStateName(job->state.load()));
     });
 
-    // Detached rather than tracked: a finished std::thread stays joinable, so
-    // holding them meant one leaked OS handle per job for the life of the
-    // server. Cancellation goes through the job's own flag.
-    worker.detach();
+    // Tracked rather than detached so shutdown() can join every worker.
+    // Finished threads are joined once and drop out of the list naturally.
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        if (stopping_) {                // raced a shutdown: abandon the thread
+            worker.detach();
+            return {};
+        }
+        workers_.push_back(std::move(worker));
+    }
     return job->id;
 }
 

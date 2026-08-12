@@ -131,7 +131,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     for (i64 off = mainStart; off < mainEnd && !prog.cancelled(); off += chunkSize) {
         // Bounded like ext/xfs: the inode map is the dominant memory cost.
+        // Direct-node (extent) entries carry ~4 KiB of addresses each, so that
+        // map gets the same bound — a crafted image of only direct nodes must
+        // not grow it to gigabytes either.
         if ((i64)inodes.size() >= (i64)opt.max_files * 2) break;
+        if ((i64)directNodes.size() >= (i64)opt.max_files * 2) break;
         prog.set(off - mainStart, mainEnd - mainStart);
         i64 want = std::min(chunkSize, mainEnd - off);
         chunk = disk.readBlock((u64)off, want);

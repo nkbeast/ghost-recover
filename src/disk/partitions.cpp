@@ -616,7 +616,12 @@ std::vector<Extent> extFree(DiskReader& disk, Progress& prog) {
     if (incompat & 0x80) blocksCount |= ((u64)s.le32(0x150)) << 32;
     if (!blocksPerGroup || !blocksCount) return free;
 
-    u32 groups = (u32)((blocksCount - firstData + blocksPerGroup - 1) / blocksPerGroup);
+    // A crafted superblock may claim blocksPerGroup=1 for a huge volume,
+    // blowing the group count (and the descriptor read below — up to ~0.25 TiB
+    // of allocation) out of all proportion. Cap it the same way the driver
+    // does; real volumes never approach this.
+    u64 groups64 = (blocksCount - firstData + blocksPerGroup - 1) / blocksPerGroup;
+    u32 groups = (u32)std::min<u64>(groups64, 1u << 22);
     auto gd = disk.readBlock((u64)(firstData + 1) * bs, (i64)groups * descSize);
     Bytes g(gd);
     for (u32 i = 0; i < groups && !prog.cancelled(); i++) {

@@ -111,6 +111,11 @@ struct SqFs {
     bool readMeta(u64 tableStart, u64 blockOff, u16 inBlock, size_t len,
                   std::vector<u8>& out) const {
         out.clear();
+        // `len` mirrors untrusted on-disk sizes (u32, up to ~4 GiB). Metadata
+        // streams are 8 KiB blocks, so no legitimate gap exceeds 1 GiB; cap
+        // the read so a hostile size field cannot drive a multi-gigabyte
+        // accumulation.
+        if (len > (size_t)1 << 30) len = (size_t)1 << 30;
         u64 pos = tableStart + blockOff;
         u16 skip = inBlock;
         int guard = 0;
@@ -198,11 +203,15 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     struct FragEntry { u64 start; u32 size; };
     std::vector<FragEntry> fragments;
     if (fs.frag_table && fs.frag_table < (u64)volume && b.le32(16) > 0) {
-        u32 fragCount = b.le32(16);
-        u32 indexes = (fragCount * 16 + 8191) / 8192;
+        // `fragCount` is an untrusted u32: the 16-byte entries would reach
+        // ~68 GB if taken at face value. Real fragment tables hold at most a
+        // few million entries; anything past 2^24 is bogus (or beyond the
+        // engine's memory contract anyway).
+        u32 fragCount = std::min(b.le32(16), 1u << 24);
+        u64 indexes = ((u64)fragCount * 16 + 8191) / 8192;
         auto idxRaw = disk.readBlock(fs.frag_table, (i64)indexes * 8);
         Bytes ib2(idxRaw);
-        for (u32 i = 0; i < indexes; i++) {
+        for (u64 i = 0; i < indexes; i++) {
             u64 metaOff = ib2.le64((size_t)i * 8);
             std::vector<u8> blk;
             u64 next = 0;
@@ -1244,6 +1253,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 // v2 type codes: 0 stat, 1 indirect, 2 direct, 3 directory
             }
 
+            // Bounded like every other object map: a crafted leaf stream can
+            // nominate unlimited object ids, so stop creating new entries once
+            // the map is at the file cap. Existing entries stay updateable.
+            auto mapFull = objs.size() >= (size_t)opt.max_files * 2;
+            if (mapFull && objs.find(objectId) == objs.end()) continue;
             RNode& n = objs[objectId];
             if (itype == 0) {                            // stat data
                 if (version == 0 && b.has(data, 32)) {
@@ -1299,6 +1313,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     std::string nm = b.str(nameStart, nameEnd - nameStart);
                     while (!nm.empty() && nm.back() == '\0') nm.pop_back();
                     if (nm.empty() || nm == "." || nm == "..") continue;
+                    if (objs.find(childObj) == objs.end() &&
+                        objs.size() >= (size_t)opt.max_files * 2) continue;
                     RNode& c = objs[childObj];
                     if (c.name.empty()) { c.name = nm; c.parent = objectId; }
                     (void)childDir;

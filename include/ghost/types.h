@@ -137,6 +137,10 @@ struct RecoveredFile {
     // units). Empty = decompressed size equals the extent length.
     std::vector<i64> decomp_sizes;
 
+    // Filesystem sector size (0 = unknown). The btrfs LZO frame decoder needs
+    // it for segment padding; defaults to 4096 when unset.
+    u32 sectorsize = 0;
+
     // SquashFS-style tail packing: the final extent is a block shared with other
     // files, and only [fragment_offset, fragment_offset + fragment_length) of it
     // (after decoding) belongs to this file. -1 = the whole extent is ours.

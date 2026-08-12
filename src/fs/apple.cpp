@@ -125,6 +125,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     std::unordered_map<u32, u32> parents;
     struct Rec { RecoveredFile f; };
     std::vector<RecoveredFile> found;
+    // Folder records never count toward `found`, but a crafted catalog can
+    // still nominate unbounded names/parents pairs; bound the two maps the
+    // same way every other object map in this engine is bounded.
+    i64 catEntries = 0;
 
     u32 node = firstLeaf;
     int guard = 0;
@@ -158,11 +162,15 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
             if (recType == 1) {                            // folder
                 u32 id = b.be32(dataOff + 8);
-                if (id && !name.empty()) { names[id] = name; parents[id] = parentID; }
+                if (id && !name.empty() && catEntries < (i64)opt.max_files * 2) {
+                    names[id] = name; parents[id] = parentID; catEntries++;
+                }
             } else if (recType == 2) {                     // file
                 if (dataOff + 248 > nodeSize) continue;
                 u32 id = b.be32(dataOff + 8);
-                if (id && !name.empty()) { names[id] = name; parents[id] = parentID; }
+                if (id && !name.empty() && catEntries < (i64)opt.max_files * 2) {
+                    names[id] = name; parents[id] = parentID; catEntries++;
+                }
                 ForkData dataFork = readFork(b, dataOff + 88);
                 ForkData rsrcFork = readFork(b, dataOff + 168);
 
@@ -372,6 +380,12 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
                 if (jtype == kJInode) {
                     if (vLen < 92 || !b.has(vp, 92)) continue;
+                    // Crafted trees can nominate an unbounded number of stub
+                    // j_inodes; stop growing once the harvest is beyond the
+                    // file cap the scan works to.
+                    if (objs.find(oid) == objs.end() &&
+                        objs.size() >= (size_t)opt.max_files * 2)
+                        continue;
                     Node& n = objs[oid];
                     n.parent = b.le64(vp + 0);
                     n.crtime = apfsTimeToUnix(b.le64(vp + 16));
@@ -394,6 +408,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     if (nm.empty()) continue;
                     if (vLen < 8 || !b.has(vp, 8)) continue;
                     u64 childId = b.le64(vp) & 0x0FFFFFFFFFFFFFFFull;
+                    if (objs.find(childId) == objs.end() &&
+                        objs.size() >= (size_t)opt.max_files * 2) continue;
                     Node& c = objs[childId];
                     if (c.name.empty()) { c.name = nm; c.parent = oid; }
                 } else if (jtype == kJFileExtent) {
@@ -404,6 +420,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     if (len == 0 || physBlock == 0) continue;
                     i64 off = (i64)(physBlock * blockSize);
                     if (off < 0 || off >= volume) continue;
+                    if (objs.find(oid) == objs.end() &&
+                        objs.size() >= (size_t)opt.max_files * 2) continue;
                     Node& n = objs[oid];
                     bool dup = false;
                     for (const auto& e : n.extents)

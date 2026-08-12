@@ -69,21 +69,24 @@ bool rawDeflateAll(const u8* src, size_t srcLen, std::vector<u8>& out) {
 // LZO1X raw stream decoder. Instruction semantics follow lzo1x_d.ch; the
 // encoding of each class (offsets, lengths, extended forms) is reproduced
 // byte-exactly, so streams produced by any LZO1X compressor decode here.
-bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
+// `maxOut` (> 0) aborts once the output would exceed it, so a hostile stream
+// whose extended-length runs claim gigabytes cannot balloon the buffer.
+bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out, i64 maxOut) {
     if (inLen == 0) return true;
     size_t ip = 0, op = 0;
     size_t t = 0;
     auto needIp = [&](size_t n) { return ip + n <= inLen; };
+    auto room = [&](i64 n) { return maxOut <= 0 || (i64)out.size() + n <= maxOut; };
 
     if (in[0] > 17) {                       // first-byte literal shortcut
         t = in[0] - 17;
         ip = 1;
         if (t < 4) {
-            if (!needIp(t)) return false;
+            if (!needIp(t) || !room((i64)t)) return false;
             out.insert(out.end(), in + ip, in + ip + t);
             ip += t; op += t;
         } else {
-            if (!needIp(t)) return false;
+            if (!needIp(t) || !room((i64)t)) return false;
             out.insert(out.end(), in + ip, in + ip + t);
             ip += t; op += t;
             goto first_literal_run;
@@ -100,7 +103,7 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
             t += 15 + in[ip++];
         }
         t += 3;
-        if (!needIp(t)) return false;
+        if (!needIp(t) || !room((i64)t)) return false;
         out.insert(out.end(), in + ip, in + ip + t);
         ip += t; op += t;
     first_literal_run:
@@ -110,7 +113,7 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
         // M2-relative match with a fixed 3-byte copy, offset base 2049.
         {
             i64 m_pos = (i64)op - (1 + 2048) - (i64)(t >> 2) - (i64)(in[ip++] << 2);
-            if (m_pos < 0) return false;
+            if (m_pos < 0 || !room(3)) return false;
             out.push_back(out[(size_t)m_pos]);
             out.push_back(out[(size_t)(m_pos + 1)]);
             out.push_back(out[(size_t)(m_pos + 2)]);
@@ -122,7 +125,7 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
             if (!needIp(1)) return false;
             i64 m_pos = (i64)op - 1 - (i64)((t >> 2) & 7) - (i64)(in[ip++] << 3);
             size_t n = (t >> 5) + 1;
-            if (m_pos < 0) return false;
+            if (m_pos < 0 || !room((i64)n)) return false;
             for (size_t i = 0; i < n; i++) out.push_back(out[(size_t)(m_pos + i)]);
             op += n;
         } else if (t >= 32) {               // M3: length 3..33, offset 1..16384
@@ -135,7 +138,7 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
             }
             i64 m_pos = (i64)op - 1 - (i64)((in[ip] >> 2) + (in[ip + 1] << 6));
             ip += 2;
-            if (m_pos < 0) return false;
+            if (m_pos < 0 || !room((i64)len)) return false;
             len += 2;
             for (size_t i = 0; i < len; i++) out.push_back(out[(size_t)(m_pos + i)]);
             op += len;
@@ -152,14 +155,14 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
             ip += 2;
             if (m_pos == (i64)op) return true;   // end-of-stream marker 0x11 00 00
             m_pos -= 0x4000;
-            if (m_pos < 0) return false;
+            if (m_pos < 0 || !room((i64)len)) return false;
             len += 2;
             for (size_t i = 0; i < len; i++) out.push_back(out[(size_t)(m_pos + i)]);
             op += len;
         } else {                            // M1: 2-byte copy, offset 1..1024
             if (!needIp(1)) return false;
             i64 m_pos = (i64)op - 1 - (i64)(t >> 2) - (i64)(in[ip++] << 2);
-            if (m_pos < 0) return false;
+            if (m_pos < 0 || !room(2)) return false;
             out.push_back(out[(size_t)m_pos]);
             out.push_back(out[(size_t)(m_pos + 1)]);
             op += 2;
@@ -167,15 +170,17 @@ bool lzo1xDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
     match_done:
         t = in[ip - 2] & 3;                 // up to 3 trailing literals
         if (t == 0) continue;               // next instruction follows
-        if (!needIp(t)) return false;
+        if (!needIp(t) || !room((i64)t)) return false;
         for (size_t i = 0; i < t; i++) out.push_back(in[ip++]);
         op += t;
     }
 }
 
 // ---------------------------------------------------------------------------
-bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
+bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                    u32 sectorsize, i64 maxOut) {
     if (inLen < 4) return false;
+    if (sectorsize == 0 || sectorsize > 65536) sectorsize = 4096;
     u32 total = (u32)(in[0] | (in[1] << 8) | (in[2] << 16) | (in[3] << 24));
     if (total < 4 || total > inLen) total = (u32)inLen;
     size_t cur = 4;
@@ -183,10 +188,10 @@ bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
         u32 seg = (u32)(in[cur] | (in[cur + 1] << 8) | (in[cur + 2] << 16) | (in[cur + 3] << 24));
         cur += 4;
         if (seg == 0 || cur + seg > total) return false;
-        if (!lzo1xDecode(in + cur, seg, out)) return false;
+        if (!lzo1xDecode(in + cur, seg, out, maxOut)) return false;
         cur += seg;
         // Segment headers never cross a sector boundary; skip the pad zeros.
-        size_t sectorLeft = 4096 - (cur % 4096);
+        size_t sectorLeft = sectorsize - (cur % sectorsize);
         if (sectorLeft < 4 && cur + sectorLeft <= total) cur += sectorLeft;
     }
     return true;
@@ -265,10 +270,10 @@ bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out) {
 
 // ---------------------------------------------------------------------------
 std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
-                                size_t len, i64 expectedOut) {
+                                size_t len, i64 expectedOut, u32 sectorsize) {
     std::vector<u8> out;
     if (codec == "btrfs-lzo") {
-        if (!btrfsLzoDecode(data, len, out)) return {};
+        if (!btrfsLzoDecode(data, len, out, sectorsize, expectedOut)) return {};
     } else if (codec == "zlib-block") {
         if (!zlibStreamDecode(data, len, out)) return {};
     } else if (codec == "btrfs-zlib") {
