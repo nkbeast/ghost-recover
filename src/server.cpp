@@ -941,12 +941,24 @@ int startServer(const ServerConfig& cfg) {
         // files anywhere. OPTIONS preflight carries no token by design.
         if (!g_sessionToken.empty() && req.method != "OPTIONS" &&
             req.path.rfind("/api", 0) == 0) {
-            const std::string given = req.get_header_value("X-Ghost-Token");
-            bool ok = !given.empty() && given.size() == g_sessionToken.size();
+            // API calls from fetch() carry the token as a header. Media tags
+            // (<img>, <video>, <audio>), inline previews and downloads cannot
+            // set headers, so /api/content also accepts it as ?tok=… (the
+            // browser appends it in contentUrl()). No other route accepts a
+            // URL token: those GETs all go through fetch() and send the header.
+            const std::string given =
+                (req.path == "/api/content")
+                    ? req.get_param_value("tok")
+                    : std::string();
+            // The header wins when both are present; fall back to the query
+            // param only for the content route above.
+            const std::string givenHeader = req.get_header_value("X-Ghost-Token");
+            std::string effective = givenHeader.empty() ? given : givenHeader;
+            bool ok = !effective.empty() && effective.size() == g_sessionToken.size();
             if (ok) {
                 unsigned diff = 0;
-                for (size_t i = 0; i < given.size(); i++)
-                    diff |= (unsigned)(given[i] ^ g_sessionToken[i]);
+                for (size_t i = 0; i < effective.size(); i++)
+                    diff |= (unsigned)(effective[i] ^ g_sessionToken[i]);
                 ok = (diff == 0);
             }
             if (!ok) {

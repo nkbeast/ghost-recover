@@ -825,8 +825,12 @@ const TXT = ['txt','md','log','json','xml','html','htm','csv','yaml','yml','ini'
              'service','gitconfig','tex','dockerfile','cmake','env','eml','mbox'];
 
 function contentUrl(index, max) {
+  // Media tags, iframes and downloads cannot send the X-Ghost-Token header,
+  // so the session token rides as a query param as well — the server accepts
+  // it on /api/content only.
   return `${API}/content?job=${encodeURIComponent(S.resultJob)}&index=${index}` +
-         (max ? `&max=${max}` : '');
+         (max ? `&max=${max}` : '') +
+         (sessionToken() ? `&tok=${sessionToken()}` : '');
 }
 
 // Decode an ICO entry that is a BMP-style DIB into a canvas. Icon DIBs are
