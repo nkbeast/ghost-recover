@@ -1609,44 +1609,21 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         i64 maxBytes = 64LL * 1024 * 1024;
-        // A missing/negative "max" must not turn into an unbounded read.
+        // A missing "max" means "serve everything" — downloads and media
+        // elements must receive the complete file, not a 64 MB prefix, or
+        // every recovered video/archive over that size silently loses its
+        // tail. Bounded memory is guaranteed separately by windowed reads
+        // below. An explicit "max" (text previews, image thumbnails) is
+        // honored, clamped to a generous hard ceiling.
         i64 m = paramInt(req, "max", 0);
-        if (m > 0) maxBytes = std::min<i64>(maxBytes, m);
+        const bool capped = m > 0;
+        if (capped) maxBytes = std::min<i64>(m, 256LL * 1024 * 1024);
+        constexpr i64 kCodedBudget = 256LL * 1024 * 1024;
 
         const RecoveredFile& f = stored->files[(size_t)index];
         i64 fileLen = f.size > 0 ? f.size : 0;
         if (fileLen <= 0)
             for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
-
-        // Single-range support: "bytes=start-end" or "bytes=start-".
-        // Anything else falls back to a plain (full/trimmed) response, which
-        // browsers treat as progressive download. Media players always use
-        // single ranges, so this covers seeking and streaming.
-        i64 rStart = 0, rEnd = fileLen - 1;
-        bool partial = false;
-        std::string range = req.get_header_value("Range");
-        if (!range.empty() && range.rfind("bytes=", 0) == 0) {
-            std::string spec = range.substr(6);
-            size_t dash = spec.find('-');
-            if (dash != std::string::npos && dash > 0) {
-                i64 s = 0;
-                try { s = std::stoll(spec.substr(0, dash)); } catch (...) { s = -1; }
-                if (s >= 0) {
-                    rStart = s;
-                    partial = true;
-                    if (dash + 1 < spec.size()) {
-                        try { rEnd = std::min<i64>(rEnd, std::stoll(spec.substr(dash + 1))); }
-                        catch (...) { /* keep rEnd = fileLen - 1 */ }
-                    }
-                }
-            }
-        }
-        if (partial && (fileLen <= 0 || rStart >= fileLen)) {
-            res.status = 416;
-            res.set_header("Content-Range", "bytes */" + std::to_string(fileLen));
-            res.set_content(errorJson("range not satisfiable"), "application/json");
-            return;
-        }
 
         std::string err;
         auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
@@ -1655,44 +1632,59 @@ int startServer(const ServerConfig& cfg) {
             res.set_content(errorJson(err), "application/json");
             return;
         }
-        std::vector<u8> data;
-        if (partial) {
-            // Serve at most a bounded window per request; the player issues
-            // further range requests for the rest (progressive download).
-            i64 win = std::min<i64>(rEnd - rStart + 1, 8LL * 1024 * 1024);
-            // Coded/tail-fragmented files cannot be windowed (the decoder
-            // needs the whole extent); fall back to a prefix read like the
-            // non-range path, still bounded.
-            if (f.codec.empty() && f.fragment_offset < 0) {
-                data = readFileWindow(*disk, f, rStart, win);
-            } else {
-                auto all = readFileData(*disk, f, std::min<i64>(maxBytes, rStart + win));
-                i64 cut = std::min<i64>((i64)all.size(), rStart + win);
-                if (rStart < cut)
-                    data.assign(all.begin() + (size_t)rStart, all.begin() + (size_t)cut);
-            }
-        } else {
-            data = readFileData(*disk, f, maxBytes);
+        auto [mime, inlineOk] = safeServeMime(f.name, true);
+        res.set_header("Content-Disposition",
+                       std::string(inlineOk ? "inline" : "attachment") +
+                       "; filename=\"" + sanitizeFilename(f.name) + "\"");
+        const bool plain = f.resident.empty() && f.codec.empty() && f.fragment_offset < 0;
+        if (plain && fileLen > 0) {
+            // Plain files (the vast majority — videos, audio, images, PDFs,
+            // archives) are served through one streaming content provider with
+            // the true file length as Content-Length. httplib then implements
+            // HTTP Range itself against that length: it slices the provider's
+            // stream for single ranges (206 + Content-Range), streams the full
+            // body for plain GETs, and answers unsupported ranges with 416.
+            // Memory stays at one 8 MiB window regardless of file size. (Slicing
+            // the body by hand here would trip httplib's built-in range
+            // validator, which re-checks the window against the declared length
+            // and answers 416 to every media seek.)
+            i64 serveLen = capped ? std::min<i64>(fileLen, maxBytes) : fileLen;
+            res.set_header("Accept-Ranges", "bytes");
+            if (serveLen < fileLen) res.set_header("X-Content-Truncated", "1");
+            // The provider runs after this handler returns, so it must own
+            // the reader itself — a shared_ptr keeps the (non-copyable,
+            // move-only) reader alive while staying copyable for the
+            // std::function.
+            auto owned = std::shared_ptr<DiskReader>(std::move(disk));
+            auto provider =
+                [owned, stored, index, serveLen](size_t offset, size_t length,
+                                                 httplib::DataSink& sink) -> bool {
+                    const RecoveredFile& f = stored->files[(size_t)index];
+                    if ((i64)offset >= serveLen) return false;
+                    i64 want = std::min<i64>((i64)length, serveLen - (i64)offset);
+                    want = std::min<i64>(want, 8LL * 1024 * 1024);
+                    if (want <= 0) return false;
+                    auto window = readFileWindow(*owned, f, (i64)offset, want);
+                    if (window.empty()) return false;
+                    return sink.write(reinterpret_cast<const char*>(window.data()),
+                                      window.size());
+                };
+            res.set_content_provider((size_t)serveLen, mime.c_str(), provider,
+                                     [](bool) {});
+            return;
         }
+
+        // Coded/fragmented/resident files cannot be windowed (the decoder
+        // needs whole extents), so Range is not served for them: answer with a
+        // bounded 200 prefix. Players treat that as a progressive download.
+        std::vector<u8> data = readFileData(*disk, f, capped ? maxBytes : kCodedBudget);
         if (data.empty()) {
             res.status = 404;
             res.set_content(errorJson("no readable data for this file"), "application/json");
             return;
         }
-        auto [mime, inlineOk] = safeServeMime(f.name, true);
-        res.set_header("Accept-Ranges", "bytes");
-        res.set_header("Content-Disposition",
-                       std::string(inlineOk ? "inline" : "attachment") +
-                       "; filename=\"" + sanitizeFilename(f.name) + "\"");
-        if (partial) {
-            res.status = 206;
-            res.set_header("Content-Range",
-                           "bytes " + std::to_string(rStart) + "-" +
-                           std::to_string(rStart + (i64)data.size() - 1) + "/" +
-                           std::to_string(fileLen));
-        }
-        // Build the body from the data without a second copy: move the bytes
-        // into the string, then hand the string to the response.
+        if ((i64)data.size() < fileLen && (capped || !plain))
+            res.set_header("X-Content-Truncated", "1");
         std::string body(reinterpret_cast<const char*>(data.data()), data.size());
         std::vector<u8>().swap(data);
         res.set_content(std::move(body), mime.c_str());
