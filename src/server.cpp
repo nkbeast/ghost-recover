@@ -143,6 +143,20 @@ struct StoredResult {
     i64 scan_file_count = 0;            // scan.files size before it was moved
 };
 
+// Approximate in-memory footprint of a stored result. Strings dominate — names,
+// paths, filesystems, mime — so a per-file flat figure plus per-extent overhead
+// tracks the real cost closely enough to budget against installed RAM.
+i64 storedResultBytes(const std::shared_ptr<StoredResult>& r) {
+    if (!r) return 0;
+    constexpr i64 kBase = 4 * 1024 * 1024;      // summaries, maps, regions
+    constexpr i64 kPerFile = 1536;
+    constexpr i64 kPerExtent = 64;
+    i64 total = kBase + (i64)r->carve.files.size() * 256;
+    for (const auto& f : r->files)
+        total += kPerFile + (i64)f.extents.size() * kPerExtent;
+    return total;
+}
+
 class ResultStore {
 public:
     static ResultStore& instance() {
@@ -156,10 +170,21 @@ public:
         order_.push_back(jobId);
         // A scan result can be hundreds of megabytes, so keep only the most
         // recent few. Evicting after recording the new id means the entry just
-        // added can never be the one dropped. Four is a deliberate RAM budget:
-        // on a 1 GiB box even two full scan results plus one carve can be the
-        // difference between usable and swapping.
-        while (order_.size() > 4) {
+        // added can never be the one dropped. A flat count alone is not a RAM
+        // budget, though: on a 1 TB disk a single scan result already eats a
+        // gigabyte, so four of them can pin down a small box. Bound by bytes
+        // too — drop the oldest entries first while staying over budget — and
+        // keep at least the newest result so the UI never loses its last job.
+        // In-flight downloads are unaffected: the content providers hold their
+        // own shared_ptr to the entry.
+        const i64 budget = std::min<i64>(2LL * 1024 * 1024 * 1024,
+                                         std::max<i64>(512LL * 1024 * 1024,
+                                                       systemRamKB() * 1024 / 5));
+        i64 total = 0;
+        for (const auto& kv : results_) total += storedResultBytes(kv.second);
+        while (order_.size() > 1 && total > budget) {
+            const auto& front = results_[order_.front()];
+            total -= storedResultBytes(front);
             results_.erase(order_.front());
             order_.erase(order_.begin());
         }

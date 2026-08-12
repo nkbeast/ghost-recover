@@ -681,6 +681,7 @@ function viewFileTable() {
     const conf = f.confidence >= 0.9 ? 'ok' : f.confidence >= 0.5 ? 'warnp' : 'bad';
     const flags = [
       f.deleted ? '<span class="pill bad">deleted</span>' : '',
+      f.recoverable < f.size ? '<span class="pill warnp">incomplete</span>' : '',
       f.encrypted ? '<span class="pill warnp">encrypted</span>' : '',
       f.compressed ? '<span class="pill mute">compressed</span>' : '',
       f.ads ? '<span class="pill info">ADS</span>' : ''
@@ -948,6 +949,13 @@ async function loadPreview(f, host) {
   const url = contentUrl(f.index, 256 * 1024 * 1024);
   const bail = `onerror="this.parentElement.innerHTML='<div class=empty>This file could not be rendered.<br>Switch to Hex to inspect the bytes.</div>'"`;
 
+  function partialWarn(f) {
+    if (f.recoverable >= f.size || f.size <= 0) return '';
+    const pct = Math.round(100 * f.recoverable / f.size);
+    return `<div class="empty" style="margin-bottom:10px">Recovered ${pct}% of this file — ` +
+           `playback may stop early or fail at the missing ${fmtSize(f.size - f.recoverable)}.</div>`;
+  }
+
   if (f.recoverable === 0 && f.size > 0) {
     host.innerHTML = `<div class="empty">No data is recoverable for this file.<br><br>
       Its name and metadata survived, but the blocks that held its contents have been
@@ -967,12 +975,15 @@ async function loadPreview(f, host) {
     }
     host.innerHTML = `<img src="${url}" ${bail}>`; return;
   }
-  if (VID.includes(ext)) { host.innerHTML = `<video src="${unlimited}" controls ${bail}></video>`; return; }
+  if (VID.includes(ext)) {
+    host.innerHTML = partialWarn(f) + `<video src="${unlimited}" controls preload="metadata" ${bail}></video>`;
+    return;
+  }
   if (AUD.includes(ext)) {
-    host.innerHTML = `<div style="text-align:center;padding:24px;width:100%">
+    host.innerHTML = partialWarn(f) + `<div style="text-align:center;padding:24px;width:100%">
       <div style="font-size:40px;margin-bottom:14px">♪</div>
       <div class="muted" style="margin-bottom:12px;word-break:break-all">${esc(f.name)}</div>
-      <audio src="${unlimited}" controls ${bail}></audio></div>`;
+      <audio src="${unlimited}" controls preload="metadata" ${bail}></audio></div>`;
     return;
   }
   if (ext === 'pdf') { host.innerHTML = `<iframe src="${unlimited}"></iframe>`; return; }
