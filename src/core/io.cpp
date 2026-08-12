@@ -176,21 +176,24 @@ i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
     // Pass 1: 512-byte sub-sector chunks — only when sector_size_ > 512 (4Kn drives).
     // Pass 2: 1-byte chunks             — last resort; maximum salvage before zero-fill.
     //
-    // Regions that fail at one granularity are queued for the next smaller size.
+    // Regions that fail in one pass are queued for the next smaller granularity.
+    // Failed bytes are zero-filled immediately on queue so that `dst` is fully
+    // initialised at all times — a later successful retry overwrites the zeros.
     struct Range { u64 off; i64 len; i64 dst_off; };
     std::vector<Range> pending = {{abs_off, count, 0}};
 
-    const i64 ss = sector_size_ > 0 ? sector_size_ : 512;
-    std::vector<i64> passes;
-    passes.push_back(ss);
-    if (ss > 512) passes.push_back(512);
-    passes.push_back(1);
+    const i64 ss           = sector_size_ > 0 ? sector_size_ : 512;
+    const i64 pass_sizes[] = { ss, 512, 1 };
+    const int num_passes   = 3;
+    // When ss==512 the sector-size pass and the 512-byte pass are identical;
+    // skip directly to 512-byte chunks to avoid a redundant sweep.
+    const int first_pass   = (ss > 512) ? 0 : 1;
 
-    i64 max_processed = 0;
+    i64 total = 0;   // high-water mark: bytes in dst that are initialised (data or zeros)
 
-    for (size_t p = 0; p < passes.size(); p++) {
-        const i64 chunk_size = passes[p];
-        const bool last_pass = (p == passes.size() - 1);
+    for (int p = first_pass; p < num_passes; p++) {
+        const i64  chunk_size = pass_sizes[p];
+        const bool last_pass  = (p == num_passes - 1);
         std::vector<Range> next_pending;
 
         for (const auto& r : pending) {
@@ -202,22 +205,25 @@ i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
                                                 (size_t)try_len,
                                                 (off_t)(r.off + done));
                 if (n > 0) {
-                    done += n;
-                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                    done  += n;
+                    total  = std::max(total, r.dst_off + done);
                 } else if (n == 0) {
-                    // EOF — stop processing this range.
-                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                    // EOF: zero-fill the remainder of this range so dst has no gaps.
+                    std::memset(dst + r.dst_off + done, 0, (size_t)(r.len - done));
+                    total = std::max(total, r.dst_off + done);
                     break;
                 } else {
                     if (errno == EINTR) continue;
+                    // Zero-fill immediately — a successful retry in the next pass
+                    // overwrites these provisional zeros with real data.
+                    std::memset(dst + r.dst_off + done, 0, (size_t)try_len);
                     if (last_pass) {
-                        std::memset(dst + r.dst_off + done, 0, (size_t)try_len);
                         noteBad(r.off + done, try_len);
                     } else {
                         next_pending.push_back({r.off + done, try_len, r.dst_off + done});
                     }
-                    done += try_len;
-                    if (p == 0) max_processed = std::max(max_processed, r.dst_off + done);
+                    done  += try_len;
+                    total  = std::max(total, r.dst_off + done);
                 }
             }
         }
@@ -225,7 +231,7 @@ i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
         if (pending.empty()) break;
     }
 
-    return max_processed;
+    return total;
 }
 
 i64 DiskReader::read(u64 offset, void* buf, i64 count) {
