@@ -526,6 +526,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     for (u64 idx = 0; idx < limit; idx += recordsPerChunk) {
         if (prog.cancelled()) break;
+        // The nodes map holds a full RecoveredFile per record and grows without
+        // bound on huge volumes; stop harvesting when we already have more than
+        // the scan will ever report (ext/xfs cap the same way).
+        if ((i64)nodes.size() >= (i64)opt.max_files * 2) break;
         prog.set((i64)idx, (i64)limit);
         u64 count = std::min<u64>(recordsPerChunk, limit - idx);
         chunk = fs.readRuns(fs.mft_runs, (i64)idx * fs.record_size, (i64)(count * fs.record_size));

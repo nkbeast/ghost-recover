@@ -1,4 +1,5 @@
 #include "ghost/io.h"
+#include "ghost/util.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +15,14 @@ namespace ghost {
 
 namespace {
 constexpr i64    kCacheBlock   = 64LL * 1024;   // cache granularity
-constexpr size_t kDefaultLines = 512;         // 512 * 64 KiB = 32 MiB
+// Default cache: sized to the machine's RAM so a small box is not drowned by
+// per-reader caches. 1 GiB -> 8 MiB, 16 GiB+ -> 32 MiB.
+i64 defaultCacheBytes() {
+    const i64 kb = systemRamKB();
+    if (kb <= 0) return 32LL * 1024 * 1024;
+    const i64 by = kb * 1024 / 128;
+    return std::min<i64>(32LL * 1024 * 1024, std::max<i64>(4LL * 1024 * 1024, by));
+}
 // Reads at least this large skip the cache: sequential carving would otherwise
 // evict the metadata blocks the filesystem drivers depend on.
 constexpr i64 kCacheBypass = kCacheBlock * 2;
@@ -46,13 +54,14 @@ const char* fileKindName(FileKind k) {
 // ---------------------------------------------------------------------------
 
 DiskReader::DiskReader(std::string path) : path_(std::move(path)) {
-    setCacheSize((i64)kDefaultLines * kCacheBlock);
+    setCacheSize(defaultCacheBytes());
 }
 
 DiskReader::~DiskReader() { close(); }
 
 void DiskReader::setCacheSize(i64 bytes) {
-    size_t lines = (size_t)std::max<i64>(8, bytes / kCacheBlock);
+    cache_bytes_ = std::max<i64>(kCacheBlock, bytes);
+    size_t lines = (size_t)std::max<i64>(8, cache_bytes_ / kCacheBlock);
     lines = roundUpPow2(lines);
     cache_.assign(lines, CacheLine{});
     cache_mask_ = lines - 1;
@@ -108,6 +117,7 @@ void DiskReader::close() {
 
 std::unique_ptr<DiskReader> DiskReader::clone() const {
     auto d = std::make_unique<DiskReader>(path_);
+    d->setCacheSize(cache_bytes_);
     if (!d->open(nullptr)) return nullptr;
     d->setWindow(base_, size_);
     return d;

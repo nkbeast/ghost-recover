@@ -130,6 +130,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     i64 nodeBlocks = 0;
 
     for (i64 off = mainStart; off < mainEnd && !prog.cancelled(); off += chunkSize) {
+        // Bounded like ext/xfs: the inode map is the dominant memory cost.
+        if ((i64)inodes.size() >= (i64)opt.max_files * 2) break;
         prog.set(off - mainStart, mainEnd - mainStart);
         i64 want = std::min(chunkSize, mainEnd - off);
         chunk = disk.readBlock((u64)off, want);

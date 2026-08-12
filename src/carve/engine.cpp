@@ -168,6 +168,19 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     threads = std::min(threads, 16);
     // Sequential reads beat parallelism on spinning media.
     if (disk.isRawDevice() && threads > 4) threads = 4;
+    // Small boxes cannot afford one full-speed reader per core: scale the
+    // worker count with installed RAM (1 GiB -> 2, 4 GiB -> 8, 16 GiB -> 16).
+    {
+        const i64 ramGB = systemRamKB() / (1024 * 1024);
+        int cap = ramGB > 0 ? (int)std::min<i64>(16, std::max<i64>(2, ramGB * 2)) : 16;
+        if (threads > cap) threads = cap;
+    }
+
+    // Carve workers read sequentially in 4 MiB chunks that bypass the block
+    // cache entirely, so a big per-reader cache is pure waste here. Keep a
+    // small one (validators and footer scans still get locality) so 16 workers
+    // cost ~32 MiB instead of ~512 MiB.
+    disk.setCacheSize(2 * 1024 * 1024);
 
     // Flatten the regions into fixed work units so threads stay balanced.
     struct Unit { i64 start, length; };
@@ -183,7 +196,10 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     std::atomic<size_t> nextUnit{0};
     std::atomic<i64> scanned{0};
     std::atomic<bool> overflow{false};
-    const size_t kMaxCandidates = 8 * 1000 * 1000;
+    // 2 M candidates ≈ 32 MB of Candidate entries (plus the sorted offsets and
+    // the dedup copy transiently). 8 M was ~192 MB on a box that may only have
+    // 1 GiB; on a real disk 2 M candidates still means one hit per 256 KiB.
+    const size_t kMaxCandidates = 2 * 1000 * 1000;
 
     auto worker = [&]() {
         auto reader = disk.clone();

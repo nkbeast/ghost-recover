@@ -121,6 +121,7 @@ struct StoredResult {
     ScanResult  scan;
     CarveResult carve;
     std::vector<RecoveredFile> files;   // unified view used by the UI
+    i64 scan_file_count = 0;            // scan.files size before it was moved
 };
 
 class ResultStore {
@@ -136,8 +137,10 @@ public:
         order_.push_back(jobId);
         // A scan result can be hundreds of megabytes, so keep only the most
         // recent few. Evicting after recording the new id means the entry just
-        // added can never be the one dropped.
-        while (order_.size() > 16) {
+        // added can never be the one dropped. Four is a deliberate RAM budget:
+        // on a 1 GiB box even two full scan results plus one carve can be the
+        // difference between usable and swapping.
+        while (order_.size() > 4) {
             results_.erase(order_.front());
             order_.erase(order_.begin());
         }
@@ -229,7 +232,7 @@ void writeFile(json::Writer& w, const RecoveredFile& f, size_t index) {
     w.endObject();
 }
 
-void writeScanSummary(json::Writer& w, const ScanResult& s) {
+void writeScanSummary(json::Writer& w, const ScanResult& s, i64 fileCount) {
     w.key("scan").beginObject();
     w.kv("ok", s.ok);
     if (!s.error.empty()) w.kv("error", s.error);
@@ -242,7 +245,7 @@ void writeScanSummary(json::Writer& w, const ScanResult& s) {
     w.kv("total_inodes", s.total_inodes);
     w.kv("free_inodes", s.free_inodes);
     w.kv("volume_size", s.volume_size);
-    w.kv("file_count", (i64)s.files.size());
+    w.kv("file_count", fileCount);
     w.kv("deleted_found", s.deleted_found);
     w.key("techniques").beginArray();
     for (const auto& t : s.techniques) w.value(t);
@@ -1215,11 +1218,23 @@ int startServer(const ServerConfig& cfg) {
                 auto disk = openTarget(t.path, t.offset, t.length, &openErr);
                 if (!disk) throw std::runtime_error(openErr);
 
+                std::vector<i64> scanOffsets;   // sorted scan hits for carve dedup
+
                 if (withScan) {
                     job.progress.setPhase("scanning filesystem");
                     stored->scan = scanVolume(*disk, t.filesystem, sopt, job.progress);
                     stored->filesystem = stored->scan.filesystem;
-                    stored->files = stored->scan.files;
+                    // Move, never copy: the unified list *is* the scan's file
+                    // list, and the old code kept both in RAM at once.
+                    stored->scan_file_count = (i64)stored->scan.files.size();
+                    stored->files = std::move(stored->scan.files);
+                    // Sorted offsets of every scan hit, for the carve dedup
+                    // check below (binary search instead of O(n) per carved
+                    // file).
+                    scanOffsets.reserve(stored->files.size());
+                    for (const auto& sf : stored->files)
+                        if (!sf.extents.empty()) scanOffsets.push_back(sf.extents.front().offset);
+                    std::sort(scanOffsets.begin(), scanOffsets.end());
                 }
 
                 if (withCarve && !job.progress.cancelled()) {
@@ -1235,14 +1250,9 @@ int startServer(const ServerConfig& cfg) {
                         // Skip carved results that duplicate a file the
                         // filesystem scan already recovered at the same place.
                         const auto& cf = stored->carve.files[i];
-                        bool dup = false;
-                        for (const auto& sf : stored->scan.files) {
-                            if (sf.extents.empty()) continue;
-                            if (std::llabs(sf.extents.front().offset - cf.offset) < 4096) {
-                                dup = true;
-                                break;
-                            }
-                        }
+                        auto it = std::lower_bound(scanOffsets.begin(), scanOffsets.end(),
+                                                   cf.offset - 4096);
+                        bool dup = it != scanOffsets.end() && *it <= cf.offset + 4096;
                         if (dup) continue;
                         stored->files.push_back(carvedToRecovered(cf, base + i));
                     }
@@ -1254,7 +1264,7 @@ int startServer(const ServerConfig& cfg) {
                 w.beginObject();
                 w.kv("ok", true).kv("job", job.id).kv("kind", job.kind);
                 w.kv("file_count", (i64)stored->files.size());
-                if (withScan) writeScanSummary(w, stored->scan);
+                if (withScan) writeScanSummary(w, stored->scan, stored->scan_file_count);
                 if (withCarve) writeCarveSummary(w, stored->carve);
                 w.endObject();
                 return w.str();
@@ -1466,7 +1476,11 @@ int startServer(const ServerConfig& cfg) {
         std::string mime = mimeForExtension(extensionOf(f.name));
         res.set_header("Content-Disposition",
                        "inline; filename=\"" + sanitizeFilename(f.name) + "\"");
-        res.set_content(std::string(data.begin(), data.end()), mime.c_str());
+        // Build the body from the data without a second copy: move the bytes
+        // into the string, then hand the string to the response.
+        std::string body(reinterpret_cast<const char*>(data.data()), data.size());
+        std::vector<u8>().swap(data);
+        res.set_content(std::move(body), mime.c_str());
     });
 
     // Hex view of a range, either of a stored file or of the raw device.

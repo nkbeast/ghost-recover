@@ -124,4 +124,7 @@ bool   looksLikeText(const u8* data, size_t len, double minPrintable = 0.90);
 // Monotonic milliseconds since process start.
 i64 nowMs();
 
+// Physical RAM in KiB as reported by /proc/meminfo, 0 if it cannot be read.
+i64 systemRamKB();
+
 }  // namespace ghost

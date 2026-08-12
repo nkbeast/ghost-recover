@@ -818,6 +818,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     i64 nodes = 0;
 
     for (i64 base = 0; base < limit && !prog.cancelled(); base += chunkSize) {
+        // Bounded like ext/xfs: the inode map is the dominant memory cost on
+        // big JFFS2 volumes.
+        if ((i64)inodes.size() >= (i64)opt.max_files * 2) break;
         prog.set(base, limit);
         auto chunk = disk.readBlock((u64)base, std::min(chunkSize, limit - base));
         if (chunk.empty()) break;

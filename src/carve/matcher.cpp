@@ -94,16 +94,39 @@ void MultiMatcher::scan(const u8* data, size_t len, i64 base, int& state,
 // ---------------------------------------------------------------------------
 // ByteSource
 // ---------------------------------------------------------------------------
+bool ByteSource::fill(i64 off, i64 len) {
+    if (win_len_ > 0 && off >= win_start_ && off - win_start_ + len <= win_len_) return true;
+    if (off < 0 || len <= 0) return false;
+    const i64 aligned = off & ~(kWin - 1);
+    auto v = d_.readBlock((u64)aligned, kWin);
+    if (v.empty()) return false;
+    win_ = std::move(v);
+    win_start_ = aligned;
+    win_len_ = (i64)win_.size();
+    return off >= win_start_ && off - win_start_ + len <= win_len_;
+}
+
 std::vector<u8> ByteSource::read(i64 off, i64 len) {
     if (off < 0 || len <= 0) return {};
     if (off >= limit_) return {};
     if (off + len > limit_) len = limit_ - off;
-    return d_.readBlock((u64)off, len);
+    // Requests as large as the window can never fit inside an aligned window
+    // when the offset is unaligned (vText reads 64 KiB steps), so serve them
+    // directly. Small reads are where the win is — validators issue millions.
+    if (len >= kWin) return d_.readBlock((u64)off, len);
+    if (!fill(off, len)) {
+        // Tail of the device (or an unaligned request straddling the window
+        // edge): read what actually exists rather than failing the candidate.
+        return d_.readBlock((u64)off, len);
+    }
+    return std::vector<u8>(win_.begin() + (off - win_start_),
+                           win_.begin() + (off - win_start_) + len);
 }
 
 u8 ByteSource::byte(i64 off) {
-    auto v = read(off, 1);
-    return v.empty() ? 0 : v[0];
+    if (off < 0 || off >= limit_) return 0;
+    if (!fill(off, 1)) return 0;
+    return win_[(size_t)(off - win_start_)];
 }
 
 u32 ByteSource::be32(i64 off) {

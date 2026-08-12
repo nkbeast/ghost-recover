@@ -295,6 +295,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
         for (u64 off = 0; off + fs.nodesize <= c.length; off += fs.nodesize) {
             if (prog.cancelled()) break;
+            // Bounded like ext/xfs: stop harvesting leaves once the inode map
+            // already holds more entries than the scan will ever report.
+            if ((i64)inodes.size() >= (i64)opt.max_files * 2) break;
             scanned += fs.nodesize;
             if ((scanned % (16 * 1024 * 1024)) == 0) prog.set(scanned, totalMetaBytes);
 

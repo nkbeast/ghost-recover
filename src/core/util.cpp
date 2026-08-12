@@ -635,4 +635,17 @@ i64 nowMs() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
+i64 systemRamKB() {
+    std::ifstream f("/proc/meminfo");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("MemTotal:", 0) != 0) continue;
+        std::istringstream in(line);
+        std::string key;
+        i64 kb = 0;
+        if (in >> key >> kb) return kb;
+    }
+    return 0;
+}
+
 }  // namespace ghost

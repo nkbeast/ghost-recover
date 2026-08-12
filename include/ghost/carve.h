@@ -58,7 +58,9 @@ struct CarveSpec {
 };
 
 // Reads that a validator performs. Backed by the DiskReader but with its own
-// small window so validators cannot run away across the device.
+// small window so validators cannot run away across the device. Small reads
+// (byte(), be32(), ... — validators issue millions of them) are served from a
+// cached window instead of one heap allocation + pread per access.
 class ByteSource {
 public:
     ByteSource(DiskReader& d, i64 limit) : d_(d), limit_(limit) {}
@@ -70,8 +72,13 @@ public:
     u16 le16(i64 off);
     i64 limit() const { return limit_; }
 private:
+    bool fill(i64 off, i64 len);   // make [off, off+len) available in win_
     DiskReader& d_;
     i64 limit_;
+    std::vector<u8> win_;
+    i64 win_start_ = -1;           // device offset of win_[0]
+    i64 win_len_   = 0;            // valid bytes in win_
+    static constexpr i64 kWin = 64 * 1024;
 };
 
 const std::vector<CarveSpec>& carverRegistry();

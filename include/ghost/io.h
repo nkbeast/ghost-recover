@@ -83,6 +83,7 @@ public:
 
     // Cache tuning. `bytes` is a hint; rounded to whole cache blocks.
     void setCacheSize(i64 bytes);
+    i64  cacheSize() const { return cache_bytes_; }
     void dropCache();
 
 private:
@@ -107,6 +108,7 @@ private:
 
     std::vector<CacheLine> cache_;
     size_t cache_mask_ = 0;
+    i64    cache_bytes_ = 0;
 
     i64 bad_sectors_ = 0;
     i64 bytes_read_  = 0;
