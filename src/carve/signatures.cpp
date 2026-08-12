@@ -974,21 +974,21 @@ i64 vBzip2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     std::memset(&zs, 0, sizeof(zs));
     if (BZ2_bzDecompressInit(&zs, 0, 0) != BZ_OK) return -1;
     auto bzIn = [](bz_stream* z) { return (i64)z->total_in_hi32 << 32 | (u32)z->total_in_lo32; };
-    i64 pos = off;
+    i64 fed = 0;                 // bytes handed to the decompressor so far
     i64 outTotal = 0;
     int rc = BZ_OK;
     u8 out[64 * 1024];
     std::vector<u8> buf;
     while (rc != BZ_STREAM_END) {
         if (zs.avail_in == 0) {
-            if (pos - off >= max || bzIn(&zs) >= kInBudget) {
+            if (fed >= max || bzIn(&zs) >= kInBudget) {
                 rc = BZ_UNEXPECTED_EOF;
                 break;
             }
             i64 want = std::min<i64>(
                 64 * 1024,
-                std::min(max - (pos - off), kInBudget - bzIn(&zs)));
-            buf = s.read(pos, want);
+                std::min(max - fed, kInBudget - bzIn(&zs)));
+            buf = s.read(off + fed, want);
             if (buf.empty()) {
                 zs.next_in = nullptr;
                 zs.avail_in = 0;
@@ -999,6 +999,7 @@ i64 vBzip2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             }
             zs.next_in = reinterpret_cast<char*>(buf.data());
             zs.avail_in = (unsigned)buf.size();
+            fed += (i64)buf.size();
         }
         zs.next_out = reinterpret_cast<char*>(out);
         zs.avail_out = sizeof(out);
@@ -1010,9 +1011,8 @@ i64 vBzip2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 consumed = bzIn(&zs);
     bool ok = (rc == BZ_STREAM_END);
     BZ2_bzDecompressEnd(&zs);
-    if (!ok) return -1;
-    pos += consumed;                                 // EOS + CRC included
-    return (pos - off <= max) ? pos - off : -1;
+    if (!ok || consumed <= 0) return -1;
+    return consumed;                             // EOS + CRC included
 #else
     (void)s; (void)off; (void)max;
     return 0;
@@ -1084,15 +1084,28 @@ i64 vCab(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 // --- tar: walk 512-byte headers. -------------------------------------------
 i64 vTar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     // The "ustar" magic sits at +257 inside the first header block.
-    i64 start = off;
-    i64 p = start;
+    i64 p = off;
     int members = 0;
-    while (p + 512 <= start + max && members < 1000000) {
+    while (p + 512 <= off + max && members < 1000000) {
         auto h = s.read(p, 512);
         if (h.size() < 512) break;
         bool allZero = true;
         for (u8 c : h) if (c) { allZero = false; break; }
-        if (allZero) { p += 512; break; }                 // end-of-archive marker
+        if (allZero) {
+            // End-of-archive padding: GNU tar zero-fills to a 10 KiB block.
+            // The zeros belong to the file — skip them, and end where the
+            // first foreign byte appears.
+            i64 q = p;
+            while (q + 512 <= off + max) {
+                bool z = true;
+                auto zz = s.read(q, 512);
+                if (zz.size() < 512) { q = off + max; break; }
+                for (u8 c : zz) if (c) { z = false; break; }
+                if (!z) break;
+                q += 512;
+            }
+            return q - off;
+        }
         if (std::memcmp(h.data() + 257, "ustar", 5) != 0) break;
         // size is an octal string at +124, 12 bytes
         u64 size = 0;
@@ -1105,7 +1118,7 @@ i64 vTar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         members++;
     }
     if (members < 1) return -1;
-    return (p + 512) - start;
+    return (p + 512) - off;
 }
 
 // --- ar / deb --------------------------------------------------------------
@@ -1322,27 +1335,57 @@ i64 vOle2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return total;
 }
 
-// --- PDF: find the last %%EOF. ---------------------------------------------
+// --- PDF: find %%EOF, but only within 1 MB after the ``startxref`` line -----
+// -- (a ``startxref`` that byte-ranges back to %%EOF is part of an old
+// -- incremental update; the PDF proper never continues past its final EOF,
+// -- so bounding the scan here avoids eating arbitrary trailing data).
 i64 vPdf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     const i64 kStep = 1 * MB;
-    i64 lastEof = -1;
-    for (i64 base = 0; base < max; base += kStep - 8) {
+    auto skipEol = [&](i64 rel) {
+        if (rel <= 0 || rel >= max) return rel;
+        auto tail = s.read(off + rel, 2);
+        if (!tail.empty() && (tail[0] == '\r' || tail[0] == '\n')) rel++;
+        if (tail.size() > 1 && tail[0] == '\r' && tail[1] == '\n') rel++;
+        return rel;
+    };
+    i64 startxref = -1;
+    for (i64 base = 0; base < max; base += kStep - 9) {
         auto buf = s.read(off + base, std::min(kStep, max - base));
+        if (buf.size() < 9) break;
+        for (size_t i = 0; i + 9 <= buf.size(); i++) {
+            if (std::memcmp(buf.data() + i, "startxref", 9) == 0) {
+                startxref = base + (i64)i + 9;
+                break;
+            }
+        }
+        if (startxref >= 0 || (i64)buf.size() < std::min(kStep, max - base)) break;
+    }
+    if (startxref < 0) {
+        // Minimal or truncated producers emit no xref table at all; their only
+        // reliable end marker is the first %%EOF, which closes the trailer.
+        for (i64 base = 0; base < max; base += kStep - 5) {
+            auto buf = s.read(off + base, std::min(kStep, max - base));
+            if (buf.size() < 5) break;
+            for (size_t i = 0; i + 5 <= buf.size(); i++) {
+                if (std::memcmp(buf.data() + i, "%%EOF", 5) == 0)
+                    return skipEol(base + (i64)i + 5);
+            }
+            if ((i64)buf.size() < std::min(kStep, max - base)) break;
+        }
+        return -1;
+    }
+    const i64 scanEnd = std::min(max, startxref + 1 * MB);
+    i64 lastEof = -1;
+    for (i64 base = startxref; base >= 0 && base < scanEnd; base += kStep - 8) {
+        auto buf = s.read(off + base, std::min(kStep, scanEnd - base));
         if (buf.size() < 5) break;
         for (size_t i = 0; i + 5 <= buf.size(); i++) {
             if (std::memcmp(buf.data() + i, "%%EOF", 5) == 0) lastEof = base + (i64)i + 5;
         }
-        if ((i64)buf.size() < std::min(kStep, max - base)) break;
-        // A PDF rarely continues far past its last EOF; stop once we have one
-        // and the stream has gone quiet.
-        if (lastEof >= 0 && base > lastEof + 16 * MB) break;
+        if ((i64)buf.size() < std::min(kStep, scanEnd - base)) break;
     }
     if (lastEof < 0) return -1;
-    // Trailing newline after %%EOF.
-    auto tail = s.read(off + lastEof, 2);
-    if (!tail.empty() && (tail[0] == '\r' || tail[0] == '\n')) lastEof++;
-    if (tail.size() > 1 && tail[0] == '\r' && tail[1] == '\n') lastEof++;
-    return lastEof;
+    return skipEol(lastEof);
 }
 
 // --- Plain text ------------------------------------------------------------
@@ -1475,16 +1518,870 @@ i64 vDex(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 }
 
 // --- QCOW2 -----------------------------------------------------------------
+// Walks the real qcow2 layout: header, L1 table, each L2 table, the refcount
+// table and its blocks, and the snapshot list. The file ends at the last
+// cluster any of those refer to. (In a raw carved file every pointer lies
+// below the true file size, so the walk is bounded and honest.)
 i64 vQcow(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    u32 version = s.be32(off + 4);
+    auto b = s.read(off, 72);
+    if (b.size() < 72) return -1;
+    if (b[0] != 'Q' || b[1] != 'F' || b[2] != 'I' || b[3] != 0xfb) return -1;
+    auto be32v = [&](const u8* p) {
+        return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+    };
+    auto be64v = [&](const u8* p) {
+        u64 v = 0;
+        for (int k = 0; k < 8; k++) v = v << 8 | p[k];
+        return v;
+    };
+    u32 version = be32v(b.data() + 4);
     if (version != 2 && version != 3) return -1;
-    return 0;
+    if (version == 3) {
+        u32 hsize = be32v(b.data() + 68);
+        if (hsize != 0 && hsize < 104) return -1;   // writers may leave 0
+    }
+    u32 clusterBits = be32v(b.data() + 20);
+    if (clusterBits < 9 || clusterBits > 21) return -1;
+    const u64 cluster = 1ULL << clusterBits;
+    if (be64v(b.data() + 24) == 0) return -1;   // disk size must be nonzero
+    u64 l1Off = be64v(b.data() + 40), l1Size = be32v(b.data() + 36);
+    u64 refcOff = be64v(b.data() + 48), refcClust = be32v(b.data() + 56);
+    u64 snapOff = be64v(b.data() + 64), snapCount = be32v(b.data() + 60);
+    u64 backOff = be64v(b.data() + 8), backSize = be32v(b.data() + 16);
+    auto endOf = [&](u64 p, u64 len) -> i64 {
+        if (p == 0 || len == 0) return 0;
+        if (p >= (u64)max) return max;
+        u64 e = p + len;
+        return e >= (u64)max ? max : (i64)e;
+    };
+    i64 end = endOf(refcOff, refcClust * cluster);
+    end = std::max(end, endOf(backOff, backSize));
+    // The L1 table itself is part of the file even when no L2 entry refers
+    // beyond it (qemu sparsifies exactly this way: the L1 cluster is written
+    // last, at the physical end of the image).
+    end = std::max(end, endOf(l1Off, std::max<i64>(512, (i64)l1Size * 8)));
+    if (snapCount <= 0x10000) end = std::max(end, endOf(snapOff, snapCount * 184));
+    if (l1Size > 0 && l1Off == 0) return -1;
+    if (l1Size > 0x100000) l1Size = 0x100000;   // don't chase absurd tables
+    auto l1 = s.read(off + (i64)l1Off, std::min<i64>((i64)l1Size * 8, max - (i64)l1Off));
+    if (l1.size() < (size_t)l1Size * 8) l1Size = (u32)(l1.size() / 8);
+    for (u32 i = 0; i < l1Size; i++) {
+        u64 e = be64v(l1.data() + i * 8);
+        if (e == 0) continue;
+        u64 l2Off = (e >> 9) & 0x3FFFFFFFFFFFFFULL;   // bits 9..62 = cluster addr
+        if (l2Off == 0 || l2Off * cluster >= (u64)max) continue;
+        end = std::max(end, endOf(l2Off * cluster, cluster));
+        auto l2 = s.read(off + (i64)(l2Off * cluster), cluster);
+        if (l2.size() < 8) continue;
+        size_t n = std::min<size_t>(cluster / 8, l2.size() / 8);
+        for (size_t j = 0; j < n; j++) {
+            u64 d = be64v(l2.data() + j * 8);
+            if (d == 0) continue;
+            u64 dOff = (d >> 9) & 0x3FFFFFFFFFFFFFULL;
+            if (dOff == 0 || dOff * cluster >= (u64)max) continue;
+            end = std::max(end, endOf(dOff * cluster, cluster));
+        }
+    }
+    if (refcOff && refcClust && refcClust < 0x10000) {
+        auto rt = s.read(off + (i64)refcOff, std::min<i64>((i64)(refcClust * cluster / 8) * 8, max - (i64)refcOff));
+        size_t n = std::min<size_t>(rt.size() / 8, (size_t)(refcClust * cluster / 8));
+        for (size_t j = 0; j < n; j++) {
+            u64 e = be64v(rt.data() + j * 8);
+            if (e == 0) continue;
+            u64 bOff = (e >> 9) & 0x3FFFFFFFFFFFFFULL;
+            if (bOff == 0 || bOff * cluster >= (u64)max) continue;
+            end = std::max(end, endOf(bOff * cluster, cluster));
+        }
+    }
+    if (end < 512) return -1;
+    return end;
 }
 
-// --- VHD footer / VHDX / VDI ----------------------------------------------
+// --- VHD: the footer "conectix" copy lies at the end of the file itself, so
+// the header candidate scans forward for the nearest valid footer within it.
+// (Scanning the tail of the extent cannot work: the extent usually extends
+// well past the file's end.) The footer's own 8-byte Current Size and the
+// copy's position both describe the file; the position is authoritative.
+i64 vVhd(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (max < 512 + 512) return -1;
+    i64 scanEnd = std::min<i64>(max, 512LL * 1024 * 1024);
+    i64 pos = 512;
+    while (pos + 512 <= scanEnd) {
+        auto b = s.read(off + pos, 16);
+        if (b.size() < 8) break;
+        bool isFooter = std::memcmp(b.data(), "conectix", 8) == 0;
+        if (isFooter) {
+            // File format version: footer bytes 12..15 = 0x00010000.
+            u16 hi = (u16)(s.byte(off + pos + 12) << 8 | s.byte(off + pos + 13));
+            if (hi == 0x0001) {
+                i64 fileSize = pos + 512;
+                if (fileSize > max) return -1;
+                return fileSize;
+            }
+        }
+        pos += 512;
+    }
+    return -1;
+}
+
+// --- VHDX: validated against the real layout -------------------------------
+// -- File identifier + one of the two valid headers (signature + version) +
+// -- the region table at 192 KiB (count field at +8, entries at +16) + the
+// -- BAT extent walk. The length is the furthest cluster any location table
+// -- refers to, exactly like the qcow2 walk above.
 i64 vVhdx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    (void)s; (void)off;
-    return std::min<i64>(max, 4 * GB);
+    auto sig = s.read(off, 8);
+    if (sig.size() < 8 || std::memcmp(sig.data(), "vhdxfile", 8) != 0) return -1;
+    i64 hdr = -1;
+    for (i64 h : {0x10000LL, 0x20000LL}) {
+        if (h + 84 > max) continue;
+        auto b = s.read(off + h, 84);
+        if (b.size() < 84 || std::memcmp(b.data(), "head", 4) != 0) continue;
+        u16 logVer = (u16)(b[68] | (u16)b[69] << 8);
+        u16 ver = (u16)(b[70] | (u16)b[71] << 8);
+        if (ver != 1 && ver != 16) continue;   // 1 = spec, 16 = qemu's writer
+        if (logVer > 1) continue;
+        hdr = h;
+        break;
+    }
+    if (hdr < 0) return -1;
+    i64 end = 0x30000 + 0x10000;   // at least through the region table
+    auto rt = s.read(off + 0x30000, 16 + 2047 * 32);
+    if (rt.size() < 20 || std::memcmp(rt.data(), "regi", 4) != 0) return -1;
+    u32 count = (u32)rt[8] | (u32)rt[9] << 8 | (u32)rt[10] << 16 | (u32)rt[11] << 24;
+    if (count < 1 || count > 2047) return -1;
+    u64 batOff = 0, batLen = 0, metaOff = 0;
+    bool hasMeta = false;
+    for (u32 i = 0; i < count; i++) {
+        const u8* e = rt.data() + 16 + i * 32;
+        u64 fo = 0;
+        for (int k = 7; k >= 0; k--) fo = fo << 8 | e[16 + k];
+        u32 len = (u32)e[24] | (u32)e[25] << 8 | (u32)e[26] << 16 | (u32)e[27] << 24;
+        if (fo == 0 || len == 0) continue;
+        // Known region GUIDs: BAT and Metadata Region (MS GUID byte order).
+        static const u8 kBATGuid[16]   = {0x66,0x77,0xc2,0x2d,0x23,0xf6,0x00,0x42,
+                                          0x9d,0x64,0x11,0x5e,0x9b,0xfd,0x4a,0x08};
+        static const u8 kMetaGuid[16]  = {0x06,0xa2,0x7c,0x8b,0x90,0x47,0x9a,0x4b,
+                                          0xb8,0xfe,0x57,0x5f,0x05,0x0f,0x88,0x6e};
+        if (std::memcmp(e, kBATGuid, 16) == 0) { batOff = fo; batLen = len; }
+        if (std::memcmp(e, kMetaGuid, 16) == 0) { metaOff = fo; hasMeta = true; }
+        u64 rEnd = fo + len;
+        if (rEnd >= (u64)max) rEnd = (u64)max;
+        if ((i64)rEnd > end) end = (i64)rEnd;
+    }
+    // Read the block size from the File Parameters metadata item so we know
+    // where the data region starts (aligned up to a block from the end of the
+    // region table extents) and how big fully-present BAT blocks are.
+    u64 blockSize = 0;
+    if (hasMeta && metaOff < (u64)max) {
+        auto md = s.read(off + (i64)metaOff, 32 + 2047 * 32);
+        if (md.size() >= 32 && std::memcmp(md.data(), "metadata", 8) == 0) {
+            u16 mcnt = (u16)(md[10] | (u16)md[11] << 8);
+            static const u8 kFileParamGuid[16] = {0x37,0x67,0xa1,0xca,0x36,0xfa,0x43,0x4d,
+                                                  0xb3,0xb6,0x33,0xf0,0xaa,0x44,0xe7,0x6b};
+            for (u16 i = 0; i < mcnt && 32 + (u32)i * 32 + 28 <= md.size(); i++) {
+                const u8* e = md.data() + 32 + i * 32;
+                if (std::memcmp(e, kFileParamGuid, 16) != 0) continue;
+                u32 rel = (u32)e[16] | (u32)e[17] << 8 | (u32)e[18] << 16 | (u32)e[19] << 24;
+                u32 ln = (u32)e[20] | (u32)e[21] << 8 | (u32)e[22] << 16 | (u32)e[23] << 24;
+                if (ln < 4 || rel + 4 > (u64)max - metaOff) continue;
+                auto pb = s.read(off + (i64)metaOff + rel, 4);
+                if (pb.size() < 4) continue;
+                u64 bs = (u64)pb[0] | (u64)pb[1] << 8 | (u64)pb[2] << 16 | (u64)pb[3] << 24;
+                if (bs >= 1024 * 1024 && bs <= 256ULL * 1024 * 1024) blockSize = bs;
+                break;
+            }
+        }
+    }
+    // Payload blocks are appended 1 MiB-aligned past the header/region area,
+    // and the data region starts on a block-size boundary there.
+    if (blockSize) {
+        u64 dataBase = ((u64)end + blockSize - 1) / blockSize * blockSize;
+        if (dataBase > (u64)end && dataBase < (u64)max) end = (i64)dataBase;
+    }
+    // Walk the BAT: 64-bit entries, low 3 bits = block state
+    // (6 = PAYLOAD_BLOCK_FULLY_PRESENT), remaining bits = 1 MiB-aligned byte
+    // offset of the payload block (masked by 0xFFFFFFFFFFF00000).
+    if (batOff && batLen && batOff < (u64)max && blockSize) {
+        i64 n = std::min<i64>((i64)(batLen / 8), max - (i64)batOff);
+        for (i64 i = 0; i < n; i += 2048) {
+            auto blk = s.read(off + (i64)batOff + i, std::min<i64>(16384, n - i));
+            if (blk.size() < (size_t)std::min<i64>(16384, n - i)) break;
+            for (size_t j = 0; j + 8 <= blk.size(); j += 8) {
+                u64 e = 0;
+                for (int k = 7; k >= 0; k--) e = e << 8 | blk[j + k];
+                if ((e & 7) != 6) continue;      // FULLY_PRESENT only
+                u64 cl = e & 0xFFFFFFFFFFF00000ULL;
+                if (cl == 0 || cl >= (u64)max) continue;
+                i64 cEnd = (i64)std::min<u64>(cl + blockSize, (u64)max);
+                if (cEnd > end) end = cEnd;
+            }
+        }
+    }
+    return end;
+}
+
+// --- ISO9660: PVD at sector 16; file size = volume space * block size ------
+i64 vIso(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off + 32768, 2048);
+    if (b.size() < 134) return -1;
+    if (std::memcmp(b.data() + 1, "CD001", 5) != 0) return -1;
+    if (b[6] != 1) return -1;                       // PVD (type 1, not terminator)
+    u16 block = (u16)b[128] | (u16)b[129] << 8;
+    if (block != 512 && block != 1024 && block != 2048 && block != 4096) return -1;
+    u64 vol = (u64)b[80] | (u64)b[81] << 8 | (u64)b[82] << 16 | (u64)b[83] << 24;
+    if (vol < 16) return -1;
+    u64 size = vol * block;
+    if (size > (u64)max) size = (u64)max;
+    if (size < 2048) return -1;
+    return (i64)size;
+}
+
+// --- VDI: QEMU's dynamic disk header -----------------------------------------
+i64 vVdi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 512);
+    if (b.size() < 512) return -1;
+    static const char* kMagic[] = {
+        "<<< Oracle VM VirtualBox Disk Image >>>",
+        "<<< QEMU VM Virtual Disk Image >>>",
+        nullptr};
+    bool magicOk = false;
+    for (int m = 0; kMagic[m]; m++)
+        if (std::memcmp(b.data(), kMagic[m], std::strlen(kMagic[m])) == 0) { magicOk = true; break; }
+    if (!magicOk) return -1;
+    auto le32v = [&](u32 o) {
+        return (u32)b[o] | (u32)b[o + 1] << 8 | (u32)b[o + 2] << 16 | (u32)b[o + 3] << 24;
+    };
+    auto be32v = [&](u32 o) {
+        return (u32)b[o] << 24 | (u32)b[o + 1] << 16 | (u32)b[o + 2] << 8 | b[o + 3];
+    };
+    auto le64v = [&](u32 o) {
+        u64 v = 0;
+        for (int k = 0; k < 8; k++) v |= (u64)b[o + k] << (8 * k);
+        return v;
+    };
+    auto be64v = [&](u32 o) {
+        u64 v = 0;
+        for (int k = 0; k < 8; k++) v = v << 8 | b[o + k];
+        return v;
+    };
+    // qemu/block/vdi.c header (all fields little-endian): signature @0x40,
+    // version @0x44, header_size @0x48, image_type @0x4c, flags @0x50,
+    // description [256] @0x54, offset_bmap @0x154, offset_data @0x158,
+    // disk_size @0x170, block_size @0x178, blocks_in_image @0x180,
+    // blocks_allocated @0x184.
+    u32 sig = le32v(0x40);
+    if (sig != 0xbeda107f && be32v(0x40) != 0xbeda107f) return -1;
+    u32 version = le32v(0x44);
+    if (version != 0x00010001 && version != 0x00010002 &&
+        be32v(0x44) != 0x00010001 && be32v(0x44) != 0x00010002)
+        return -1;
+    u32 hdrSize = le32v(0x48);
+    if (hdrSize == 0) hdrSize = be32v(0x48);
+    if (hdrSize == 0 || hdrSize > 2048) return -1;
+    u64 diskSize = le64v(0x170);
+    if (diskSize == 0) diskSize = be64v(0x170);
+    if (diskSize == 0) return -1;
+    u64 blockSize = le32v(0x178);
+    if (blockSize == 0) blockSize = be32v(0x178);
+    if (blockSize == 0 || blockSize > (1ULL << 40)) return -1;
+    u64 blocksTotal = le32v(0x180);
+    if (blocksTotal == 0) blocksTotal = be32v(0x180);
+    u64 blocksAlloc = le32v(0x184);
+    if (blocksAlloc == 0) blocksAlloc = be32v(0x184);
+    u32 imageType = le32v(0x4c);
+    if (imageType != 1 && imageType != 2) imageType = be32v(0x4c);
+    u64 dataOff = le32v(0x158);
+    if (dataOff == 0) dataOff = be32v(0x158);
+    // A static image is fully allocated: its physical end is data + all
+    // blocks. A dynamic one holds only the blocks its bmap claims.
+    u64 end = dataOff;
+    u64 used = imageType == 2 ? blocksTotal : blocksAlloc;
+    if (used && used < (1u << 30)) end += used * blockSize;
+    if (!end || end > (u64)max) end = (u64)max;
+    u64 hdrEnd = (u64)hdrSize;
+    if (end < hdrEnd) end = hdrEnd;
+    if (end > (u64)max) end = (u64)max;
+    if (end < 512) end = 512;
+    return (i64)end;
+}
+
+// --- SWF: the header's u32 length field, verified by inflating CWS bodies --
+i64 vSwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 8);
+    if (b.size() < 8) return -1;
+    bool fws = b[0] == 'F' && b[1] == 'W' && b[2] == 'S';
+    bool cws = b[0] == 'C' && b[1] == 'W' && b[2] == 'S';
+    if (!fws && !cws) return -1;
+    u32 len = (u32)b[4] | (u32)b[5] << 8 | (u32)b[6] << 16 | (u32)b[7] << 24;
+    if (len < 8 || (u64)len > (u64)max + 1) return -1;
+#ifdef GHOST_HAVE_ZLIB
+    if (cws && len > 8) {
+        // CWS: the length field is the *uncompressed* size; inflate the body
+        // and require the output to match it exactly. A stream that inflates
+        // to the declared size and ends cleanly is a real SWF.
+        const i64 kOutBudget = 512LL * 1024 * 1024;
+        z_stream zs;
+        std::memset(&zs, 0, sizeof(zs));
+        if (inflateInit(&zs) != Z_OK) return -1;
+        const i64 kInBudget2 = 512LL * 1024 * 1024;
+        std::vector<u8> in = s.read(off + 8, std::min<i64>(max - 8, kInBudget2));
+        if (in.empty()) return -1;
+        i64 outTotal = 0;
+        int rc = Z_OK;
+        u8 out[64 * 1024];
+        bool ok = false;
+        while (rc == Z_OK && (i64)zs.total_in < (i64)in.size()) {
+            zs.next_in = in.data() + zs.total_in;
+            zs.avail_in = (uInt)(in.size() - (size_t)zs.total_in);
+            zs.next_out = out;
+            zs.avail_out = sizeof(out);
+            rc = inflate(&zs, Z_NO_FLUSH);
+            i64 got = (i64)(sizeof(out) - zs.avail_out);
+            outTotal += got;
+            if (outTotal > kOutBudget) break;
+            if (rc == Z_STREAM_END) {
+                ok = outTotal == (i64)len - 8;
+                break;
+            }
+            if (got == 0 && rc == Z_OK) break;   // no progress: corrupt input
+        }
+        inflateEnd(&zs);
+        if (rc != Z_STREAM_END) return -1;
+        if (!ok) return -1;
+        // The u32 length field is the *uncompressed* size. The bytes stored on
+        // disk are the compressed stream, so the file's real length is the
+        // 8-byte header plus however many compressed bytes zlib consumed.
+        return 8 + (i64)zs.total_in;
+    }
+#else
+    if (cws) return -1;
+#endif
+    return (i64)len;
+}
+
+// --- GLB (glTF binary): the header's u32 length + the chunk layout ----------
+i64 vGlb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 20);
+    if (b.size() < 12) return -1;
+    if (b[0] != 'g' || b[1] != 'l' || b[2] != 'T' || b[3] != 'F') return -1;
+    u32 version = (u32)b[4] | (u32)b[5] << 8 | (u32)b[6] << 16 | (u32)b[7] << 24;
+    if (version != 2) return -1;
+    u64 len = (u64)((u32)b[8] | (u32)b[9] << 8 | (u32)b[10] << 16 | (u32)b[11] << 24);
+    if (len < 20 || len > (u64)max) return -1;
+    // First chunk must be a JSON chunk and must fit inside the declared file.
+    u32 chunkLen = (u32)b[12] | (u32)b[13] << 8 | (u32)b[14] << 16 | (u32)b[15] << 24;
+    if ((u64)chunkLen > len - 20) return -1;
+    if (b[16] != 'J' || b[17] != 'S' || b[18] != 'O' || b[19] != 'N') return -1;
+    // Optional second chunk, if claimed to exist, must be BIN and fit too.
+    if (len >= 12 + 8 + 8 + (u64)chunkLen) {
+        auto b2 = s.read(off + 20 + chunkLen, 8);
+        if (b2.size() == 8) {
+            u32 len2 = (u32)b2[0] | (u32)b2[1] << 8 | (u32)b2[2] << 16 | (u32)b2[3] << 24;
+            bool bin = b2[4] == 'B' && b2[5] == 'I' && b2[6] == 'N' && b2[7] == 0;
+            if (bin && 20 + (u64)chunkLen + 8 + (u64)len2 > len) return -1;
+        }
+    }
+    return (i64)len;
+}
+
+// --- NPY: numpy header carries exact array size ----------------------------
+// -- data start + itemsize * shape product; anything exotic returns 0 so the
+// -- engine falls back to the next-signature bound (advisory, never wrong).
+i64 vNpy(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 18);
+    if (b.size() < 10) return -1;
+    if (b[0] != 0x93 || std::memcmp(b.data() + 1, "NUMPY", 5) != 0) return -1;
+    u8 major = b[6];
+    if (major < 1 || major > 3) return -1;
+    u64 hdrLen, dataOff;
+    if (major == 1) {
+        hdrLen = (u64)b[8] | (u64)b[9] << 8;
+        dataOff = 10;
+    } else {
+        if (b.size() < 12) return -1;
+        hdrLen = (u64)b[8] | (u64)b[9] << 8 | (u64)b[10] << 16 | (u64)b[11] << 24;
+        dataOff = 12;
+    }
+    if (hdrLen < 5 || hdrLen + dataOff > (u64)max) return -1;
+    auto hdr = s.read(off + (i64)dataOff, (i64)hdrLen);
+    if (hdr.size() < hdrLen || hdr.back() != '\n') return -1;
+    // descr: "'descr': '<|f8'," etc.
+    i64 itemsize = -1;
+    for (size_t i = 0; i + 8 <= hdr.size(); i++) {
+        if (std::memcmp(hdr.data() + i, "'descr'", 7) == 0 && hdr[i + 7] == ':') {
+            size_t p = i + 8;
+            while (p < hdr.size() && (hdr[p] == ' ' || hdr[p] == '\t')) p++;
+            char q = (p < hdr.size()) ? (char)hdr[p] : 0;
+            if (q != '\'' && q != '"') break;
+            p++;
+            size_t start = p;
+            while (p < hdr.size() && hdr[p] != q) p++;
+            if (p >= hdr.size()) break;
+            // dtype: [<'<'|'>'|'|'|'='|'-'] letter [digits] or '(' composite
+            size_t d = start;
+            if (d < p && (hdr[d] == '<' || hdr[d] == '>' || hdr[d] == '|' ||
+                          hdr[d] == '=' || hdr[d] == '-'))
+                d++;
+            if (d >= p) break;
+            char c = (char)hdr[d];
+            d++;
+            // dtype strings carry an explicit size for sized letters
+            // (S12, U8, V32...); numpy also writes '<i4', 'f8', 'u2' for the
+            // fixed-width integer/float families.
+            if (d < p && hdr[d] >= '0' && hdr[d] <= '9') {
+                u64 n = 0;
+                while (d < p && hdr[d] >= '0' && hdr[d] <= '9') n = n * 10 + (hdr[d] - '0'), d++;
+                if (d < p) break;   // trailing junk after digits
+                itemsize = (i64)(n * (c == 'U' ? 4 : 1));
+                break;
+            }
+            if (d < p) break;   // composite or padded dtype — give up
+            switch (c) {
+                case 'b': case 'B': itemsize = 1; break;
+                case 'h': case 'H': itemsize = 2; break;
+                case 'i': case 'I': case 'f': itemsize = 4; break;
+                case 'l': case 'L': case 'q': case 'Q': case 'd':
+                    itemsize = 8; break;
+                case 'g': case 'G': itemsize = 16; break;
+                default: break;
+            }
+            break;
+        }
+    }
+    if (itemsize < 0) return 0;
+    // shape: "'shape': (3, 4)" — product of the integers.
+    u64 elems = 1;
+    bool got = false;
+    for (size_t i = 0; i + 8 <= hdr.size(); i++) {
+        if (std::memcmp(hdr.data() + i, "'shape'", 7) == 0 && hdr[i + 7] == ':') {
+            size_t p = i + 8;
+            while (p < hdr.size() && (hdr[p] == ' ' || hdr[p] == '\t')) p++;
+            if (p >= hdr.size() || hdr[p] != '(') break;
+            p++;
+            while (p < hdr.size() && hdr[p] != ')') {
+                if (hdr[p] >= '0' && hdr[p] <= '9') {
+                    u64 n = 0;
+                    while (p < hdr.size() && hdr[p] >= '0' && hdr[p] <= '9')
+                        n = n * 10 + (hdr[p] - '0'), p++;
+                    if (elems > (1ULL << 40) / (n ? n : 1)) return 0;
+                    elems *= (n ? n : 1);
+                    got = true;
+                } else p++;
+            }
+            break;
+        }
+    }
+    if (!got || elems == 0) return 0;
+    u64 total = (u64)itemsize * elems;
+    if (dataOff + hdrLen + total > (u64)max) return -1;
+    return (i64)(dataOff + hdrLen + total);
+}
+
+// --- MAT (v5): header + chain of top-level data elements --------------------
+i64 vMat(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 128);
+    if (b.size() < 128) return -1;
+    if (std::memcmp(b.data(), "MATLAB 5.0 MAT-file", 19) != 0) return -1;
+    bool le;
+    if (b[126] == 'I' && b[127] == 'M') le = true;       // 'IM' = little endian
+    else if (b[126] == 'M' && b[127] == 'I') le = false; // 'MI' = big endian
+    else return -1;
+    u16 ver = le ? (u16)(b[124] | (u16)b[125] << 8) : (u16)(b[124] << 8 | b[125]);
+    if (ver != 0x0100) return -1;
+    // Subsystem offset (header bytes 116..123) should be zero for plain files.
+    u64 subsys = 0;
+    if (le)
+        for (int k = 7; k >= 0; k--) subsys = subsys << 8 | b[116 + k];
+    else
+        for (int k = 0; k < 8; k++) subsys = subsys << 8 | b[116 + k];
+    if (subsys != 0) return -1;
+    auto rd32 = [&](i64 p) -> u32 {
+        auto v = s.read(off + p, 4);
+        if (v.size() < 4) return 0;
+        return le ? ((u32)v[3] << 24 | (u32)v[2] << 16 | (u32)v[1] << 8 | v[0])
+                  : ((u32)v[0] << 24 | (u32)v[1] << 16 | (u32)v[2] << 8 | v[3]);
+    };
+    // Walk the chain of top-level data elements. A miMATRIX/miCOMPRESSED
+    // element uses a 16-byte tag whose size field sits at +4; other types an
+    // 8-byte tag (size at +4) or a small 4-byte tag (size in bits 8..15
+    // when the type bits alone look like a small element).
+    i64 p = 128;
+    int els = 0;
+    while (p + 4 <= max && els < 100000) {
+        u32 t = rd32(p);
+        int type = (int)(t & 0xFF);
+        if (type == 14 || type == 15) {
+            u32 size = rd32(p + 4);
+            if (size > (u32)max) return -1;
+            i64 next = p + 16 + (i64)size;
+            if (next <= p || next > max) break;
+            p = next;
+            els++;
+            continue;
+        }
+        u32 word2 = rd32(p + 4);
+        int smallSize = (int)((t >> 8) & 0xFF);
+        if (type >= 1 && type <= 13 && (t & 0xFF00) != 0 && (t & 0xFF0000) == 0 &&
+            (t & 0xFF000000) == 0 && smallSize != 0) {
+            i64 next = p + 4 + smallSize;    // small element, no padding
+            if (next <= p || next > max) break;
+            p = next;
+            els++;
+            continue;
+        }
+        if (type >= 1 && type <= 13) {       // 8-byte tag (size at +4)
+            i64 next = p + 8 + (i64)word2;
+            if (next <= p || next > max) break;
+            p = next;
+            els++;
+            continue;
+        }
+        break;   // unknown element type: the top-level chain ends here
+    }
+    if (els < 1) return -1;
+    return p - 0;   // p counts from off already
+}
+
+// --- PICKLE: opcode walk. Modern pickles are length-prefixed end to end,
+// -- so the walk terminates exactly at the real STOP, never inside garbage.
+// -- An opcode outside the covered set rejects the candidate outright: a
+// -- genuine pickle produced by CPython 2.7+ never emits one (the walk then
+// -- cannot be trusted to delimit the file, so we refuse rather than guess).
+i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto b = s.read(off, 2);
+    if (b.size() < 2 || b[0] != 0x80) return -1;
+    if (b[1] > 5) return -1;
+    const i64 end = off + max;
+    i64 pos = off + 2;
+    while (pos < end) {
+        u8 op = s.byte(pos);
+        if (op == 0x2E) return pos - off + 1;   // STOP: the pickle ends here
+        i64 n;
+        switch (op) {
+            case 0x80: {                        // PROTO
+                u8 p = s.byte(pos + 1);
+                if (p > 5) return -1;
+                pos += 2;
+                continue;
+            }
+            case 0x4A: case 0x54: case 0x58: {  // BININT / BINSTRING / BINUNICODE: u32
+                auto v = s.read(pos + 1, 4);
+                if (v.size() < 4) return -1;
+                n = (i64)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
+                if (n < 0 || pos + 5 + n > end) return -1;
+                pos += 5 + n;
+                continue;
+            }
+            case 0x5A: {                        // LONG_BINUNICODE: u64 len (little-endian)
+                auto v = s.read(pos + 1, 8);
+                if (v.size() < 8) return -1;
+                i64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
+                if (n64 < 0 || pos + 9 + n64 > end) return -1;
+                pos += 9 + n64;
+                continue;
+            }
+            case 0x4B: case 0x55: case 0x68: case 0x71:   // 1-byte value/ref
+                if (pos + 2 > end) return -1;
+                pos += 2;
+                continue;
+            case 0x4D:                          // BININT2 (u16 value)
+                if (pos + 3 > end) return -1;
+                pos += 3;
+                continue;
+            case 0x72: case 0x6A:               // LONG_BINPUT / LONG_BINGET: u32 ref
+                if (pos + 5 > end) return -1;
+                pos += 5;
+                continue;
+            case 0x47:                          // BINFLOAT (8 bytes)
+                if (pos + 9 > end) return -1;
+                pos += 9;
+                continue;
+            case 0x49: case 0x4C: case 0x53: case 0x56: case 0x50: {  // newline-terminated text
+                while (pos < end && s.byte(pos) != 0x0A) pos++;
+                if (pos >= end) return -1;
+                pos++;
+                continue;
+            }
+            case 0x63:                          // GLOBAL: two '\n'-terminated strings
+                for (int s2 = 0; s2 < 2; s2++) {
+                    while (pos < end && s.byte(pos) != 0x0A) pos++;
+                    if (pos >= end) return -1;
+                    pos++;
+                }
+                continue;
+            case 0x69: {                        // INST: module\0class\0 style line
+                while (pos < end && s.byte(pos) != 0x0A) pos++;
+                if (pos >= end) return -1;
+                pos++;
+                continue;
+            }
+            case 0x43: {                   // SHORT_BINSTRING / SHORT_BINBYTES
+                u8 len = s.byte(pos + 1);
+                if (pos + 2 + len > end) return -1;
+                pos += 2 + len;
+                continue;
+            }
+            case 0x8D: case 0x96: {        // BINBYTES8 / BYTEARRAY8: u64 len (little-endian)
+                auto v = s.read(pos + 1, 8);
+                if (v.size() < 8) return -1;
+                i64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
+                if (n64 < 0 || pos + 9 + n64 > end) return -1;
+                pos += 9 + n64;
+                continue;
+            }
+            case 0x95: {                   // FRAME (u64 len) — protocol 4+
+                i64 fstart = pos;
+                if (fstart + 9 > end) return -1;
+                auto v = s.read(pos + 1, 8);
+                if (v.size() < 8) return -1;
+                i64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
+                if (n64 <= 0 || n64 > end - pos - 9) return -1;
+                i64 want = fstart + 9 + n64;
+                // CPython packs the whole pickle (STOP included) into the last
+                // frame; the frame's final byte being STOP ends the file there.
+                // The frame may claim a byte past EOF (short frames are legal):
+                // walk back to the last readable byte and test it instead.
+                for (i64 k = want - 1; k >= fstart + 9; k--) {
+                    auto tail = s.read(k, 1);
+                    if (!tail.empty() && tail[0] == 0x2E) return k - off + 1;
+                    if (!tail.empty()) break;
+                }
+                // Otherwise hop to the frame end and keep walking (nested
+                // frames or an outer STOP that follows this one).
+                pos = std::min<i64>(want, end - 1);
+                continue;
+            }
+            case 0x8E: {                 // LONG1 (u8 count)
+                u8 len = s.byte(pos + 1);
+                if (pos + 2 + len > end) return -1;
+                pos += 2 + len;
+                continue;
+            }
+            case 0x8F: {                 // LONG4 (u32 count)
+                auto v = s.read(pos + 1, 4);
+                u32 len = (u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24;
+                if (v.size() < 4 || pos + 5 + len > end) return -1;
+                pos += 5 + len;
+                continue;
+            }
+            default: break;
+        }
+        switch (op) {
+            case 0x28: case 0x30: case 0x31: case 0x32: case 0x4E: case 0x52:
+            case 0x61: case 0x62: case 0x64: case 0x65: case 0x67: case 0x6C:
+            case 0x6F: case 0x70: case 0x73: case 0x74: case 0x75: case 0x29:
+            case 0x5D: case 0x7D: case 0x5B: case 0x85: case 0x86: case 0x87:
+            case 0x88: case 0x89: case 0x93: case 0x94:
+                pos += 1;
+                continue;
+            default:
+                return -1;   // opcode outside the covered set: not a pickle
+        }
+    }
+    return -1;
+}
+
+// --- DER: iterative TLV walk (X.509, PKCS#12, ...) --------------------------
+i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    struct El { i64 pos; i64 contentEnd; };
+    std::vector<El> stack;
+    i64 pos = off;
+    i64 lastEnd = -1;
+    i64 total = 0;
+    const i64 kLimit = (i64)1 << 28;
+    while (pos < off + max && total < kLimit) {
+        // Top-level element: tag byte must be 0x30/0x31 (SEQUENCE/SET) for the
+        // common .der/.p12 containers; a raw OCTET STRING wrapper is rare
+        // (PKCS#12 is a sequence, so accept 0x30/0x31).
+        u8 tag = s.byte(pos);
+        if (tag != 0x30 && tag != 0x31) break;
+        bool constructed = (tag & 0x20) != 0;
+        i64 p = pos + 1;
+        i64 len = 0;
+        u8 lb = s.byte(p++);
+        if (lb & 0x80) {
+            int n = lb & 0x7F;
+            if (n < 1 || n > 4 || p + n > off + max) return -1;
+            for (int k = 0; k < n; k++) len = (len << 8) | s.byte(p++);
+        } else len = lb;
+        i64 contentEnd = p + len;
+        if (contentEnd > off + max) return -1;
+        if (!constructed) return -1;   // must be a constructed container
+        // Walk down the constructed chain.
+        stack.push_back({p, contentEnd});
+        while (!stack.empty()) {
+            El& top = stack.back();
+            if (top.pos >= top.contentEnd) {
+                lastEnd = top.contentEnd;
+                stack.pop_back();
+                continue;
+            }
+            u8 t = s.byte(top.pos);
+            i64 q = top.pos + 1;
+            i64 l = 0;
+            u8 lbb = s.byte(q++);
+            if (lbb & 0x80) {
+                int n = lbb & 0x7F;
+                if (n < 1 || n > 4 || q + n > top.contentEnd) return -1;
+                for (int k = 0; k < n; k++) l = (l << 8) | s.byte(q++);
+            } else l = lbb;
+            if (q + l > top.contentEnd) return -1;
+            bool c = (t & 0x20) != 0;
+            if (c) {
+                top.pos = q + l;                 // consume after descent
+                stack.push_back({q, q + l});
+                if (stack.size() > 64) return -1;
+            } else {
+                top.pos = q + l;
+                lastEnd = q + l;
+            }
+        }
+        if (lastEnd > pos) pos = lastEnd;
+        else break;
+    }
+    if (lastEnd < 0) return -1;
+    if (lastEnd - off > max) return -1;
+    return lastEnd - off;
+}
+
+// --- binary plist: trailer at the exact file end ----------------------------
+// -- Validate the header, find the real trailer (backward from the window
+// -- end for up to 16 MiB to survive zero padding after the file), then walk
+// -- the object graph from the top object. Length = trailer position - start.
+i64 vPlistBin(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto hdr = s.read(off, 8);
+    if (hdr.size() < 8 || std::memcmp(hdr.data(), "bplist0", 7) != 0) return -1;
+    // Scan backwards for a plausible trailer: 6 zero bytes + 2 size bytes +
+    // object count u64 BE + top object u64 BE + offset table offset u64 BE.
+    const i64 kTail = 16 * 1024 * 1024;
+    i64 scanFrom = off + max - 32;
+    i64 scanTo = off + std::max<i64>(32, max - kTail);
+    i64 end = -1;
+    for (; scanFrom >= scanTo; scanFrom--) {
+        auto t = s.read(scanFrom, 32);
+        if (t.size() < 32) continue;   // tail reads can be short: keep scanning
+        if (t[0] != 0 || t[1] != 0 || t[2] != 0 || t[3] != 0 || t[4] != 0 || t[5] != 0)
+            continue;
+        u8 offIntSize = t[6], refSize = t[7];
+        if (offIntSize < 1 || offIntSize > 4 || refSize < 1 || refSize > 4) continue;
+        u64 count = 0, top = 0, tableOff = 0;
+        for (int k = 0; k < 8; k++) {
+            count = count << 8 | t[8 + k];
+            top = top << 8 | t[16 + k];
+            tableOff = tableOff << 8 | t[24 + k];
+        }
+        if (count < 1 || count > (1u << 20)) continue;
+        if (top >= count) continue;
+        if (tableOff + (u64)count * offIntSize != (u64)(scanFrom - off)) continue;
+        i64 tableStart = off + (i64)tableOff;
+        // Validate every offset table entry points inside the table.
+        u32 depth = 0;
+        bool valid = true;
+        auto check = [&]() -> bool {
+            for (u32 i = 0; i < count; i++) {
+                i64 p = tableStart + (i64)i * offIntSize;
+                u64 v = 0;
+                for (int k = 0; k < offIntSize; k++) v = v << 8 | s.byte(p + k);
+                if (v >= (u64)(scanFrom - off)) return false;   // offset past file
+            }
+            return true;
+        };
+        if (!check()) continue;
+        // Recursion-free walk of the top object's subtree.
+        std::vector<u64> queue;
+        queue.push_back(top);
+        std::vector<bool> visited(count, false);
+        size_t qPos = 0;
+        while (qPos < queue.size() && depth < 4096) {
+            u32 idx = (u32)queue[qPos++];
+            if (idx >= count || visited[idx]) continue;
+            visited[idx] = true;
+            i64 objOff = off + (i64)tableOff + (i64)idx * offIntSize;
+            u64 ooff = 0;
+            for (int k = 0; k < offIntSize; k++) ooff = ooff << 8 | s.byte(objOff + k);
+            u8 marker = s.byte(off + (i64)ooff);
+            u8 type = marker & 0xF0;
+            if (type == 0x00) {
+                if (marker > 0x0B) { valid = false; break; }   // null/bool/fill
+                continue;
+            }
+            if (type == 0x10) {              // integer
+                int sz = marker & 0x0F;
+                if (sz > 4) { valid = false; break; }
+                continue;
+            }
+            if (type == 0x20 || type == 0x30) {   // real / date
+                int sz = marker & 0x0F;
+                if (sz > 3) { valid = false; break; }
+                continue;
+            }
+            if (type == 0x40 || type == 0x50 || type == 0x60) {   // data/strings
+                int sz = marker & 0x0F;
+                if (sz == 0x0F) {
+                    // 4-byte extended count.
+                    auto c = s.read(off + (i64)ooff + 1, 4);
+                    if (c.size() < 4) { valid = false; break; }
+                } else if (sz > 14) { valid = false; break; }
+                continue;
+            }
+            if (type == 0x80) {              // uid
+                int sz = marker & 0x0F;
+                if (sz > 8) { valid = false; break; }
+                continue;
+            }
+            if (type == 0xA0 || type == 0xC0) {   // array / set
+                u32 n = marker & 0x0F;
+                if (n == 0x0F) {
+                    auto c = s.read(off + (i64)ooff + 1, 4);
+                    if (c.size() < 4) { valid = false; break; }
+                    n = ((u32)c[0] << 24 | (u32)c[1] << 16 | (u32)c[2] << 8 | c[3]);
+                }
+                if (n > count) { valid = false; break; }
+                for (u32 k = 0; k < n; k++) {
+                    i64 rp = off + (i64)ooff + ((marker & 0x0F) == 0x0F ? 5 : 1) +
+                              (i64)k * refSize;
+                    u64 r = 0;
+                    for (int z = 0; z < refSize; z++) r = r << 8 | s.byte(rp + z);
+                    if (r >= count) { valid = false; break; }
+                    queue.push_back(r);
+                }
+                if (!valid) break;
+                depth++;
+                continue;
+            }
+            if (type == 0xD0) {              // dict
+                u32 n = marker & 0x0F;
+                if (n == 0x0F) {
+                    auto c = s.read(off + (i64)ooff + 1, 4);
+                    if (c.size() < 4) { valid = false; break; }
+                    n = ((u32)c[0] << 24 | (u32)c[1] << 16 | (u32)c[2] << 8 | c[3]);
+                }
+                if (n > count) { valid = false; break; }
+                i64 rbase = (marker & 0x0F) == 0x0F ? 5 : 1;
+                for (u32 k = 0; k < 2 * n; k++) {
+                    i64 rp = off + (i64)ooff + rbase + (i64)k * refSize;
+                    u64 r = 0;
+                    for (int z = 0; z < refSize; z++) r = r << 8 | s.byte(rp + z);
+                    if (r >= count) { valid = false; break; }
+                    queue.push_back(r);
+                }
+                if (!valid) break;
+                depth++;
+                continue;
+            }
+            valid = false;   // unknown object type
+            break;
+        }
+        if (!valid) continue;
+        end = scanFrom - off + 32;   // file ends right after the trailer
+        break;
+    }
+    if (end < 0 || end > max) return -1;
+    return end;
 }
 
 }  // namespace
@@ -1513,6 +2410,16 @@ bool walksWholeFile(SizeFn fn) {
     return false;
 }
 
+// Stream formats whose validator chain-walk has no hard end marker. The walk
+// is honest for what it proves, but the file's real length is only settled by
+// the next signature on the device, so the engine clamps the result to it.
+bool walksToBoundary(SizeFn fn) {
+    static const SizeFn kBounded[] = {
+        vMat, vPickle, vDer, vPlistBin, vQcow, vVhd, vVhdx, vVdi, vSwf, nullptr};
+    for (int i = 0; kBounded[i]; i++) if (fn == kBounded[i]) return true;
+    return false;
+}
+
 CarveSpec mk(const char* name, const char* ext, const char* cat, std::vector<u8> magic,
              i64 maxSize, SizeMode mode = SizeMode::Heuristic, SizeFn fn = nullptr) {
     CarveSpec c;
@@ -1524,6 +2431,7 @@ CarveSpec mk(const char* name, const char* ext, const char* cat, std::vector<u8>
     c.mode = mode;
     c.validator = fn;
     c.whole_file = walksWholeFile(fn);
+    c.bound_to_next = walksToBoundary(fn);
     return c;
 }
 
@@ -1648,8 +2556,8 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB));
     add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB));
     add(mk("BIK", "bik", "video", S("BIK"), 4*GB));
-    add(mk("SWF", "swf", "video", S("FWS"), 256*MB));
-    add(mk("SWF_ZLIB", "swf", "video", S("CWS"), 256*MB));
+    add(mk("SWF", "swf", "video", S("FWS"), 256*MB, SizeMode::Header, vSwf));
+    add(mk("SWF_ZLIB", "swf", "video", S("CWS"), 256*MB, SizeMode::Header, vSwf));
     add(mk("SWF_LZMA", "swf", "video", S("ZWS"), 256*MB));
 
     // ---------------- audio ----------------
@@ -1788,7 +2696,9 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("SIT", "sit", "archive", S("StuffIt"), 512*MB));
     add(mk("WIM", "wim", "archive", S("MSWIM"), 8*GB));
     add(mk("DMG_KOLY", "dmg", "archive", S("koly"), 16*GB));
-    add(mk("ISO9660", "iso", "archive", S("CD001"), 16*GB));
+    { auto c = mk("ISO9660", "iso", "archive", S("CD001"), 16*GB,
+                  SizeMode::Header, vIso);
+      c.magic_offset = 32769; add(c); }
     add(mk("SQUASHFS", "squashfs", "archive", S("hsqs"), 8*GB));
     add(mk("CRAMFS", "cramfs", "archive", B({0x45,0x3D,0xCD,0x28}), 2*GB));
 
@@ -1808,9 +2718,16 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("HDF5", "h5", "database", B({0x89,'H','D','F',0x0D,0x0A,0x1A,0x0A}), 8*GB));
     add(mk("NetCDF", "nc", "database", S("CDF"), 8*GB));
     add(mk("Feather", "arrow", "database", S("ARROW1"), 8*GB));
-    add(mk("NPY", "npy", "database", B({0x93,'N','U','M','P','Y'}), 8*GB));
-    add(mk("MAT", "mat", "database", S("MATLAB 5.0 MAT-file"), 8*GB));
-    add(mk("PICKLE", "pkl", "database", B({0x80,0x04,0x95}), 512*MB));
+    add(mk("NPY", "npy", "database", B({0x93,'N','U','M','P','Y'}), 8*GB, SizeMode::Header, vNpy));
+    add(mk("MAT", "mat", "database", S("MATLAB 5.0 MAT-file"), 8*GB, SizeMode::Header, vMat));
+    { auto c = mk("PICKLE", "pkl", "database", B({0x80,0x04,0x95}), 512*MB, SizeMode::Header, vPickle);
+      c.whole_file = true; add(c); }
+    { auto c = mk("PICKLE2", "pkl", "database", B({0x80,0x02}), 512*MB, SizeMode::Header, vPickle);
+      c.whole_file = true; add(c); }
+    { auto c = mk("PICKLE3", "pkl", "database", B({0x80,0x03}), 512*MB, SizeMode::Header, vPickle);
+      c.whole_file = true; add(c); }
+    { auto c = mk("PICKLE5", "pkl", "database", B({0x80,0x05}), 512*MB, SizeMode::Header, vPickle);
+      c.whole_file = true; add(c); }
 
     // ---------------- email ----------------
     add(mk("PST", "pst", "email", B({0x21,0x42,0x44,0x4E}), 32*GB));
@@ -1851,7 +2768,7 @@ std::vector<CarveSpec> buildRegistry() {
       c.min_size = 64; add(c); }
     { auto c = mk("SSH_ED25519_PUB", "pub", "crypto", S("ssh-ed25519 AAAA"), 64*KB,
                   SizeMode::Text, vText); c.min_size = 64; add(c); }
-    add(mk("PKCS12", "p12", "crypto", B({0x30,0x82}), 4*MB));
+    add(mk("PKCS12", "p12", "crypto", B({0x30,0x82}), 4*MB, SizeMode::Header, vDer));
     add(mk("JKS", "jks", "crypto", B({0xFE,0xED,0xFE,0xED}), 16*MB));
     add(mk("KDBX", "kdbx", "crypto", B({0x03,0xD9,0xA2,0x9A,0x67,0xFB,0x4B,0xB5}), 256*MB));
     add(mk("KDB", "kdb", "crypto", B({0x03,0xD9,0xA2,0x9A,0x65,0xFB,0x4B,0xB5}), 256*MB));
@@ -1900,11 +2817,16 @@ std::vector<CarveSpec> buildRegistry() {
                   SizeMode::Heuristic, vQcow); c.min_size = 72; add(c); }
     add(mk("VMDK_SPARSE", "vmdk", "vm", B({'K','D','M','V'}), 64*GB));
     add(mk("VMDK_DESC", "vmdk", "vm", S("# Disk DescriptorFile"), 1*MB));
-    add(mk("VDI", "vdi", "vm", S("<<< Oracle VM VirtualBox Disk Image >>>"), 64*GB));
-    add(mk("VHD", "vhd", "vm", S("conectix"), 64*GB));
+    { auto c = mk("VDI", "vdi", "vm", S("<<< Oracle VM VirtualBox Disk Image >>>"), 64*GB,
+                  SizeMode::Header, vVdi); c.min_size = 512; add(c); }
+    { auto c = mk("VDI_QEMU", "vdi", "vm", S("<<< QEMU VM Virtual Disk Image >>>"), 64*GB,
+                  SizeMode::Header, vVdi); c.min_size = 512; add(c); }
+    { auto c = mk("VHD", "vhd", "vm", S("conectix"), 64*GB,
+                  SizeMode::Footer, vVhd); c.min_size = 1024; add(c); }
     { auto c = mk("VHDX", "vhdx", "vm", S("vhdxfile"), 64*GB, SizeMode::Heuristic, vVhdx);
       add(c); }
-    add(mk("OVA", "ova", "vm", S("ustar"), 64*GB));
+    { auto c = mk("OVA", "ova", "vm", S("ustar"), 64*GB, SizeMode::Container, vTar);
+      c.magic_offset = 257; c.min_size = 1024; add(c); }
 
     // ---------------- fonts ----------------
     { auto c = mk("TTF", "ttf", "font", B({0x00,0x01,0x00,0x00,0x00}), 64*MB,
@@ -1923,7 +2845,7 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("STL_ASCII", "stl", "misc", S("solid "), 512*MB));
     add(mk("BLEND", "blend", "misc", S("BLENDER"), 4*GB));
     add(mk("FBX", "fbx", "misc", S("Kaydara FBX Binary"), 2*GB));
-    add(mk("GLTF_BIN", "glb", "misc", S("glTF"), 2*GB));
+    add(mk("GLTF_BIN", "glb", "misc", S("glTF"), 2*GB, SizeMode::Header, vGlb));
 
     // ---------------- source and config ----------------
     { auto c = mk("JSON", "json", "code", S("{\""), 64*MB, SizeMode::Text, vText);
@@ -1979,7 +2901,10 @@ std::vector<CarveSpec> buildRegistry() {
     { auto c = mk("TORRENT", "torrent", "misc", S("d8:announce"), 16*MB); c.min_size = 64; add(c); }
     { auto c = mk("PLIST_XML", "plist", "misc", S("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist"),
                   16*MB, SizeMode::Text, vText); add(c); }
-    add(mk("PLIST_BIN", "plist", "misc", S("bplist00"), 16*MB));
+    add(mk("PLIST_BIN", "plist", "misc", S("bplist00"), 16*MB, SizeMode::Header, vPlistBin));
+    add(mk("DER", "der", "misc", B({0x30,0x82}), 64*MB, SizeMode::Header, vDer));
+    { auto c = mk("DER_SMALL", "der", "misc", B({0x30,0x81}), 64*MB, SizeMode::Header, vDer);
+      c.priority = 10; add(c); }
     add(mk("OPENVPN", "ovpn", "misc", S("client\ndev tun"), 1*MB));
 
     // Assign a stable id order: higher priority first so the engine prefers the
@@ -2005,4 +2930,16 @@ std::vector<std::string> carverCategories() {
     return out;
 }
 
+}  // namespace ghost
+
+// Debugging probe: run one named validator over a ByteSource. Used by the
+// standalone validator harness in tests; never called from the engine.
+namespace ghost {
+i64 probeValidate(const std::string& name, ByteSource& bs, i64 off, i64 max) {
+    for (const auto& c : carverRegistry()) {
+        if (c.name != name || !c.validator) continue;
+        return c.validator(bs, off, max, c);
+    }
+    return -999;
+}
 }  // namespace ghost
