@@ -1136,7 +1136,7 @@ i64 vPcx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (xmax < xmin || ymax < ymin) return -1;
     if (bpp != 1 && bpp != 2 && bpp != 4 && bpp != 8 && bpp != 24) return -1;
     if (planes == 0 || planes > 4) return -1;
-    if (bytesPerLine == 0 || bytesPerLine > 64 * 1024) return -1;
+    if (bytesPerLine == 0 || bytesPerLine > 0x7FFF) return -1;
     u64 lines = (u64)(ymax - ymin) + 1;
     // Decoded units = rows x bytes-per-row x planes. RLE data expands to that
     // count; walk the RLE stream over the exact byte count. A 256-color
@@ -1801,7 +1801,7 @@ i64 vEvtx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u16 hdrSize = s.le16(off + 0x28);
     if (hdrSize < 4096) return -1;
     u16 chunkCount = s.le16(off + 0x2A);
-    if (chunkCount == 0 || chunkCount > 1000000) return -1;
+    if (chunkCount == 0) return -1;
     i64 total = (i64)hdrSize + (i64)chunkCount * 65536;
     if (total > max) return -1;
     auto c0 = s.read(off + hdrSize, 8);
