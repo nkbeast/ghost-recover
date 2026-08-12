@@ -56,7 +56,7 @@ suites use &mdash; and some they don't:
 ### Build
 
 Requires a C++17 compiler and CMake &ge; 3.16. zlib is optional (enables SquashFS/cramfs/JFFS2
-decompression).
+decompression); zstd is too (enables Btrfs zstd extents).
 
 ```sh
 git clone https://github.com/nkbeast/ghost-recover
@@ -95,19 +95,23 @@ Recovered files go to `$GHOST_OUTPUT`, or `~/ghost-recover-output`.
 
 ### 📁 Filesystem drivers
 
-**25+ filesystems** are identified; 21 are walked with full metadata drivers:
+**44 filesystems and containers** are identified; 20 families are walked with full metadata
+drivers (each covering its sub-variants):
 
 | Family | Filesystems |
 |---|---|
 | Linux | ext2/3/4, XFS, Btrfs, F2FS, ReiserFS, JFS, MINIX, UFS/UFS2, romfs, cramfs |
-| Windows | NTFS, FAT12/16/32, exFAT |
-| Apple | APFS, HFS+/HFSX |
+| Windows | NTFS, FAT12/16/32, VFAT, exFAT |
+| Apple | APFS, HFS+/HFS/HFSX |
 | Optical | ISO 9660 (Joliet + Rock Ridge), UDF |
 | Embedded | SquashFS, JFFS2 |
 
-ZFS is identified and reported (file recovery needs a full DMU traversal — import the pool
-read-only instead). Another twenty-odd filesystems and containers (LUKS, LVM, md RAID, swap) are
-identified so the tool can tell you what you are actually looking at.
+ZFS is parsed at the vdev-label / uberblock level and reported honestly — file-level recovery
+would need a full DMU traversal, so the engine says so instead of pretending, and points at
+`zpool import -o readonly=on` or signature carving as the working alternatives. A further 16
+filesystems and containers — BCachefs, NILFS2, EROFS, UBIFS, YAFFS2, OCFS2, GFS2, SysV, Xiafs,
+Reiser4, Linux swap, LUKS, LVM2, md RAID, VMFS and ReFS — are identified so the tool can tell
+you what you are actually looking at.
 
 Every driver reconstructs **full paths** and describes files as **extent lists**, so fragmented
 files come out intact.
@@ -125,6 +129,10 @@ Each filesystem gets the techniques that actually apply to it:
 | Btrfs / APFS | copy-on-write leaves from superseded generations |
 | XFS | inodes in released B+tree slots |
 | F2FS | obsolete node blocks left by the log-structured writer |
+| UFS/UFS2 | orphan inodes in the live cylinder groups |
+| SquashFS | orphan-inode scan of the metadata tables |
+| JFFS2 | dinode signature scan of dead blocks |
+| ReiserFS | unlinked inodes swept from released leaf nodes |
 
 ### 🪓 Signature carving
 
@@ -188,13 +196,21 @@ id and are polled:
 ```
 GET  /api/health /api/disks /api/filesystems /api/carvers /api/browse
 GET  /api/privileges  POST /api/elevate  GET /api/elevate/status
+POST /api/handover (privilege hand-off)     POST /api/shutdown
 POST /api/detect /api/partitions
 POST /api/scan /api/carve /api/deep /api/extract /api/image        -> { job }
 GET  /api/job?id= /api/jobs        POST /api/job/cancel
 GET  /api/results?job=&offset=&limit=&q=&ext=&only=&sort=
-GET  /api/content?job=&index=      /api/hex   /api/fileinfo   /api/file
+GET  /api/content?job=&index=[&max=]   /api/hex   /api/fileinfo   /api/file
 POST /api/raid/detect /api/raid/assemble /api/repair /api/save
 ```
+
+Files preview in place: images, audio and video play directly in the page, PDFs render in an
+iframe, and unknown formats fall back to a hex viewer — all served from `/api/content`. Plain
+files stream window-by-window and answer HTTP Range requests natively, so players can seek
+through multi-gigabyte files without loading them; an optional `max=` bounds a preview's byte
+budget (the response carries `X-Content-Truncated: 1` when a cap applies), while downloads
+always receive the complete file.
 
 `/api/file` only serves paths under the output root; the engine will not read arbitrary files off
 the host.
