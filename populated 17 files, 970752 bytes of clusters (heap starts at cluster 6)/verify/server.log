@@ -1,0 +1,9 @@
+
+  GHOST//RECOVER  3.0.0
+  44 filesystems · 251 carver signatures · RAID · imaging · repair
+
+GHOST//RECOVER engine 3.0.0
+  listening on http://127.0.0.1:31077
+  output root: /home/nk/ghost-recover-output
+  251 carver signatures, 44 filesystems, repair writes disabled
+  note: not running as root — raw block devices will not be readable

@@ -1,0 +1,13 @@
+
+  GHOST//RECOVER  3.0.0
+  44 filesystems · 251 carver signatures · RAID · imaging · repair
+
+GHOST//RECOVER engine 3.0.0
+  listening on http://127.0.0.1:31077
+  output root: /home/nk/ghost-recover-output
+  251 carver signatures, 44 filesystems, repair writes disabled
+  note: not running as root — raw block devices will not be readable
+shutdown requested (signal 15)
+Created TensorFlow Lite XNNPACK delegate for CPU.
+Fontconfig error: Cannot load default config file: File not found
+[76084:76175:0812/140948.664128:ERROR:google_apis/gcm/engine/registration_request.cc:291] Registration response error message: DEPRECATED_ENDPOINT

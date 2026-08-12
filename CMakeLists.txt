@@ -99,7 +99,6 @@ endif()
 
 install(TARGETS ghost_recover RUNTIME DESTINATION bin)
 install(DIRECTORY web/ DESTINATION share/ghost-recover/web)
-install(FILES ghost-recover.desktop DESTINATION share/applications OPTIONAL)
 
 if(GHOST_BUILD_TESTS)
     enable_testing()
