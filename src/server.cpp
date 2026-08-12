@@ -56,6 +56,22 @@ std::string       g_handoverFile;
 httplib::Server*  g_server = nullptr;
 std::atomic<bool> g_handedOver{false};
 
+// Session token guarding the API. Non-empty only on instances that run with
+// root privileges (elevated via the handover, or started as root directly):
+// every /api request must then carry it, so an unrelated local process cannot
+// drive the privileged engine to read/write files it could not reach itself.
+std::string g_sessionToken;
+
+// Serializes the "one elevation at a time" check with the token-file creation,
+// closing the check-then-act window between /api/elevate requests.
+std::mutex  g_elevateMutex;
+
+// sudoWorksWithoutPassword() forks a process; /api/health polls it every
+// 600 ms during an elevation. Cache the result briefly so polling cannot fork
+// a storm and does not keep refreshing the user's sudo timestamp.
+std::atomic<i64> g_sudoCheckAtMs{0};
+std::atomic<bool> g_sudoCachedResult{false};
+
 // Graceful shutdown. /api/shutdown and the signal thread both land here:
 // stop() makes httplib's listen() return, after which startServer returns and
 // the process exits, releasing the port for the next start.
@@ -64,13 +80,15 @@ void requestEngineShutdown() {
 }
 
 // True when a GHOST//RECOVER engine is answering health on the given port.
-// Used to reconnect to an already-running instance instead of failing.
+// Used to reconnect to an already-running instance instead of failing. A 403
+// also counts as "engine running": a privileged instance demands the session
+// token, which this probe does not carry, but the engine is still live.
 bool liveEngineOnPort(int port) {
     httplib::Client cli("127.0.0.1", port);
     cli.set_connection_timeout(1, 0);
     cli.set_read_timeout(2, 0);
     auto r = cli.Get("/api/health");
-    return r && r->status == 200 &&
+    return r && (r->status == 200 || r->status == 403) &&
            r->body.find("\"service\":\"ghost-recover\"") != std::string::npos;
 }
 
@@ -450,7 +468,15 @@ bool haveExecutable(const char* name) {
 }
 
 // `sudo -n true` succeeds only when sudo needs no password right now.
+// Cached for 30 s: this forks a child, and /api/health can be polled every
+// 600 ms during an elevation — uncached, that would fork a process per poll
+// and silently refresh the caller's sudo credential timestamp the whole time.
 bool sudoWorksWithoutPassword() {
+    const i64 kCacheMs = 30000;
+    const i64 at = nowMs();
+    const i64 last = g_sudoCheckAtMs.load();
+    if (last != 0 && at - last < kCacheMs) return g_sudoCachedResult.load();
+
     pid_t pid = ::fork();
     if (pid < 0) return false;
     if (pid == 0) {
@@ -464,8 +490,12 @@ bool sudoWorksWithoutPassword() {
         ::_exit(127);
     }
     int status = 0;
-    if (::waitpid(pid, &status, 0) != pid) return false;
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    bool works = false;
+    if (::waitpid(pid, &status, 0) == pid)
+        works = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    g_sudoCheckAtMs.store(at);
+    g_sudoCachedResult.store(works);
+    return works;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,17 +559,29 @@ std::string selfExecutablePath() {
     return n > 0 ? std::string(buf, (size_t)n) : std::string();
 }
 
+// Process-private 0700 directory for the handover token and the elevation
+// log, kept out of the servable output root (the API can read that).
+std::string runtimeDir() {
+    std::string dir;
+    if (const char* x = ::getenv("XDG_RUNTIME_DIR")) dir = x;
+    if (dir.empty()) dir = "/tmp";
+    dir = joinPath(dir, "ghost-recover-" + std::to_string(::getuid()));
+    if (!makeDirs(dir)) return {};
+    ::chmod(dir.c_str(), 0700);
+    return dir;
+}
+
+// A 64-hex random token from /dev/urandom. Returns empty when the system RNG
+// cannot supply the bytes — the callers fail closed rather than fall back to
+// a guessable mix of time and pid.
 std::string randomToken() {
     u8 raw[32] = {0};
     int fd = ::open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        ssize_t got = ::read(fd, raw, sizeof(raw));
-        ::close(fd);
-        if (got == (ssize_t)sizeof(raw)) return toHex(raw, sizeof(raw));
-    }
-    // Fall back to something unpredictable enough for a local one-shot token.
-    u64 mix = (u64)nowMs() ^ ((u64)::getpid() << 32) ^ (u64)(uintptr_t)&raw;
-    return md5Hex(reinterpret_cast<const u8*>(&mix), sizeof(mix));
+    if (fd < 0) return {};
+    ssize_t got = ::read(fd, raw, sizeof(raw));
+    ::close(fd);
+    if (got != (ssize_t)sizeof(raw)) return {};
+    return toHex(raw, sizeof(raw));
 }
 
 // Launches the elevated instance. Returns false only if the process could not
@@ -554,14 +596,33 @@ bool spawnElevated(const std::string& method, const std::string& password,
     }
 
     // The token lives in a 0600 file rather than on the command line, so it is
-    // not visible to other users through `ps`.
-    std::string tokenFile = joinPath(outputRoot(), ".ghost-handover-" + std::to_string(::getpid()));
-    int tf = ::open(tokenFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    // not visible to other users through `ps`. It is created with O_EXCL (no
+    // truncation of a concurrent attempt) in the 0700 runtime directory, never
+    // in the servable output root.
+    std::string rtdir = runtimeDir();
+    if (rtdir.empty()) {
+        if (err) *err = "cannot create the runtime directory for the handover token";
+        return false;
+    }
+    std::string tokenFile = joinPath(rtdir, ".ghost-handover-" + std::to_string(::getpid()));
+    int tf = ::open(tokenFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (tf < 0 && errno == EEXIST) {
+        // Stale file from a crashed attempt; replace it once.
+        ::unlink(tokenFile.c_str());
+        tf = ::open(tokenFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    }
     if (tf < 0) {
-        if (err) *err = "cannot create the handover token file in " + outputRoot();
+        if (err) *err = "cannot create the handover token file in " + rtdir;
         return false;
     }
     std::string token = randomToken();
+    if (token.empty()) {
+        ::close(tf);
+        ::unlink(tokenFile.c_str());
+        if (err) *err = "the system random source is unavailable; refusing to hand over "
+                        "privileges with a guessable token";
+        return false;
+    }
     if (::write(tf, token.data(), token.size()) != (ssize_t)token.size()) {
         ::close(tf);
         ::unlink(tokenFile.c_str());
@@ -641,7 +702,10 @@ bool spawnElevated(const std::string& method, const std::string& password,
             if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
         }
         // Keep stdout/stderr on a log so authentication failures are diagnosable.
-        std::string logPath = joinPath(outputRoot(), "elevated-engine.log");
+        // The token file lives in the 0700 runtime directory, so its parent
+        // directory is the same private home for the log — never the servable
+        // output root (the API could read that).
+        std::string logPath = joinPath(dirName(tokenFile), "elevated-engine.log");
         int lf = ::open(logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (lf >= 0) { ::dup2(lf, STDOUT_FILENO); ::dup2(lf, STDERR_FILENO); ::close(lf); }
 
@@ -710,27 +774,21 @@ ElevationMethods detectElevationMethods() {
 }
 
 // When the web server listens on a non-loopback address there is no TLS on
-// the HTTP listener, so the sudo-password method must not be offered: the
-// password would cross the network in cleartext.  pkexec's system dialog and
-// passwordless sudo never send a password through this server.
+// the HTTP listener, so no elevation method may be offered at all. Password
+// sudo would cross the network in cleartext; pkexec and passwordless sudo
+// would let any unauthenticated LAN client drive the engine to quietly
+// restart itself as root and then read any file on the host.
 static ElevationMethods
 elevationMethodsForServing(const ElevationMethods& m, bool allowRemote) {
-    if (!allowRemote || m.preferred != "sudo-password")
-        return m;
-    ElevationMethods out = m;
-    if (out.pkexec) {
-        out.preferred = "pkexec";
-        out.note = "Password-based sudo is disabled on remote connections because the web "
-                   "server has no TLS; use the graphical authentication instead.";
-    } else if (out.sudo_nopasswd) {
-        out.preferred = "sudo-nopasswd";
-        out.note = "Password-based sudo is disabled on remote connections because the web "
-                   "server has no TLS; use passwordless sudo instead.";
-    } else {
-        out.preferred = "";
-        out.note = "Password-based sudo is disabled on remote connections because the web "
-                   "server has no TLS. Quit and start this program locally, or as root.";
-    }
+    if (!allowRemote) return m;
+    ElevationMethods out;
+    out.is_root = m.is_root;
+    out.has_display = m.has_display;
+    out.note = "Elevation is disabled when the web server is reachable from other "
+               "machines (--listen 0.0.0.0): an unauthenticated LAN client could "
+               "otherwise raise the engine to root and read any file on this host. "
+               "Open the interface on this computer (http://localhost) instead, or "
+               "quit and run: sudo ghost_recover";
     return out;
 }
 
@@ -764,6 +822,24 @@ bool outputPathAllowed(const std::string& p) {
     return pathIsWithin(p, outputRoot());
 }
 
+// Serve policy for recovered bytes, which may be hostile (they came off a
+// damaged disk). HTML-family, XML and JS are always forced to octet-stream +
+// attachment so a crafted file cannot execute scripts in the engine's origin.
+// SVG is special: as a top-level document (navigating to a URL) it can run
+// scripts, but inside an <img> tag it cannot — so svgInlineOk keeps it
+// renderable for the job preview (/api/content) while the raw-path endpoint
+// (/api/file, which users may open by URL) always forces it to download.
+std::pair<std::string, bool> safeServeMime(const std::string& path, bool svgInlineOk) {
+    static const char* kScriptLike[] = {"html", "htm", "xhtml", "xml", "js", "mjs", "json"};
+    std::string ext = extensionOf(path);
+    if (!svgInlineOk && ext == "svg") return {std::string("application/octet-stream"), false};
+    for (const char* e : kScriptLike)
+        if (ext == e) return {std::string("application/octet-stream"), false};
+    std::string mime = mimeForExtension(ext);
+    if (mime.rfind("text/", 0) == 0) return {std::string("application/octet-stream"), false};
+    return {mime, true};
+}
+
 // ---------------------------------------------------------------------------
 int startServer(const ServerConfig& cfg) {
     setOutputRoot(cfg.output_root.empty() ? defaultOutputRoot() : cfg.output_root);
@@ -792,8 +868,14 @@ int startServer(const ServerConfig& cfg) {
     svr.set_default_headers({
         {"Access-Control-Allow-Origin", cfg.allow_remote ? "*" : "http://localhost"},
         {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
-        {"Access-Control-Allow-Headers", "Content-Type"},
+        {"Access-Control-Allow-Headers", "Content-Type, X-Ghost-Token"},
+        {"Access-Control-Expose-Headers", "X-File-Size, X-Content-Truncated"},
         {"X-Content-Type-Options", "nosniff"},
+        // Note: X-Frame-Options and the frame-ancestors CSP are set on the
+        // HTML page route only, NOT here. If they were default headers every
+        // response would carry them — including the PDF bytes the UI previews
+        // in an <iframe> — and the PDF could not be framed even by our own
+        // page, silently breaking the PDF preview.
     });
     svr.Options(".*", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
     // Local mode: every request must arrive with a loopback Host header and,
@@ -840,6 +922,32 @@ int startServer(const ServerConfig& cfg) {
                 return httplib::Server::HandlerResponse::Handled;
             }
         }
+        // A root-privileged engine demands the session token on every /api
+        // request (the browser receives it through the handover or the
+        // launcher's URL fragment). Without this, any local process — not
+        // just the browser — could drive the root engine to read or write
+        // files anywhere. OPTIONS preflight carries no token by design.
+        if (!g_sessionToken.empty() && req.method != "OPTIONS" &&
+            req.path.rfind("/api", 0) == 0) {
+            const std::string given = req.get_header_value("X-Ghost-Token");
+            bool ok = !given.empty() && given.size() == g_sessionToken.size();
+            if (ok) {
+                unsigned diff = 0;
+                for (size_t i = 0; i < given.size(); i++)
+                    diff |= (unsigned)(given[i] ^ g_sessionToken[i]);
+                ok = (diff == 0);
+            }
+            if (!ok) {
+                res.status = 403;
+                json::Writer w;
+                w.beginObject().kv("ok", false).kv("service", "ghost-recover")
+                 .kv("error", "this engine is locked with a session token")
+                 .kv("hint", "reload the page from the launcher’s URL, or run: sudo ghost_recover")
+                 .endObject();
+                res.set_content(w.str(), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
         return httplib::Server::HandlerResponse::Unhandled;
     });
     svr.set_exception_handler([](const httplib::Request&, httplib::Response& res,
@@ -868,10 +976,9 @@ int startServer(const ServerConfig& cfg) {
         w.beginObject();
         w.kv("ok", true).kv("status", "online").kv("service", "ghost-recover")
          .kv("version", kVersion).kv("is_root", (bool)(::getuid() == 0))
-         .kv("uid", (i64)::getuid()).kv("pid", (i64)::getpid())
+         .kv("uid", (i64)::getuid())
          .kv("output_root", outputRoot())
          .kv("writes_allowed", g_allowWrites)
-         .kv("web_root", webRoot)
          .kv("carvers", (i64)carverRegistry().size())
          .kv("filesystems", (i64)filesystemRegistry().size());
         ElevationMethods em = elevationMethodsForServing(detectElevationMethods(),
@@ -909,7 +1016,9 @@ int startServer(const ServerConfig& cfg) {
         }
         // One elevation at a time: a second request would spawn a second
         // sudo/pkexec dialog and burn the one-time handover token, leaving
-        // the first child unable to claim the port.
+        // the first child unable to claim the port. The mutex closes the
+        // check-then-act window between two nearly simultaneous requests.
+        std::lock_guard<std::mutex> el(g_elevateMutex);
         if (g_elevation.pending.load() && !g_elevation.child_exited.load()) {
             res.set_content(errorJson("an elevation is already in progress — finish or dismiss "
                                       "the open authentication dialog first"),
@@ -930,13 +1039,10 @@ int startServer(const ServerConfig& cfg) {
                 "Quit and run: sudo ghost_recover"), "application/json");
             return;
         }
-        if (method == "sudo-password" && cfg.allow_remote) {
-            res.set_content(errorJson(
-                "password-based sudo is disabled when the web server is reachable from other "
-                "machines (--listen 0.0.0.0): the password would be sent over unencrypted HTTP. "
-                "Open the interface on this computer (http://localhost) instead, or use the "
-                "graphical authentication or passwordless-sudo methods."),
-                "application/json");
+        // Whitelist: an unknown method string must not silently take the
+        // password-reading `sudo -S` branch below.
+        if (method != "pkexec" && method != "sudo-nopasswd" && method != "sudo-password") {
+            res.set_content(errorJson("unknown elevation method: " + method), "application/json");
             return;
         }
         if (method == "pkexec" && !m.pkexec) {
@@ -964,6 +1070,12 @@ int startServer(const ServerConfig& cfg) {
         json::Writer w;
         w.beginObject();
         w.kv("ok", true).kv("method", method);
+        // The elevated instance requires this token on every API request; the
+        // browser keeps it in sessionStorage so the session survives the
+        // handover. It is handed out only to the caller that triggered the
+        // (polkit- or password-authenticated) elevation, so an unrelated local
+        // process that never completed the dialog cannot drive the root engine.
+        if (!g_handoverToken.empty()) w.kv("token", g_handoverToken);
         w.kv("message", method == "pkexec"
                  ? "Complete the authentication in the system dialog. This page will reconnect "
                    "automatically once the engine restarts with full disk access."
@@ -996,7 +1108,8 @@ int startServer(const ServerConfig& cfg) {
                                        : "sudo exited with code " + std::to_string(code) + ".";
             }
             // Surface whatever sudo/pkexec printed, which is usually the reason.
-            std::ifstream lf(joinPath(outputRoot(), "elevated-engine.log"));
+            // The log sits next to the handover token in the 0700 runtime dir.
+            std::ifstream lf(joinPath(dirName(g_handoverFile), "elevated-engine.log"));
             std::string line, tail;
             while (std::getline(lf, line)) {
                 line = trim(line);
@@ -1479,7 +1592,9 @@ int startServer(const ServerConfig& cfg) {
     });
 
     // ---- file content -------------------------------------------------------
-    // Serves the bytes of one recovered file straight from the device.
+    // Serves the bytes of one recovered file straight from the device, with
+    // HTTP Range support so <video>/<audio> elements can seek and stream
+    // without loading the whole (possibly multi-gigabyte) file at once.
     svr.Get("/api/content", [&](const httplib::Request& req, httplib::Response& res) {
         auto stored = ResultStore::instance().get(req.get_param_value("job"));
         if (!stored) {
@@ -1499,6 +1614,40 @@ int startServer(const ServerConfig& cfg) {
         if (m > 0) maxBytes = std::min<i64>(maxBytes, m);
 
         const RecoveredFile& f = stored->files[(size_t)index];
+        i64 fileLen = f.size > 0 ? f.size : 0;
+        if (fileLen <= 0)
+            for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
+
+        // Single-range support: "bytes=start-end" or "bytes=start-".
+        // Anything else falls back to a plain (full/trimmed) response, which
+        // browsers treat as progressive download. Media players always use
+        // single ranges, so this covers seeking and streaming.
+        i64 rStart = 0, rEnd = fileLen - 1;
+        bool partial = false;
+        std::string range = req.get_header_value("Range");
+        if (!range.empty() && range.rfind("bytes=", 0) == 0) {
+            std::string spec = range.substr(6);
+            size_t dash = spec.find('-');
+            if (dash != std::string::npos && dash > 0) {
+                i64 s = 0;
+                try { s = std::stoll(spec.substr(0, dash)); } catch (...) { s = -1; }
+                if (s >= 0) {
+                    rStart = s;
+                    partial = true;
+                    if (dash + 1 < spec.size()) {
+                        try { rEnd = std::min<i64>(rEnd, std::stoll(spec.substr(dash + 1))); }
+                        catch (...) { /* keep rEnd = fileLen - 1 */ }
+                    }
+                }
+            }
+        }
+        if (partial && (fileLen <= 0 || rStart >= fileLen)) {
+            res.status = 416;
+            res.set_header("Content-Range", "bytes */" + std::to_string(fileLen));
+            res.set_content(errorJson("range not satisfiable"), "application/json");
+            return;
+        }
+
         std::string err;
         auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
         if (!disk) {
@@ -1506,15 +1655,42 @@ int startServer(const ServerConfig& cfg) {
             res.set_content(errorJson(err), "application/json");
             return;
         }
-        auto data = readFileData(*disk, f, maxBytes);
+        std::vector<u8> data;
+        if (partial) {
+            // Serve at most a bounded window per request; the player issues
+            // further range requests for the rest (progressive download).
+            i64 win = std::min<i64>(rEnd - rStart + 1, 8LL * 1024 * 1024);
+            // Coded/tail-fragmented files cannot be windowed (the decoder
+            // needs the whole extent); fall back to a prefix read like the
+            // non-range path, still bounded.
+            if (f.codec.empty() && f.fragment_offset < 0) {
+                data = readFileWindow(*disk, f, rStart, win);
+            } else {
+                auto all = readFileData(*disk, f, std::min<i64>(maxBytes, rStart + win));
+                i64 cut = std::min<i64>((i64)all.size(), rStart + win);
+                if (rStart < cut)
+                    data.assign(all.begin() + (size_t)rStart, all.begin() + (size_t)cut);
+            }
+        } else {
+            data = readFileData(*disk, f, maxBytes);
+        }
         if (data.empty()) {
             res.status = 404;
             res.set_content(errorJson("no readable data for this file"), "application/json");
             return;
         }
-        std::string mime = mimeForExtension(extensionOf(f.name));
+        auto [mime, inlineOk] = safeServeMime(f.name, true);
+        res.set_header("Accept-Ranges", "bytes");
         res.set_header("Content-Disposition",
-                       "inline; filename=\"" + sanitizeFilename(f.name) + "\"");
+                       std::string(inlineOk ? "inline" : "attachment") +
+                       "; filename=\"" + sanitizeFilename(f.name) + "\"");
+        if (partial) {
+            res.status = 206;
+            res.set_header("Content-Range",
+                           "bytes " + std::to_string(rStart) + "-" +
+                           std::to_string(rStart + (i64)data.size() - 1) + "/" +
+                           std::to_string(fileLen));
+        }
         // Build the body from the data without a second copy: move the bytes
         // into the string, then hand the string to the response.
         std::string body(reinterpret_cast<const char*>(data.data()), data.size());
@@ -1649,9 +1825,11 @@ int startServer(const ServerConfig& cfg) {
         if (take > 0) f.read(&data[0], take);
         res.set_header("X-File-Size", std::to_string(size));
         if (size > take) res.set_header("X-Content-Truncated", "1");
+        auto [mime, inlineOk] = safeServeMime(path, false);
         res.set_header("Content-Disposition",
-                       "inline; filename=\"" + sanitizeFilename(baseName(path)) + "\"");
-        res.set_content(data, mimeForExtension(extensionOf(path)).c_str());
+                       std::string(inlineOk ? "inline" : "attachment") +
+                       "; filename=\"" + sanitizeFilename(baseName(path)) + "\"");
+        res.set_content(data, mime.c_str());
     });
 
     // ---- extraction ---------------------------------------------------------
@@ -1939,6 +2117,18 @@ int startServer(const ServerConfig& cfg) {
     };
 
     svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
+        // Clickjacking and XSS defence-in-depth for the UI document. This is
+        // deliberately attached to the HTML page only: putting it on shared
+        // default headers would also stamp the PDF/video/image responses the
+        // page previews in iframes and media elements, blocking them for no
+        // security gain. The inline onclick/onchange attributes in the UI
+        // need script-src 'unsafe-inline' (all user data through esc()).
+        res.set_header("X-Frame-Options", "DENY");
+        res.set_header("Content-Security-Policy",
+                       "frame-ancestors 'none'; default-src 'self'; "
+                       "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+                       "img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; "
+                       "font-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'");
         serveStatic("index.html", "text/html; charset=utf-8", res);
     });
     svr.Get("/app.js", [&](const httplib::Request&, httplib::Response& res) {
@@ -1956,7 +2146,9 @@ int startServer(const ServerConfig& cfg) {
 
     g_server = &svr;
 
-    const std::string bind = cfg.allow_remote ? "0.0.0.0" : cfg.bind_address;
+    // Bind exactly the address the user asked for: loopback in local mode, the
+    // requested interface (or 0.0.0.0) in remote mode.
+    const std::string bind = cfg.bind_address.empty() ? "127.0.0.1" : cfg.bind_address;
 
     // If an unprivileged instance spawned us, tell it to stand down and take
     // over its port, so the browser session survives the switch.
@@ -1970,6 +2162,10 @@ int startServer(const ServerConfig& cfg) {
         if (token.empty()) {
             fprintf(stderr, "ERROR: handover token file %s is empty\n", cfg.takeover_file.c_str());
         } else {
+            // From here on this (now privileged) instance demands the token on
+            // every /api request. The parent hands the same token to the
+            // browser, so the session survives the handover.
+            g_sessionToken = token;
             httplib::Client cli("127.0.0.1", cfg.port);
             cli.set_connection_timeout(2, 0);
             cli.set_read_timeout(5, 0);
@@ -2007,6 +2203,38 @@ int startServer(const ServerConfig& cfg) {
 
     if (parentRejected) return 1;
 
+    // A root-privileged instance that did not arrive through the handover
+    // (the user started it with sudo directly) still gates the API on a fresh
+    // session token, kept in the 0700 runtime dir and delivered to the browser
+    // as a URL fragment. Without it, any local process could drive the root
+    // engine to read or write files it could not reach itself.
+    std::string browserPageUrl = "http://localhost:" + std::to_string(cfg.port);
+    if (::getuid() == 0 && g_sessionToken.empty()) {
+        std::string token = randomToken();
+        if (token.empty()) {
+            fprintf(stderr, "ERROR: no usable system RNG; refusing to run privileged "
+                            "without a session token\n");
+            return 1;
+        }
+        std::string dir = runtimeDir();
+        if (dir.empty()) {
+            fprintf(stderr, "ERROR: cannot create the runtime directory for the session token\n");
+            return 1;
+        }
+        std::string tf = joinPath(dir, "session-token");
+        int fd = ::open(tf.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0 || ::write(fd, token.data(), token.size()) != (ssize_t)token.size()) {
+            if (fd >= 0) ::close(fd);
+            fprintf(stderr, "ERROR: cannot write the session token file\n");
+            return 1;
+        }
+        ::close(fd);
+        g_sessionToken = token;
+        fprintf(stderr, "note: session token written to %s and handed to the browser\n",
+                tf.c_str());
+    }
+    if (!g_sessionToken.empty()) browserPageUrl += "#tok=" + g_sessionToken;
+
     // Reconnect, don't duplicate: when we are not taking over, a live engine
     // already answering on the port — usually the privileged instance left
     // running from an earlier unlock — is already serving. SO_REUSEPORT would
@@ -2017,7 +2245,7 @@ int startServer(const ServerConfig& cfg) {
         printf("an engine is already running on port %d — connecting to it\n", cfg.port);
         fflush(stdout);
         if (cfg.open_browser)
-            launchBrowser("http://localhost:" + std::to_string(cfg.port));
+            launchBrowser(browserPageUrl);
         return 0;
     }
 
@@ -2025,7 +2253,7 @@ int startServer(const ServerConfig& cfg) {
     // slow bind — or a bind that never succeeds — never leaves the user staring
     // at "localhost refused to connect".
     if (cfg.open_browser) {
-        std::thread([port = cfg.port]() {
+        std::thread([url = browserPageUrl, port = cfg.port]() {
             for (int i = 0; i < 40; i++) {
                 int sock = ::socket(AF_INET, SOCK_STREAM, 0);
                 if (sock >= 0) {
@@ -2035,7 +2263,7 @@ int startServer(const ServerConfig& cfg) {
                     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
                     if (::connect(sock, (sockaddr*)&sa, sizeof(sa)) == 0) {
                         ::close(sock);
-                        launchBrowser("http://localhost:" + std::to_string(port));
+                        launchBrowser(url);
                         return;
                     }
                     ::close(sock);
@@ -2078,7 +2306,7 @@ int startServer(const ServerConfig& cfg) {
         printf("an engine is already running on port %d — connecting to it\n", cfg.port);
         fflush(stdout);
         if (cfg.open_browser)
-            launchBrowser("http://localhost:" + std::to_string(cfg.port));
+            launchBrowser(browserPageUrl);
         return 0;
     }
     fprintf(stderr, "ERROR: could not bind %s:%d (is another instance running?)\n",

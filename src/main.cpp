@@ -450,7 +450,15 @@ int main(int argc, char* argv[]) {
     ghost::ServerConfig cfg;
     cfg.port = (int)args.getInt("--port", 3030);
     cfg.bind_address = args.get("--listen", "127.0.0.1");
-    cfg.allow_remote = cfg.bind_address == "0.0.0.0";
+    // Only loopback binds get the strict local-only safeguards (loopback
+    // Host/Origin gate, sudo-password veto happens before any password is
+    // accepted, etc.). Binding a LAN/WAN address or another hostname silently
+    // reaching only the browser checks would leave the API wide open on the
+    // network while pretending to be "local".
+    auto isLoopbackBind = [](const std::string& b) {
+        return b == "127.0.0.1" || b == "::1" || b == "[::1]" || b == "localhost";
+    };
+    cfg.allow_remote = !isLoopbackBind(cfg.bind_address);
     cfg.output_root = args.get("--output");
     cfg.web_root = args.get("--web");
     cfg.allow_repair_writes = args.has("--allow-writes");

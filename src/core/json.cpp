@@ -1,5 +1,6 @@
 #include "ghost/json.h"
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -288,7 +289,13 @@ std::string Value::asStr() const {
 
 i64 Value::asInt() const {
     switch (type) {
-        case Type::Number: return (i64)num;
+        case Type::Number:
+            // Casting a double outside int64's range (or NaN) to i64 is
+            // undefined behaviour; clamp first instead.
+            if (num != num) return 0;                                  // NaN
+            if (num >= 9.2233720368547757e18) return INT64_MAX;
+            if (num <= -9.2233720368547758e18) return INT64_MIN;
+            return (i64)num;
         case Type::Bool:   return b ? 1 : 0;
         case Type::String: {
             try { return std::stoll(s); } catch (...) { return 0; }

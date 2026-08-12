@@ -42,20 +42,31 @@ function fmtDuration(ms) {
 
 function titleCase(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 
+/* -------------------------------------------------------- api + session */
+// A root-privileged engine demands the session token on every /api request.
+// The browser receives it either as the #tok=… fragment of the launcher URL
+// or from the /api/elevate response, then keeps it for the tab's lifetime.
+function sessionToken() { return sessionStorage.getItem('ghostToken') || ''; }
+
 async function apiGet(path) {
-  const r = await fetch(API + path);
-  const t = await r.text();
-  try { return JSON.parse(t); } catch (e) { throw new Error('bad response: ' + t.slice(0, 200)); }
+  const h = {};
+  const t = sessionToken();
+  if (t) h['X-Ghost-Token'] = t;
+  const r = await fetch(API + path, { headers: h });
+  const t2 = await r.text();
+  if (r.status === 403 && !sessionToken()) {
+    throw new Error('engine-locked');
+  }
+  try { return JSON.parse(t2); } catch (e) { throw new Error('bad response: ' + t2.slice(0, 200)); }
 }
 
 async function apiPost(path, body) {
-  const r = await fetch(API + path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
-  const t = await r.text();
-  try { return JSON.parse(t); } catch (e) { throw new Error('bad response: ' + t.slice(0, 200)); }
+  const h = { 'Content-Type': 'application/json' };
+  const t = sessionToken();
+  if (t) h['X-Ghost-Token'] = t;
+  const r = await fetch(API + path, { method: 'POST', headers: h, body: JSON.stringify(body || {}) });
+  const t2 = await r.text();
+  try { return JSON.parse(t2); } catch (e) { throw new Error('bad response: ' + t2.slice(0, 200)); }
 }
 
 /* ------------------------------------------------------------------ state */
@@ -109,9 +120,27 @@ function log(msg, level) {
 
 /* ------------------------------------------------------------------ boot */
 async function boot() {
+  // The launcher passes the session token as a URL fragment if the engine
+  // started privileged: "http://localhost:3030/#tok=<token>". Store it and
+  // strip it from the address bar — the fragment is never sent to the server.
+  const m = location.hash.match(/^#tok=([0-9a-f]+)/);
+  if (m) {
+    sessionStorage.setItem('ghostToken', m[1]);
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   try {
     S.health = await apiGet('/health');
   } catch (e) {
+    if (e.message === 'engine-locked') {
+      document.getElementById('app').innerHTML =
+        `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
+         <div class="tag">engine locked</div>
+         <div class="caps">The engine is running with elevated privileges and requires the session
+           token. Reopen it from the GHOST//RECOVER launcher (or restart it with
+           <span class="mono">sudo ghost_recover</span>) so the browser receives the token
+           automatically.</div></div>`;
+      return;
+    }
     document.getElementById('app').innerHTML =
       `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
        <div class="tag">engine unreachable</div>
@@ -1125,7 +1154,8 @@ function modalCarve() {
       <label>Limit to these categories (none selected = all)</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
         ${cats.map(c => `<label class="check" style="margin:0">
-          <input type="checkbox" ${chosen.includes(c) ? 'checked' : ''} onchange="toggleCat('${esc(c)}')">
+          <input type="checkbox" data-cat="${esc(c)}" ${chosen.includes(c) ? 'checked' : ''}
+            onchange="toggleCat(this.dataset.cat)">
           ${esc(c)}</label>`).join('') || '<span class="faint">loading…</span>'}
       </div>
     </div>
@@ -1518,6 +1548,9 @@ async function elevate(method) {
     return;
   }
   log('elevation requested via ' + method);
+  // The privileged engine will demand the session token; the parent hands it
+  // to the browser right here so the session survives the handover.
+  if (r.token) sessionStorage.setItem('ghostToken', r.token);
   S.elevating.message = r.message || S.elevating.message;
   render();
   waitForElevated(method);

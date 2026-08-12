@@ -32,6 +32,11 @@ ExtractResult recoverVolume(DiskReader& disk, const std::string& fsId,
 // Streams one file's bytes (following its extent list) into a buffer.
 std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBytes);
 
+// Reads the byte window [off, off+len) of a plain (uncoded, unfragmented)
+// recovered file by walking its extents, so only the overlapping sectors are
+// touched. Used by the HTTP Range path of /api/content.
+std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off, i64 len);
+
 SaveResult saveBytes(const std::string& outputDir, const std::string& filename,
                      const std::vector<u8>& data);
 
