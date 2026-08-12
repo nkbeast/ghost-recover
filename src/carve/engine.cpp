@@ -86,7 +86,7 @@ i64 trimTrailingZeros(DiskReader& disk, i64 offset, i64 size) {
             if (tail[i] != 0) break;
             zeros++;
         }
-        if (zeros < (i64)tail.size()) return size - examined - look + zeros;
+        if (zeros < (i64)tail.size()) return size - examined - zeros;
         examined += look;
     }
     return 0;                                  // the whole candidate is zeros
@@ -323,7 +323,6 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     };
     std::vector<Validated> validated(candidates.size());
     const size_t kGrain = 64;         // consecutive candidates per work claim
-    const size_t kSlab = 4096;        // parallel validation batch
 
     auto examine = [&](size_t ci, const Candidate& cand, DiskReader& rd, ByteSource& src) {
         const CarveSpec& spec = *specs[(size_t)cand.spec];
@@ -344,6 +343,11 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         if (opt.validate && spec.validator) {
             size = spec.validator(src, off, cap, spec);
             if (size < 0) return;
+        }
+        if (size > 0) {
+            // Chain walkers without an end marker must not read into the next
+            // file; the bound is applied in the serial pass once every
+            // candidate's validation is known (only validated starts count).
         }
         if (size <= 0) {
             switch (spec.mode) {
@@ -395,59 +399,74 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
     prog.set(0, (i64)candidates.size());
 
-    for (size_t slabStart = 0; slabStart < candidates.size(); slabStart += kSlab) {
-        const size_t slabEnd = std::min(slabStart + kSlab, candidates.size());
-        if (prog.cancelled()) break;
+    // Phase A: validate every candidate in parallel. Pure read work, so the
+    // whole set goes at once (slabs only bound how many reads each worker
+    // claims). No masking here: that decision belongs to the serial pass.
+    {
+        std::atomic<size_t> nextCand{0};
+        std::vector<std::thread> pool;
+        for (int i = 0; i < threads; i++)
+            pool.emplace_back([&]() {
+                auto reader = disk.clone();
+                if (!reader) return;
+                ByteSource src(*reader, result.image_size);
+                while (!prog.cancelled()) {
+                    size_t beg = nextCand.fetch_add(kGrain);
+                    if (beg >= candidates.size()) break;
+                    size_t end = std::min(beg + kGrain, candidates.size());
+                    for (size_t ci = beg; ci < end; ci++)
+                        examine(ci, candidates[ci], *reader, src);
+                }
+            });
+        for (auto& t : pool) t.join();
+    }
+    if (prog.cancelled()) return result;
 
-        {
-            // Snapshot of the masking envelope as of this slab; workers use it
-            // to skip contained candidates without a single read.
-            const bool snapValid = acceptedValidated;
-            const i64 snapStart = acceptedStart;
-            const i64 snapEnd = acceptedEnd;
-            std::atomic<size_t> nextCand{slabStart};
-            std::vector<std::thread> pool;
-            for (int i = 0; i < threads; i++)
-                pool.emplace_back([&]() {
-                    auto reader = disk.clone();
-                    if (!reader) return;
-                    ByteSource src(*reader, result.image_size);
-                    while (!prog.cancelled()) {
-                        size_t beg = nextCand.fetch_add(kGrain);
-                        if (beg >= slabEnd) break;
-                        size_t end = std::min(beg + kGrain, slabEnd);
-                        for (size_t ci = beg; ci < end; ci++) {
-                            const i64 off = candidates[ci].offset;
-                            if (!(snapValid && off >= snapStart && off < snapEnd))
-                                examine(ci, candidates[ci], *reader, src);
-                        }
-                    }
-                });
-            for (auto& t : pool) t.join();
+    // Offsets of genuine candidates — only these may bound an end-less walker.
+    // A junk signature hit (ICO/CUR/DER magic inside another file's payload)
+    // never validated and must not truncate the file around it.
+    std::vector<i64> bounds;
+    bounds.reserve(candidates.size());
+    for (size_t ci = 0; ci < candidates.size(); ci++) {
+        const Validated& v = validated[ci];
+        if (!v.valid || v.size <= 0) continue;
+        if (bounds.empty() || bounds.back() != candidates[ci].offset) {
+            bounds.push_back(candidates[ci].offset);
         }
+    }
 
-        for (size_t ci = slabStart; ci < slabEnd; ci++) {
-            if (prog.cancelled()) break;
-            if ((ci & 1023) == 0) prog.set((i64)ci, (i64)candidates.size());
-            if ((i64)result.files.size() >= opt.max_files) break;
+    // Phase B: serial accept in disk order — masking envelopes (only a
+    // structurally verified file hides candidates), the bound_to_next clamp,
+    // whole-file dedup, and final stream-out are all ordered decisions.
+    for (size_t ci = 0; ci < candidates.size(); ci++) {
+        if (prog.cancelled()) break;
+        if ((ci & 1023) == 0) prog.set((i64)ci, (i64)candidates.size());
+        if ((i64)result.files.size() >= opt.max_files) break;
 
-            const Candidate& cand = candidates[ci];
-            const CarveSpec& spec = *specs[(size_t)cand.spec];
-            const i64 off = cand.offset;
-            const Validated& v = validated[ci];
+        const Candidate& cand = candidates[ci];
+        const CarveSpec& spec = *specs[(size_t)cand.spec];
+        const i64 off = cand.offset;
+        const Validated& v = validated[ci];
 
-            // Skip anything that starts inside a file we already recovered —
-            // but only when that file's structure was actually verified. A
-            // guessed extent must never suppress a real file.
-                fprintf(stderr, "ENG off=%lld spec=%s vv=%d size=%lld maskA=%lld maskB=%lld maskV=%d\n",
-                        (long long)cand.offset, specs[(size_t)cand.spec]->name.c_str(), (int)v.valid,
-                        (long long)v.size, (long long)acceptedStart, (long long)acceptedEnd, (int)acceptedValidated);
-            if (acceptedValidated && off >= acceptedStart && off < acceptedEnd) {
-                result.rejected++;
-                continue;
+        // Skip anything that starts inside a file we already recovered —
+        // but only when that file's structure was actually verified. A
+        // guessed extent must never suppress a real file.
+        if (acceptedValidated && off >= acceptedStart && off < acceptedEnd) {
+            result.rejected++;
+            continue;
+        }
+        if (!v.valid) { result.rejected++; continue; }
+        i64 size = v.size;
+        if (size > 0 && spec.bound_to_next) {
+            // Chain walkers without an end marker (MAT, pickles, DER, binary
+            // plists, qcow/VHDX/VHD/VDI walks) read on into the next file.
+            // The next genuine file start is the only honest boundary.
+            auto bit = std::upper_bound(bounds.begin(), bounds.end(), off);
+            if (bit != bounds.end()) {
+                i64 bound_ = *bit - off;
+                if (size > bound_) size = bound_;
             }
-            if (!v.valid) { result.rejected++; continue; }
-            const i64 size = v.size;
+        }
 
         // Stream the file out, hashing as we go.
         MD5 md5;
@@ -542,8 +561,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
         acceptedStart = off;
         acceptedEnd = off + written;
-        acceptedValidated = cf.validated && !cf.truncated;
-        }
+        acceptedValidated = !v.guessed && !cf.truncated;
     }
 
     // ---- optional loose-text pass -----------------------------------------

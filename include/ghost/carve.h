@@ -52,6 +52,11 @@ struct CarveSpec {
     // streams...). Such a result proves every byte in between is intact, which
     // header-only checks like BMP's size field or an ELF section table do not.
     bool whole_file = false;
+    // True for stream formats whose walk has no hard end marker (MAT element
+    // chains, pickles, DER containers, binary plists, qcow/VHDX/VHD/VDI block
+    // walks). Their validator walks on past the file's real end into whatever
+    // follows, so the engine must clamp the size at the next signature.
+    bool bound_to_next = false;
     double min_entropy = -1.0;    // reject below this (unset = no check)
     double max_entropy = -1.0;    // reject above this (rejects random noise)
     int    priority = 0;          // higher wins when two specs match at one offset
