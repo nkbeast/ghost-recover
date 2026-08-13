@@ -27,7 +27,6 @@ import gzip
 import hashlib
 import io
 import lzma
-import marshal
 import os
 import pickle
 import plistlib
@@ -639,11 +638,24 @@ def make_plist_bin(_):
     return plistlib.dumps({'name': 'ghost', 'id': 7})
 
 
+# The engine's vPyc walker understands the Python 3.13 marshal layout only
+# (code objects = 5 ints + 8 objects + 1 int + 2 objects). marshal.dumps()
+# emits a different layout on older pythons (3.12 lacks the exceptiontable
+# tail, so CI would build a fixture the walker rejects), so the body is
+# hard-coded from the 3.13 layout instead of generated at runtime.
+_PYC_313_BODY = bytes.fromhex(
+    'e30000000000000000000000000100000000000000'   # TYPE_CODE|REF + 5 ints
+    'f30800000095005300720067012902e9010000004e2901'  # code, consts(INT,NONE)
+    'da0178a900f300000000da0c3c63617276652d737065633e'  # names, varnames,
+    'da083c6d6f64756c653e7207000000'                # freevars, cellvars, filename, name
+    '01000000'                                     # co_firstlineno
+    '730a000000f003010101d804058101'               # lnotab
+    '7205000000')                                  # exceptiontable (REF)
+
+
 def make_pyc(name):
-    code = compile('x = 1\n', '<carve-spec>', 'exec')
-    body = marshal.dumps(code)
     magic = b'\x6F\x0D\x0D\x0A' if name == 'PYC' else b'\xF3\x0D\x0D\x0A'
-    return magic + u32le(0) + u64le(0) + body
+    return magic + u32le(0) + u64le(0) + _PYC_313_BODY
 
 
 def make_elf(_):
