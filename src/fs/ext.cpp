@@ -1,4 +1,4 @@
-// GHOST//RECOVER — ext2 / ext3 / ext4 driver.
+// GHOST RECOVER — ext2 / ext3 / ext4 driver.
 //
 // The previous version read the block-group-0 descriptor, assumed a 1024-byte
 // block size, walked inodes 12..200 and read only the first extent of the first
@@ -898,7 +898,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
         if (!f.extents.empty()) withExtents++;
 
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
 
     res.bump("files_with_data", withExtents);

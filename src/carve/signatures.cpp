@@ -1,4 +1,4 @@
-// GHOST//RECOVER — carver signature registry and format validators.
+// GHOST RECOVER — carver signature registry and format validators.
 //
 // Two problems with the old table are fixed here.
 //

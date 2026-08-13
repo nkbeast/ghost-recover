@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest something GHOST//RECOVER should do
+about: Suggest something GHOST RECOVER should do
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''

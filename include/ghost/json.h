@@ -1,4 +1,4 @@
-// GHOST//RECOVER — JSON writer and parser.
+// GHOST RECOVER — JSON writer and parser.
 //
 // The previous engine built JSON by hand with ostringstream and pulled request
 // fields out with a substring search, which mis-parsed any body where a key

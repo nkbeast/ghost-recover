@@ -1,4 +1,4 @@
-// GHOST//RECOVER — block decompression for filesystem codecs.
+// GHOST RECOVER — block decompression for filesystem codecs.
 #pragma once
 
 #include "ghost/types.h"

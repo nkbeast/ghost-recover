@@ -1,4 +1,4 @@
-// GHOST//RECOVER — RAID detection and reconstruction.
+// GHOST RECOVER — RAID detection and reconstruction.
 //
 // The old raid.cpp was six lines of comments saying that reconstruction "would
 // go here". This implements it:

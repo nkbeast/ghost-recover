@@ -72,7 +72,7 @@ for i in range(50):
 c.commit(); c.close()
 w(root + '/docs/contacts.sqlite', open(tmp, 'rb').read()); os.unlink(tmp)
 
-w(root + '/docs/readme.txt', ('GHOST//RECOVER verification corpus.\n' * 60).encode())
+w(root + '/docs/readme.txt', ('GHOST RECOVER verification corpus.\n' * 60).encode())
 w(root + '/docs/config.json', json.dumps({"engine": "ghost", "version": 3}, indent=2).encode())
 w(root + '/docs/script.sh', b'#!/bin/bash\necho "recovered"\nexit 0\n' + b'# padding\n' * 40)
 shutil.copyfile('/bin/true', root + '/docs/true.elf')
@@ -83,7 +83,7 @@ w(root + '/media/large.bin', bytes((i * 7 + 13) % 251 for i in range(600 * 1024)
 for name, ch in (('inline-a.txt', 'a'), ('inline-b.txt', 'b'), ('inline-c.txt', 'c')):
     w(root + '/docs/' + name, (ch * 200).encode())
 w(root + '/media/compressible.bin',
-  b''.join(('GHOST//RECOVER compression fixture line %06d\n' % i).encode()
+  b''.join(('GHOST RECOVER compression fixture line %06d\n' % i).encode()
            for i in range(5000)))
 print('corpus files:', sum(len(f) for _, _, f in os.walk(root)))
 PY

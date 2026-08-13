@@ -1,4 +1,4 @@
-// GHOST//RECOVER — NTFS driver.
+// GHOST RECOVER — NTFS driver.
 //
 // The previous file was a 13-line stub that returned an empty result with a
 // list of technique names it never implemented, so every NTFS volume recovered
@@ -911,14 +911,14 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             else if (f.size > 0) f.confidence = std::min(1.0, (double)std::max<i64>(f.recoverable, (i64)f.resident.size()) / (double)f.size);
             if (f.recoverable > 0 || !f.resident.empty()) deletedRecoverable++;
         }
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     for (auto& s : streams) {
         if ((i64)res.files.size() >= opt.max_files) break;
         u64 baseRec = s.id;
         std::string base = pathOf(baseRec);
         s.path = base.empty() ? ("/$orphans/" + s.name) : (dirName(base) + "/" + s.name);
-        res.files.push_back(std::move(s));
+        if (!pushFile(res, std::move(s), opt)) break;
     }
 
     res.bump("deleted_with_recoverable_data", deletedRecoverable);

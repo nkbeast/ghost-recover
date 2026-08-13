@@ -1,4 +1,4 @@
-// GHOST//RECOVER — writing recovered files out.
+// GHOST RECOVER — writing recovered files out.
 //
 // The old recoverFiles() read a single (offset,size) range per file, which
 // silently corrupted every fragmented file, wrote everything into one flat
@@ -279,7 +279,9 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                     if (chunk.empty()) break;
                     const std::vector<u8>* payload = &chunk;
                     std::vector<u8> decoded;
-                    if (coded) {
+                    // decomp_sizes[i] == -1 marks a raw extent inside a coded
+                    // file (jffs2 COMPR_NONE nodes): read and emit as-is.
+                    if (coded && decompSize >= 0) {
                         decoded = decompressBlock(f.codec, chunk.data(), chunk.size(),
                                                   decompSize,
                                                   f.sectorsize ? f.sectorsize : 4096);

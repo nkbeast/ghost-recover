@@ -1,4 +1,4 @@
-// GHOST//RECOVER — device / image I/O.
+// GHOST RECOVER — device / image I/O.
 #pragma once
 
 #include "ghost/types.h"
@@ -85,6 +85,12 @@ public:
     void setCacheSize(i64 bytes);
     i64  cacheSize() const { return cache_bytes_; }
     void dropCache();
+
+    // Advises the kernel that the given range (absolute device offsets) will
+    // not be read again, so its page-cache pages can be reclaimed immediately.
+    // The carve stream-out path uses this to stop a large recovery from
+    // pinning the whole device in buff/cache. No-op on a closed reader.
+    void adviseDrop(u64 abs_off, i64 count);
 
 private:
     i64  rawPread(u64 abs_off, u8* dst, i64 count);

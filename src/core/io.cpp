@@ -71,6 +71,12 @@ void DiskReader::dropCache() {
     for (auto& l : cache_) { l.tag = ~0ull; l.valid = 0; }
 }
 
+void DiskReader::adviseDrop(u64 abs_off, i64 count) {
+    if (fd_ < 0 || count <= 0) return;
+    // Best effort: the kernel is free to ignore the hint.
+    (void)::posix_fadvise(fd_, (off_t)abs_off, (off_t)count, POSIX_FADV_DONTNEED);
+}
+
 bool DiskReader::open(std::string* err) {
     close();
     fd_ = ::open(path_.c_str(), O_RDONLY | O_LARGEFILE);

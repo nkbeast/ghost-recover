@@ -1,4 +1,4 @@
-// GHOST//RECOVER — carving engine.
+// GHOST RECOVER — carving engine.
 //
 // Two passes. The first sweeps the target with a single Aho-Corasick automaton
 // across as many worker threads as the machine has cores and records candidate
@@ -522,6 +522,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                 i64 want = std::min(kChunk, size - written);
                 auto chunk = disk.readBlock((u64)(off + written), want);
                 if (chunk.empty()) { readError = true; break; }
+                disk.adviseDrop((u64)(off + written), (i64)chunk.size());
                 if (opt.compute_hashes) {
                     md5.update(chunk.data(), chunk.size());
                     sha1.update(chunk.data(), chunk.size());

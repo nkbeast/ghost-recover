@@ -1,4 +1,4 @@
-// GHOST//RECOVER — block decompression for filesystem codecs.
+// GHOST RECOVER — block decompression for filesystem codecs.
 //
 // Own decoders (no dependencies) for LZO1X and LZNT1, zlib through the
 // optional zlib library, and zstd through the optional libzstd. Every function

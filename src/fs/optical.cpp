@@ -1,4 +1,4 @@
-// GHOST//RECOVER — ISO 9660 (with Joliet and Rock Ridge) and UDF.
+// GHOST RECOVER — ISO 9660 (with Joliet and Rock Ridge) and UDF.
 //
 // The old ISO parser walked directory records but mangled every name: it
 // compared the "." and ".." entries against string literals that can never
@@ -232,7 +232,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 f.mtime = r.mtime;
                 f.mode = r.mode & 0x0FFF;
                 f.method = "recursive_directory_walk";
-                res.files.push_back(std::move(f));
+                if (!pushFile(res, std::move(f), opt)) break;
                 continue;
             }
 
@@ -249,7 +249,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             for (u64 s = r.lba; s < (u64)r.lba + (r.size + kSector - 1) / kSector; s++)
                 claimed.insert(s);
             finalizeFile(f, volume);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
         }
     }
     if (sawRockRidge) { res.technique("rock_ridge_extensions"); res.bump("rock_ridge", 1); }
@@ -293,7 +293,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 i64 fo = (i64)r.lba * kSector;
                 if (fo >= 0 && fo < volume && r.size > 0) f.extents.push_back(Extent(fo, r.size));
                 finalizeFile(f, volume);
-                res.files.push_back(std::move(f));
+                if (!pushFile(res, std::move(f), opt)) break;
                 orphans++;
                 found++;
             }
@@ -609,7 +609,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             }
             finalizeFile(f, volume);
             if (isDeleted) f.confidence = f.recoverable > 0 ? 0.7 : 0.2;
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
         }
     }
 
@@ -665,7 +665,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 f.extents = fe.extents;
             }
             finalizeFile(f, volume);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
             if ((i64)res.files.size() >= opt.max_files * 2) break;
         }
         if ((i64)res.files.size() >= opt.max_files * 2) break;

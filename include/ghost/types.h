@@ -1,4 +1,4 @@
-// GHOST//RECOVER — core value types shared by every subsystem.
+// GHOST RECOVER — core value types shared by every subsystem.
 #pragma once
 
 #include <atomic>
@@ -177,6 +177,12 @@ struct ScanResult {
     std::map<std::string, i64> stats;        // named counters shown in the UI
 
     i64 deleted_found = 0;
+
+    // Running estimate of resident bytes held by `files` (strings, extents,
+    // resident data). Every driver feeds it through pushFile() so the scan can
+    // stop before it eats the box even when max_files is huge.
+    i64 resultBytes = 0;
+    bool truncated = false;   // scan stopped early on the byte budget
 
     void bump(const std::string& k, i64 by = 1) { stats[k] += by; }
     void technique(const std::string& t) {

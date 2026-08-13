@@ -658,7 +658,7 @@ def make_wof_corpus(lzx_bytes=49152, xpress_bytes=11008):
         elif m < 24:
             text += bytes([0x61 + ((i // 7) % 26), 0x61 + ((i // 7 + 1) % 26)])
         elif m < 40:
-            text += b'GHOST//RECOVER-WOF-fixture-'
+            text += b'GHOST RECOVER-WOF-fixture-'
         else:
             text += bytes([rnd.randrange(32, 127)])
     text = bytes(text[:lzx_bytes])

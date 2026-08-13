@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GHOST//RECOVER — end-to-end verification.
+# GHOST RECOVER — end-to-end verification.
 #
 # Builds real filesystems, then checks that the engine identifies them, lists
 # their files, recovers deleted ones, and writes files back out byte-for-byte

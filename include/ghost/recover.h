@@ -1,4 +1,4 @@
-// GHOST//RECOVER — extraction, repair and imaging.
+// GHOST RECOVER — extraction, repair and imaging.
 #pragma once
 
 #include "ghost/fs.h"

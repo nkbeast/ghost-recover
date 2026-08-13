@@ -1,4 +1,4 @@
-// GHOST//RECOVER — XFS driver (v4 and v5 / CRC).
+// GHOST RECOVER — XFS driver (v4 and v5 / CRC).
 //
 // Replaces a stub that returned three technique strings and no files.
 // Implements: superblock parsing, per-AG inode B+tree (inobt/IAB3) traversal,
@@ -589,7 +589,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                                ? std::min(1.0, (double)f.recoverable / (double)f.size)
                                : 0.2;
         }
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
 
     res.technique("extent_list_decoding");

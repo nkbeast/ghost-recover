@@ -1,4 +1,4 @@
-// GHOST//RECOVER — block device enumeration via sysfs.
+// GHOST RECOVER — block device enumeration via sysfs.
 #include "ghost/disk.h"
 
 #include "ghost/util.h"

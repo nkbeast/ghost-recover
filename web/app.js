@@ -1,4 +1,4 @@
-/* GHOST//RECOVER — interface logic.
+/* GHOST RECOVER — interface logic.
  *
  * Talks to the job-based API: long operations are started with a POST that
  * returns a job id, progress is polled, and results are paged in rather than
@@ -9,6 +9,12 @@
 'use strict';
 
 const API = '/api';
+
+// Keepalive for the engine's idle watchdog: a closed browser goes silent and
+// the engine shuts down (freeing scan results and page cache); an open tab
+// pings every 45 s so a paused session survives. Failing pings are fine —
+// the UI reconnects when the engine comes back.
+setInterval(() => { try { fetch(API + '/health').catch(() => {}); } catch (e) {} }, 45000);
 
 /* ------------------------------------------------------------------ utils */
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -133,16 +139,16 @@ async function boot() {
   } catch (e) {
     if (e.message === 'engine-locked') {
       document.getElementById('app').innerHTML =
-        `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
+        `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST RECOVER">
          <div class="tag">engine locked</div>
          <div class="caps">The engine is running with elevated privileges and requires the session
-           token. Reopen it from the GHOST//RECOVER launcher (or restart it with
+           token. Reopen it from the GHOST RECOVER launcher (or restart it with
            <span class="mono">sudo ghost_recover</span>) so the browser receives the token
            automatically.</div></div>`;
       return;
     }
     document.getElementById('app').innerHTML =
-      `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
+      `<div class="hero"><img class="logo" src="/logo.png" width="128" height="128" alt="GHOST RECOVER">
        <div class="tag">engine unreachable</div>
        <div class="caps">${esc(e.message)}</div></div>`;
     return;
@@ -214,7 +220,7 @@ function viewTopbar() {
   };
   return `
   <div class="topbar">
-    <span class="brand" onclick="go('welcome')">GHOST//RECOVER</span>
+    <span class="brand" onclick="go('welcome')">GHOST RECOVER</span>
     <span class="ver">v${esc(S.health.version)}</span>
     <div class="steps">
       <div class="step ${stepState('source')}"><span class="n">1</span>Source</div>
@@ -240,7 +246,7 @@ function viewWelcome() {
   const h = S.health || {};
   return `
   <div class="hero">
-    <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
+    <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST RECOVER">
     <div class="tag">Data Recovery Suite</div>
     <div class="caps">
       ${fmtNum(h.filesystems)} filesystems · ${fmtNum(h.carvers)} carver signatures · RAID reconstruction ·
@@ -1264,11 +1270,11 @@ function shutdownEngine() {
   const job = S.job && S.job.state && S.job.state !== 'done' && S.job.state !== 'failed'
     ? '\n\nA job is still running and will be interrupted.'
     : '';
-  if (!confirm('Shut down the GHOST//RECOVER engine?' + job)) return;
+  if (!confirm('Shut down the GHOST RECOVER engine?' + job)) return;
   fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
   setTimeout(() => {
     document.body.innerHTML = `<div class="center">
-      <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST//RECOVER">
+      <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST RECOVER">
       <div class="tag">Engine stopped — you may close this tab.</div>
       <div class="tag">The next launch will start a fresh session.</div>
     </div>`;

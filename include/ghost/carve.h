@@ -1,4 +1,4 @@
-// GHOST//RECOVER — signature carving.
+// GHOST RECOVER — signature carving.
 #pragma once
 
 #include "ghost/io.h"

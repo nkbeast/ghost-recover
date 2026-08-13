@@ -1,4 +1,4 @@
-// GHOST//RECOVER — SquashFS, cramfs, romfs, MINIX, JFFS2, UFS/FFS, ReiserFS,
+// GHOST RECOVER — SquashFS, cramfs, romfs, MINIX, JFFS2, UFS/FFS, ReiserFS,
 // JFS and ZFS.
 //
 // All of these were previously stubs that returned a filesystem name and an
@@ -363,7 +363,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     }
                 }
                 finalizeFile(f, volume);
-                res.files.push_back(std::move(f));
+                if (!pushFile(res, std::move(f), opt)) break;
                 filesFound++;
                 if (filesFound >= opt.max_files) break;
             }
@@ -486,7 +486,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 f.codec = "zlib-block";
             }
             finalizeFile(f, volume);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
             files++;
         }
     }
@@ -582,7 +582,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         break;
                 }
                 finalizeFile(f, volume);
-                res.files.push_back(std::move(f));
+                if (!pushFile(res, std::move(f), opt)) break;
                 files++;
             }
             if (next == off) break;
@@ -781,7 +781,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.method = f.is_deleted ? "orphan_inode_scan" : "inode_table_scan";
         zonesToExtents(in, f.extents);
         finalizeFile(f, volume);
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     prog.setFound((i64)res.files.size());
     return res;
@@ -938,11 +938,15 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         for (const auto& fr : n.frags) {
             if ((i64)fr.offset >= volume) continue;
             f.extents.push_back(Extent((i64)fr.offset, fr.csize));
+            // JFFS2 mixes compressed and raw (COMPR_NONE) nodes per file when a
+            // node would straddle an eraseblock boundary. A -1 sentinel marks a
+            // raw extent so the extractor emits it without decoding.
+            f.decomp_sizes.push_back(fr.compr ? (i64)fr.dsize : -1);
             if (fr.compr != 0) compressed = true;
         }
         if (compressed) { f.is_compressed = true; f.codec = "zlib-block"; }
         finalizeFile(f, volume);
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     prog.setFound((i64)res.files.size());
     return res;
@@ -1146,7 +1150,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.method = f.is_deleted ? "orphan_inode_scan" : "cylinder_group_inode_scan";
         blocksToExtents(in, f.extents);
         finalizeFile(f, volume);
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     prog.setFound((i64)res.files.size());
     return res;
@@ -1361,7 +1365,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if (!n.extents.empty()) f.extents = n.extents;
         else if (!n.direct.empty()) f.resident = n.direct;
         finalizeFile(f, volume);
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     prog.setFound((i64)res.files.size());
     return res;
@@ -1666,7 +1670,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.confidence = 0.6;
         f.extents = din.exts;
         finalizeFile(f, volume);
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
         if (++found >= opt.max_files) break;
     }
     res.bump("dinodes_recovered", found);

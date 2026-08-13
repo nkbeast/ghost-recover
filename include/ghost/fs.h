@@ -1,4 +1,4 @@
-// GHOST//RECOVER — filesystem drivers.
+// GHOST RECOVER — filesystem drivers.
 #pragma once
 
 #include "ghost/io.h"
@@ -14,6 +14,7 @@ struct ScanOptions {
     bool resolve_paths   = true;    // reconstruct full paths (needs a directory pass)
     i64  max_files       = 500000;  // hard cap so a corrupt volume cannot exhaust memory
     i64  max_scan_bytes  = 0;       // 0 = whole volume
+    i64  max_result_bytes = -1;     // byte budget for res.files; -1 = set from RAM in scanVolume
 };
 
 // Every driver has this shape. `progress` is updated as the scan runs and is
@@ -74,5 +75,26 @@ void finalizeFile(RecoveredFile& f, i64 volumeSize);
 // True when the extent list is plausible for a file of `size` bytes on a
 // volume of `volumeSize` bytes.
 bool extentsPlausible(const std::vector<Extent>& ex, i64 size, i64 volumeSize);
+
+// Appends `f` to `res`, accounting its resident cost against
+// `opt.max_result_bytes`. Returns false when the budget is exhausted and the
+// driver should stop scanning (it sets `res.truncated`).
+inline bool pushFile(ScanResult& res, RecoveredFile&& f, const ScanOptions& opt) {
+    res.files.push_back(std::move(f));
+    const auto& b = res.files.back();
+    // 512 flat (fixed fields, string SSO, vector capacity slack) + strings +
+    // 32B per extent + resident data. Deliberately pessimistic so the scan
+    // stops before the RSS curve surprises anyone.
+    res.resultBytes += 512 + (i64)b.name.size() + (i64)b.path.size() +
+                       (i64)b.method.size() +
+                       32 * (i64)b.extents.size() +
+                       8 * (i64)b.decomp_sizes.size() +
+                       (i64)b.resident.size();
+    if (opt.max_result_bytes > 0 && res.resultBytes > opt.max_result_bytes) {
+        res.truncated = true;
+        return false;
+    }
+    return (i64)res.files.size() < opt.max_files;
+}
 
 }  // namespace ghost

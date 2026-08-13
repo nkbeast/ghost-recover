@@ -1,4 +1,4 @@
-// GHOST//RECOVER — Btrfs driver.
+// GHOST RECOVER — Btrfs driver.
 //
 // Replaces a stub. Parses the superblock (and its backups), bootstraps the
 // chunk map from sys_chunk_array, walks the chunk tree to build a full
@@ -536,7 +536,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if (f.is_deleted)
             f.confidence = (f.recoverable > 0 && f.size > 0)
                                ? std::min(1.0, (double)f.recoverable / (double)f.size) : 0.25;
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
 
     prog.setFound((i64)res.files.size());

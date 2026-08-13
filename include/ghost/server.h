@@ -1,4 +1,4 @@
-// GHOST//RECOVER — HTTP API server.
+// GHOST RECOVER — HTTP API server.
 #pragma once
 
 #include "ghost/types.h"

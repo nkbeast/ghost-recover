@@ -1,4 +1,4 @@
-// GHOST//RECOVER — exFAT driver.
+// GHOST RECOVER — exFAT driver.
 //
 // exFAT was previously routed into the FAT12/16/32 driver, which parsed the
 // exFAT boot sector as a FAT BPB. Every field it read (bytes-per-sector,
@@ -382,7 +382,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             finalizeFile(f, fs.volume);
             if (f.is_deleted && f.size > 0)
                 f.confidence = std::min(f.confidence, (double)f.recoverable / (double)f.size);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
             filesFound++;
             i = p;
         }

@@ -1,4 +1,4 @@
-// GHOST//RECOVER — HTTP API.
+// GHOST RECOVER — HTTP API.
 //
 // Rewritten around a job model. Scans and carves now run on worker threads and
 // the browser polls for progress, instead of blocking an HTTP handler that the
@@ -57,6 +57,13 @@ std::string       g_handoverFile;
 httplib::Server*  g_server = nullptr;
 std::atomic<bool> g_handedOver{false};
 
+// Last time any HTTP request arrived. The UI heartbeats /api/health every
+// ~45 s, so a closed browser goes silent and the idle watchdog shuts the
+// engine down, releasing every scan result and device page-cache page instead
+// of pinning them in the background.
+std::atomic<i64> g_lastActivityMs{0};
+constexpr i64 kIdleShutdownMs = 10 * 60 * 1000;   // 10 minutes of silence
+
 // Session token guarding the API. Non-empty only on instances that run with
 // root privileges (elevated via the handover, or started as root directly):
 // every /api request must then carry it, so an unrelated local process cannot
@@ -80,7 +87,7 @@ void requestEngineShutdown() {
     if (g_server) g_server->stop();
 }
 
-// True when a GHOST//RECOVER engine is answering health on the given port.
+// True when a GHOST RECOVER engine is answering health on the given port.
 // Used to reconnect to an already-running instance instead of failing. A 403
 // also counts as "engine running": a privileged instance demands the session
 // token, which this probe does not carry, but the engine is still live.
@@ -291,6 +298,7 @@ void writeScanSummary(json::Writer& w, const ScanResult& s, i64 fileCount) {
     w.kv("volume_size", s.volume_size);
     w.kv("file_count", fileCount);
     w.kv("deleted_found", s.deleted_found);
+    w.kv("truncated", s.truncated);
     w.key("techniques").beginArray();
     for (const auto& t : s.techniques) w.value(t);
     w.endArray();
@@ -955,6 +963,7 @@ int startServer(const ServerConfig& cfg) {
         return false;
     };
     svr.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+        g_lastActivityMs = nowMs();
         if (!cfg.allow_remote) {
             if (!looksLoopback(req.get_header_value("Host"), false)) {
                 res.status = 403;
@@ -1471,6 +1480,12 @@ int startServer(const ServerConfig& cfg) {
                 }
 
                 ResultStore::instance().put(job.id, stored);
+
+                // The job is done with the device: hand its pages back to the
+                // kernel so a big scan/carve does not leave the whole disk in
+                // buff/cache after the job finishes.
+                disk->dropCache();
+                disk->adviseDrop(0, disk->size());
 
                 json::Writer w;
                 w.beginObject();
@@ -2159,7 +2174,7 @@ int startServer(const ServerConfig& cfg) {
                                  httplib::Response& res) {
         if (webRoot.empty()) {
             res.status = 500;
-            res.set_content("GHOST//RECOVER: web assets not found. Run the binary from the "
+            res.set_content("GHOST RECOVER: web assets not found. Run the binary from the "
                             "ghost-recover directory, or install the web/ directory next to it.",
                             "text/plain");
             return;
@@ -2203,6 +2218,26 @@ int startServer(const ServerConfig& cfg) {
     });
 
     g_server = &svr;
+
+    // Idle watchdog: when no browser is talking to the engine, shut down
+    // gracefully so a finished scan's results do not pin RAM in the
+    // background. A running job or an open UI (health heartbeat) counts as
+    // activity. Detached: the process exits right after stop() returns.
+    g_lastActivityMs = nowMs();
+    std::thread([&]() {
+        while (true) {
+            for (int i = 0; i < 30; i++) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (g_server == nullptr) return;   // engine went down
+            }
+            if (JobManager::instance().hasRunningJob()) continue;
+            if (nowMs() - g_lastActivityMs.load() < kIdleShutdownMs) continue;
+            fprintf(stderr, "ghost-recover: no activity for %lld ms — shutting down\n",
+                    (long long)kIdleShutdownMs);
+            requestEngineShutdown();
+            return;
+        }
+    }).detach();
 
     // Bind exactly the address the user asked for: loopback in local mode, the
     // requested interface (or 0.0.0.0) in remote mode.
@@ -2249,7 +2284,7 @@ int startServer(const ServerConfig& cfg) {
         }
     }
 
-    printf("GHOST//RECOVER engine %s\n", kVersion);
+    printf("GHOST RECOVER engine %s\n", kVersion);
     printf("  listening on http://%s:%d\n", bind.c_str(), cfg.port);
     printf("  output root: %s\n", outputRoot().c_str());
     printf("  %zu carver signatures, %zu filesystems, repair writes %s\n",

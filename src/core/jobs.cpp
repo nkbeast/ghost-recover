@@ -174,6 +174,15 @@ std::vector<std::shared_ptr<Job>> JobManager::list() const {
     return out;
 }
 
+bool JobManager::hasRunningJob() const {
+    const std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [id, j] : jobs_) {
+        JobState s = j->state.load();
+        if (s == JobState::Queued || s == JobState::Running) return true;
+    }
+    return false;
+}
+
 bool JobManager::cancel(const std::string& id) {
     auto j = get(id);
     if (!j) return false;

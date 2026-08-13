@@ -649,15 +649,29 @@ i64 systemRamKB() {
     return 0;
 }
 
-// Bound in-memory job results so a scan can never silently eat the whole box:
-// each recovered file costs roughly 1.2 KiB resident (name/path strings, extent
-// list, flags), so the default caps a result at ~RAM/4. On 1 GiB that is ~200k
-// files, on 16 GiB ~3.3 M. A box with unknown RAM keeps the previous 500k.
+// Bound in-memory job results so a scan can never silently eat the whole box.
+// A recovered file costs ~4 KiB resident in practice (name/path strings, extent
+// list, flags, vector slack; fragmented files with long paths cost more), so
+// the default caps a result at ~RAM/16 by count alone. The real guard is the
+// byte budget in pushFile(), which stops the scan as soon as the accumulated
+// estimate passes min(2 GiB, max(128 MiB, RAM/5)) — the same budget the
+// ResultStore applies to held results.
 i64 defaultMaxFiles() {
     const i64 kb = systemRamKB();
-    if (kb <= 0) return 500000;
-    i64 n = kb * 1024 / 4 / 1280;
-    return std::clamp<i64>(n, 50000, 5000000);
+    if (kb <= 0) return 200000;
+    i64 n = kb * 1024 / 4 / 4096;
+    return std::clamp<i64>(n, 50000, 1000000);
+}
+
+// Byte budget for a single scan result's in-memory files. A held scan result
+// sits in the process for the whole session, so this is deliberately tight:
+// RAM/16 (~6% of the box; the per-file accounting in pushFile() already
+// includes vector slack). On 16 GiB that is a 1 GiB budget, on 1 GiB the
+// 128 MiB floor.
+i64 defaultMaxResultBytes() {
+    const i64 kb = systemRamKB();
+    const i64 ram = kb <= 0 ? 2LL * 1024 * 1024 * 1024 : kb * 1024;
+    return std::max<i64>(128LL * 1024 * 1024, ram / 16);
 }
 
 }  // namespace ghost

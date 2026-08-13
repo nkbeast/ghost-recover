@@ -22,7 +22,7 @@ A clear, one-paragraph description of the bug.
 
 ## Environment
 
-- GHOST//RECOVER version: (`ghost_recover --version`)
+- GHOST RECOVER version: (`ghost_recover --version`)
 - Linux distribution / kernel: `uname -a`
 - Build type: Release / Debug (ASan/UBSan)
 - zlib: present / absent

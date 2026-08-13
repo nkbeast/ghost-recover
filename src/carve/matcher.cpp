@@ -1,4 +1,4 @@
-// GHOST//RECOVER — Aho-Corasick multi-pattern matcher.
+// GHOST RECOVER — Aho-Corasick multi-pattern matcher.
 //
 // The old carver called std::search once per signature per chunk: with ~180
 // signatures that is 180 full passes over every byte of the device, and the

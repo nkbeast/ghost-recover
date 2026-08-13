@@ -1,4 +1,4 @@
-# Contributing to GHOST//RECOVER
+# Contributing to GHOST RECOVER
 
 Thanks for wanting to help. This project recovers people's only copy of their
 data, so two rules outweigh everything else:

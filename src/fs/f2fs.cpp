@@ -1,4 +1,4 @@
-// GHOST//RECOVER — F2FS driver.
+// GHOST RECOVER — F2FS driver.
 //
 // Replaces a stub. F2FS is log-structured, so obsolete node blocks from before
 // a delete are still sitting in the main area. Sweeping the main area for node
@@ -293,7 +293,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if (f.is_deleted)
             f.confidence = (f.recoverable > 0 && f.size > 0)
                                ? std::min(1.0, (double)f.recoverable / (double)f.size) : 0.3;
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
 
     prog.setFound((i64)res.files.size());

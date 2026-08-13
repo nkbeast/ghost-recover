@@ -1,4 +1,4 @@
-// GHOST//RECOVER — entry point.
+// GHOST RECOVER — entry point.
 //
 // Runs either as a local web application (default) or headlessly from the
 // command line, so the engine can be scripted and used over SSH instead of
@@ -29,7 +29,7 @@ using namespace ghost;
 
 void printUsage() {
     printf(
-"GHOST//RECOVER %s — data recovery suite\n"
+"GHOST RECOVER %s — data recovery suite\n"
 "\n"
 "USAGE\n"
 "  ghost_recover [options]                     start the web interface\n"
@@ -481,7 +481,7 @@ int main(int argc, char* argv[]) {
                ghost::carverRegistry().size(), cfg.port, cfg.bind_address.c_str());
     } else {
         printf("\n");
-        printf("  GHOST//RECOVER  %s\n", ghost::engineVersion());
+        printf("  GHOST RECOVER  %s\n", ghost::engineVersion());
         printf("  %zu filesystems · %zu carver signatures · RAID · imaging · repair\n\n",
                ghost::filesystemRegistry().size(), ghost::carverRegistry().size());
     }

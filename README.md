@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/ghost-recover-banner.png" width="100%" alt="GHOST//RECOVER — Linux data recovery engine"/>
+  <img src="assets/ghost-recover-banner.png" width="100%" alt="GHOST RECOVER — Linux data recovery engine"/>
 </p>
 
-<h1 align="center">GHOST//RECOVER — Linux Data Recovery Tool</h1>
+<h1 align="center">GHOST RECOVER — Linux Data Recovery Tool</h1>
 
 <p align="center">
   <b>Recover deleted files, carve lost photos and documents from RAW disks, reassemble RAID
@@ -27,9 +27,9 @@
 
 ---
 
-## What is GHOST//RECOVER?
+## What is GHOST RECOVER?
 
-GHOST//RECOVER is an **all-in-one data recovery suite for Linux** that recovers what other tools
+GHOST RECOVER is an **all-in-one data recovery suite for Linux** that recovers what other tools
 miss. It combines every professional technique in one engine:
 
 * **📁 Filesystem recovery &amp; deleted-file recovery** — walks the raw metadata of **44 filesystems**
@@ -50,7 +50,7 @@ miss. It combines every professional technique in one engine:
   reports honest byte- and candidate-based percentages. **Runs comfortably on a 1 GiB RAM machine.**
 
 > **Everything is read-only unless you explicitly start the engine with `--allow-writes`.**
-> GHOST//RECOVER **refuses to write recovered data back onto the disk it came from** — that is how
+> GHOST RECOVER **refuses to write recovered data back onto the disk it came from** — that is how
 > recovery attempts destroy the data they're trying to save.
 
 ---
@@ -98,7 +98,7 @@ Recovered files go to `$GHOST_OUTPUT`, or `~/ghost-recover-output`.
 ## How it works
 
 <p align="center">
-  <img src="assets/ghost-recover-architecture.png" width="100%" alt="GHOST//RECOVER engine architecture — filesystem scanning, data carving, RAID, imaging, repair"/>
+  <img src="assets/ghost-recover-architecture.png" width="100%" alt="GHOST RECOVER engine architecture — filesystem scanning, data carving, RAID, imaging, repair"/>
 </p>
 
 Three complementary passes make sure nothing is missed:
@@ -208,7 +208,7 @@ you pass `apply`, and the original sectors are saved first.
 ## 🖥️ Web interface
 
 <p align="center">
-  <img src="assets/webui.svg" width="100%" alt="GHOST//RECOVER web interface — browse recovered files, preview photos and videos in the browser"/>
+  <img src="assets/webui.svg" width="100%" alt="GHOST RECOVER web interface — browse recovered files, preview photos and videos in the browser"/>
 </p>
 
 The interface is a thin client over an HTTP API on `127.0.0.1:3030`. Long operations return a job
@@ -253,7 +253,7 @@ the host.
 
 ## 📊 How does it compare?
 
-| | GHOST//RECOVER | TestDisk | PhotoRec | ddrescue |
+| | GHOST RECOVER | TestDisk | PhotoRec | ddrescue |
 |---|---|---|---|---|
 | Deleted-file recovery | ✅ journal + slack + orphan scans | ✅ partition/entry-level | partial (carve only) | — |
 | RAW signature carving | ✅ 262 formats, structural validation | — | ✅ (~500 formats) | — |
@@ -301,7 +301,7 @@ living, so memory safety is tested, not assumed.
 
 ## ❓ FAQ
 
-**What can I recover with GHOST//RECOVER?**
+**What can I recover with GHOST RECOVER?**
 Deleted files, formatted partitions, lost photos/videos/documents from RAW-scanned disks, RAID
 arrays whose metadata is gone, and files off failing drives you first clone to an image.
 

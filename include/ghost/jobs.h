@@ -1,4 +1,4 @@
-// GHOST//RECOVER — background job manager.
+// GHOST RECOVER — background job manager.
 //
 // Scanning a 2 TB drive takes hours. The previous engine ran those scans inside
 // the HTTP handler with a 120 s socket timeout, so any real workload either
@@ -61,6 +61,9 @@ public:
     std::shared_ptr<Job> get(const std::string& id) const;
     std::vector<std::shared_ptr<Job>> list() const;
     bool cancel(const std::string& id);
+    // True when any job is queued or running (the idle watchdog must not shut
+    // the engine down mid-scan).
+    bool hasRunningJob() const;
     // Drops terminal jobs older than `maxAgeMs`, keeping at most `keep` of them.
     void prune(i64 maxAgeMs = 3600 * 1000, size_t keep = 100);
     void shutdown();

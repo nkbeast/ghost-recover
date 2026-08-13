@@ -1,4 +1,4 @@
-// GHOST//RECOVER — HFS+/HFSX and APFS drivers.
+// GHOST RECOVER — HFS+/HFSX and APFS drivers.
 //
 // Neither existed before: HFS+ volumes fell through to "unsupported" and APFS
 // was not even detected.
@@ -198,7 +198,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         for (auto& f : found) {
             f.path = pathOf((u32)f.parent_id);
             if (f.path.empty()) f.path = "/$orphans/" + f.name;
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
         }
         prog.setFound((i64)res.files.size());
         return res;
@@ -394,7 +394,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.path = pathOf((u32)f.id);
         if (f.path.empty()) f.path = "/$orphans/" + f.name;
         if (f.is_adstream) f.path += "/..namedfork/rsrc";
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
     res.technique("resource_fork_recovery");
     prog.setFound((i64)res.files.size());
@@ -629,7 +629,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.size = total;
         finalizeFile(f, volume);
         if (f.is_deleted) f.confidence = f.recoverable > 0 ? 0.7 : 0.2;
-        res.files.push_back(std::move(f));
+        if (!pushFile(res, std::move(f), opt)) break;
     }
 
     if (res.files.empty())

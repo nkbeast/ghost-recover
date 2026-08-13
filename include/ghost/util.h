@@ -1,4 +1,4 @@
-// GHOST//RECOVER — hashing, encoding, path and string utilities.
+// GHOST RECOVER — hashing, encoding, path and string utilities.
 #pragma once
 
 #include "ghost/types.h"
@@ -128,5 +128,6 @@ i64 nowMs();
 i64 systemRamKB();
 // RAM-scaled cap for in-memory scan/result lists (see util.cpp).
 i64 defaultMaxFiles();
+i64 defaultMaxResultBytes();
 
 }  // namespace ghost

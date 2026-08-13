@@ -1,4 +1,4 @@
-// GHOST//RECOVER — filesystem and partition-table repair.
+// GHOST RECOVER — filesystem and partition-table repair.
 //
 // The previous repair functions only ever *reported* that a backup existed —
 // every one of them returned "restoring to primary" without writing a byte, so

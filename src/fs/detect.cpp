@@ -1,4 +1,4 @@
-// GHOST//RECOVER — filesystem identification.
+// GHOST RECOVER — filesystem identification.
 //
 // Ordering matters here. The previous implementation tested FAT before NTFS,
 // and because an NTFS boot sector also ends in 0x55AA it parsed NTFS volumes as
@@ -689,6 +689,8 @@ const FsDriver* findDriver(const std::string& fsId) {
 
 ScanResult scanVolume(DiskReader& disk, const std::string& fsId, const ScanOptions& opt,
                       Progress& prog) {
+    ScanOptions o = opt;
+    if (o.max_result_bytes <= 0) o.max_result_bytes = defaultMaxResultBytes();
     ScanResult res;
     std::string fs = fsId;
 
@@ -718,7 +720,7 @@ ScanResult scanVolume(DiskReader& disk, const std::string& fsId, const ScanOptio
 
     prog.setPhase(std::string("scanning ") + drv->name);
     std::string label = res.label, uuid = res.uuid;
-    res = drv->scan(disk, opt, prog);
+    res = drv->scan(disk, o, prog);
     if (res.filesystem.empty()) res.filesystem = fs;
     if (res.label.empty()) res.label = label;
     if (res.uuid.empty())  res.uuid  = uuid;

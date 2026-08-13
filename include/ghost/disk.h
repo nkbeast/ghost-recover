@@ -1,4 +1,4 @@
-// GHOST//RECOVER — physical device enumeration, partition tables, RAID.
+// GHOST RECOVER — physical device enumeration, partition tables, RAID.
 #pragma once
 
 #include "ghost/io.h"

@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-GHOST//RECOVER parses hostile on-disk structures for a living, so we take
+GHOST RECOVER parses hostile on-disk structures for a living, so we take
 security reports seriously. If you believe you have found a vulnerability —
 a crash on malformed input, memory unsafety, an API flaw, or anything that
 could be abused on a host running the engine — please report it privately

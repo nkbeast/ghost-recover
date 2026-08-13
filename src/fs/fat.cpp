@@ -1,4 +1,4 @@
-// GHOST//RECOVER — FAT12 / FAT16 / FAT32 / VFAT driver.
+// GHOST RECOVER — FAT12 / FAT16 / FAT32 / VFAT driver.
 //
 // The previous version read only the root directory, skipped every deleted
 // entry with `continue` and then tested for the deleted marker in unreachable
@@ -507,7 +507,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 f.mtime = e.mtime; f.ctime = e.ctime; f.atime = e.atime;
                 f.method = e.deleted ? "0xe5_deleted_marker" : "directory_walk";
                 finalizeFile(f, fs.volume);
-                res.files.push_back(std::move(f));
+                if (!pushFile(res, std::move(f), opt)) break;
                 filesFound++;
                 if (e.deleted) deletedCount++;
                 continue;
@@ -577,7 +577,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             finalizeFile(f, fs.volume);
             if (f.is_deleted && f.size > 0)
                 f.confidence = std::min(f.confidence, (double)f.recoverable / (double)f.size);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
             filesFound++;
         }
     }
@@ -628,7 +628,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             f.method = "orphaned_cluster_scan";
             f.confidence = 0.35;
             finalizeFile(f, fs.volume);
-            res.files.push_back(std::move(f));
+            if (!pushFile(res, std::move(f), opt)) break;
             filesFound++;
             orphans++;
         }

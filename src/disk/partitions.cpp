@@ -1,4 +1,4 @@
-// GHOST//RECOVER — partition tables and deleted-partition recovery.
+// GHOST RECOVER — partition tables and deleted-partition recovery.
 //
 // Rewritten. The previous version:
 //   * read only the four primary MBR slots, so every logical partition inside

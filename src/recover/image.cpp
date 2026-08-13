@@ -1,4 +1,4 @@
-// GHOST//RECOVER — ddrescue-style disk imaging.
+// GHOST RECOVER — ddrescue-style disk imaging.
 //
 // Recovering directly from a failing drive makes it fail faster. This copies
 // the device to an image first, reading large blocks on the good pass and
