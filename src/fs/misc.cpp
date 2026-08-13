@@ -1483,6 +1483,102 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         parseFixed(page, start, end, nm);
     };
 
+    // JFS dtpage/dinode layout (verified against jfs_dtree.h + raw images):
+    //   dtpage header  32B @ page+0  { next u64@0, prev u64@8, flag@16,
+    //     nextindex@17, freecnt@18, freelist@19, maxslot@20, stblindex@21,
+    //     self pxd@24 }; 32B slots @ page+32.
+    //   ldtentry        { inumber u32@0, next s8@4, namlen u8@5, name[11]
+    //     u16@6, index u32@28 } == 32B;  dtslot { next s8@0, cnt s8@1,
+    //     name[15] u16@2 }.
+    //   Inline dtroot   dinode+0xE0 { DASD@0, flag@0x10, nextindex@0x11,
+    //     freecnt@0x12, freelist@0x13, idotdot@0x14, stbl[8]@0x18 },
+    //     slots @+0x20 (1..9).  flag bits: 0x01 internal, 0x02 leaf,
+    //     0x04 fanout, 0x80 root.
+    // All slot references (next pointers, stbl values, stblindex, freelist)
+    // are 1-BASED slot numbers; slot k sits at page+32+(k-1)*32.
+    // dtGetKey ignores the dtslot cnt field, so continuation slots are
+    // consumed purely via the next chain.
+    auto decodeEntry = [&](const Bytes& page, size_t slotBase, int maxSlots,
+                           int si, std::unordered_map<u32, std::string>& nm) {
+        if (si < 1 || si > maxSlots) return;
+        size_t off = slotBase + (size_t)(si - 1) * 32;
+        if (!page.has(off, 32)) return;
+        u32 ino = page.le32(off);
+        if (ino < 2 || ino > (1u << 28)) return;
+        u8 nl = page.u8at(off + 5);
+        if (nl == 0 || nl > 0x3F) return;
+        int curNext = (signed char)page.u8at(off + 4);
+        std::string name;
+        bool printable = true;
+        u32 rem = nl;
+        int hops = 0;
+        u32 take = std::min<u32>(rem, 11);
+        for (u32 c = 0; c < take; c++) {
+            char16_t ch = page.le16(off + 6 + (size_t)c * 2);
+            if (ch < 0x20 || ch > 0x7E) { printable = false; break; }
+            name += (char)ch;
+        }
+        rem -= take;
+        while (printable && rem > 0 && hops++ < 8) {
+            if (curNext < 1 || curNext > maxSlots) break;
+            size_t toff = slotBase + (size_t)(curNext - 1) * 32;
+            if (!page.has(toff, 32)) break;
+            curNext = (signed char)page.u8at(toff);
+            take = std::min<u32>(rem, 15);
+            for (u32 c = 0; c < take; c++) {
+                char16_t ch = page.le16(toff + 2 + (size_t)c * 2);
+                if (ch < 0x20 || ch > 0x7E) { printable = false; break; }
+                name += (char)ch;
+            }
+            rem -= take;
+        }
+        if (!printable || rem != 0 || name.empty() || name == "." || name == "..") return;
+        if (nm.count(ino) == 0) nm[ino] = name;
+    };
+
+    auto readLeafPage = [&](u32 block, std::unordered_map<u32, std::string>& nm) {
+        i64 off = (i64)block * bsize;
+        if (off < 0 || off + 4096 > volume) return;
+        for (int pg = 0; pg < 4; pg++) {
+            auto page = disk.readBlock((u64)off, 4096);
+            Bytes pb(page);
+            if (pb.size() < 4096) break;
+            u8 flag = pb.u8at(16);
+            u8 nextindex = pb.u8at(17);
+            u8 maxslot = pb.u8at(20);
+            u8 stblindex = pb.u8at(21);
+            if (!(flag & 0x02) || nextindex == 0 || stblindex == 0) break;
+            int maxSlots = maxslot ? maxslot : 128;
+            size_t stbl = 32 + (size_t)(stblindex - 1) * 32;
+            if (!pb.has(stbl, (size_t)nextindex)) break;
+            for (int i = 0; i < nextindex; i++)
+                decodeEntry(pb, 32, maxSlots, pb.u8at(stbl + (size_t)i), nm);
+            u64 nxt = pb.le64(0);
+            if (!nxt) break;
+            off = (i64)nxt * bsize;
+            if (off < 0 || off + 4096 > volume) break;
+        }
+    };
+
+    auto parseDtRoot = [&](const Bytes& db, size_t base,
+                           std::unordered_map<u32, std::string>& nm) {
+        if (!db.has(base, 0x100)) return;
+        u8 flag = db.u8at(base + 0x10);
+        u8 nextindex = db.u8at(base + 0x11);
+        if (flag & 0x02) {
+            size_t stbl = base + 0x18;
+            for (int i = 0; i < nextindex && i < 8; i++) {
+                if (!db.has(stbl + i, 1)) break;
+                decodeEntry(db, base + 0x20, 9, db.u8at(stbl + i), nm);
+            }
+        } else if (flag & 0x01) {
+            size_t pxd = base + 0x20;
+            if (!db.has(pxd, 8)) return;
+            u32 addr = db.le32(pxd + 4);
+            if (addr) readLeafPage(addr, nm);
+        }
+    };
+
     for (i64 base = 0; base < limit && !prog.cancelled(); base += chunkSize) {
         prog.set(base, limit);
         auto chunk = disk.readBlock((u64)base, std::min(chunkSize, limit - base));
@@ -1523,12 +1619,18 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
     }
 
-    // Name resolution: entries live inline in directory dinodes or in their
-    // first data page; a dinode that yields entries is a directory.
+    // Name resolution: entries live inline in directory dinodes (inline
+    // dtroot @+0xE0) or in the leaf page pointed at by an internal root's
+    // child pxd; a dinode that yields entries is a directory.
     std::unordered_map<u32, std::string> names;
     for (auto& din : dinodes) {
         Bytes db(din.data.data(), din.data.size());
         std::unordered_map<u32, std::string> found;
+        bool structured = (db.le32(52) & 0x20000000) != 0;   // IDIRECTORY
+        if (structured) {
+            din.isDir = true;
+            parseDtRoot(db, 0xE0, found);
+        }
         parseDirs(db, 0x100, db.size(), found);
         if (!found.empty()) din.isDir = true;
         for (auto& [ino, nm] : found) if (names.count(ino) == 0) names[ino] = nm;
