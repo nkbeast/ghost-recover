@@ -354,7 +354,7 @@ void writePartition(json::Writer& w, const PartitionInfo& p) {
     w.endObject();
 }
 
-RecoveredFile carvedToRecovered(const CarvedFile& c, size_t index) {
+RecoveredFile carvedToRecovered(CarvedFile&& c, size_t index) {
     RecoveredFile f;
     f.id = (u64)index;
     f.name = baseName(c.file.empty() ? (c.format + "_" + std::to_string(c.offset) + "." + c.ext)
@@ -362,7 +362,7 @@ RecoveredFile carvedToRecovered(const CarvedFile& c, size_t index) {
     f.path = "/" + c.category + "/" + f.name;
     f.size = c.size;
     f.recoverable = c.size;
-    f.extents = c.extents;
+    f.extents = std::move(c.extents);
     f.method = "carve:" + c.format;
     f.confidence = c.confidence;
     f.is_deleted = true;
@@ -1467,6 +1467,7 @@ int startServer(const ServerConfig& cfg) {
                     std::sort(scanOffsets.begin(), scanOffsets.end());
                 }
 
+                bool carveTruncated = false;
                 if (withCarve && !job.progress.cancelled()) {
                     CarveOptions co = copt;
                     if (unallocOnly) {
@@ -1475,6 +1476,11 @@ int startServer(const ServerConfig& cfg) {
                     }
                     job.progress.setPhase("carving");
                     stored->carve = carveDevice(*disk, co, job.progress);
+                    // Carved files join the unified list under the same byte
+                    // budget as the scan result: without this, a full disk's
+                    // carved output could double the result's footprint.
+                    const i64 budget = defaultMaxResultBytes();
+                    i64 unifiedBytes = withScan ? stored->scan.resultBytes : 0;
                     size_t base = stored->files.size();
                     for (size_t i = 0; i < stored->carve.files.size(); i++) {
                         // Skip carved results that duplicate a file the
@@ -1484,8 +1490,18 @@ int startServer(const ServerConfig& cfg) {
                                                    cf.offset - 4096);
                         bool dup = it != scanOffsets.end() && *it <= cf.offset + 4096;
                         if (dup) continue;
-                        stored->files.push_back(carvedToRecovered(cf, base + i));
+                        RecoveredFile rf =
+                            carvedToRecovered(std::move(stored->carve.files[i]), base + i);
+                        const i64 cost = 512 + (i64)rf.name.size() + (i64)rf.path.size() +
+                                         (i64)rf.method.size() + 32 * (i64)rf.extents.size();
+                        if (unifiedBytes + cost > budget) { carveTruncated = true; break; }
+                        unifiedBytes += cost;
+                        stored->files.push_back(std::move(rf));
                     }
+                    // Extents/strings of carve entries were moved into the
+                    // unified list (or skipped as duplicates); drop the rest.
+                    stored->carve.files.clear();
+                    stored->carve.files.shrink_to_fit();
                 }
 
                 ResultStore::instance().put(job.id, stored);
@@ -1500,6 +1516,7 @@ int startServer(const ServerConfig& cfg) {
                 w.beginObject();
                 w.kv("ok", true).kv("job", job.id).kv("kind", job.kind);
                 w.kv("file_count", (i64)stored->files.size());
+                if (carveTruncated) w.kv("carve_truncated", true);
                 if (withScan) writeScanSummary(w, stored->scan, stored->scan_file_count);
                 if (withCarve) writeCarveSummary(w, stored->carve);
                 w.endObject();
