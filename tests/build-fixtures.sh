@@ -180,8 +180,8 @@ if have makefs; then
 fi
 
 # ---------------------------------------------------------------------------
-# The remaining walkers (hfsplus/hfsx, f2fs, ufs/ufs2, jfs, reiserfs) are
-# populated through kernel loop mounts, which need root. Running
+# The remaining walkers (hfsplus/hfsx, f2fs, ufs/ufs2, jfs) are populated
+# through kernel loop mounts, which need root. Running
 #   sudo tests/build-fixtures.sh <dir>
 # builds them; otherwise the suite skips those filesystems.
 # ---------------------------------------------------------------------------
@@ -216,12 +216,16 @@ if [ "$(id -u)" -eq 0 ] && [ -x "$IMG" ]; then
     loop_mount_populate "$IMG/jfs.img" "$OUT/mnt-jfs" jfs || echo "jfs mount unavailable (skipped)" >&2
   fi
 
-  # ReiserFS: the driver exists but the kernel dropped the module in 6.13+,
-  # so the mount commonly fails; try anyway for older kernels.
-  if have mkfs.reiserfs; then
-    truncate -s 100M "$IMG/reiserfs.img"
-    mkfs.reiserfs -f -q -l GHOSTREISER "$IMG/reiserfs.img" >/dev/null 2>&1
-    loop_mount_populate "$IMG/reiserfs.img" "$OUT/mnt-reiserfs" reiserfs || echo "reiserfs mount unavailable (skipped)" >&2
+  # ReiserFS: kernels >= 6.13 dropped the driver entirely, so the volume can
+  # no longer be populated and an unpopulated image makes the walker fail the
+  # suite. No fixture is built; the suite SKIPs reiserfs cleanly until the
+  # driver returns (the engine code path remains intact).
+  if false; then
+    if have mkfs.reiserfs; then
+      truncate -s 100M "$IMG/reiserfs.img"
+      mkfs.reiserfs -f -q -l GHOSTREISER "$IMG/reiserfs.img" >/dev/null 2>&1
+      loop_mount_populate "$IMG/reiserfs.img" "$OUT/mnt-reiserfs" reiserfs || echo "reiserfs mount unavailable (skipped)" >&2
+    fi
   fi
 fi
 
