@@ -479,6 +479,15 @@ DetectResult detectFilesystem(DiskReader& disk) {
         auto vd = disk.readBlock((u64)sector * 2048, 8);
         Bytes v(vd);
         if (v.eq(1, "CD001", 5)) {
+            // Bridge media ("genisoimage -udf") carry a UDF tree whose
+            // File Identifiers hold the real long names; prefer it over the
+            // 8.3-abbreviated ISO side when a valid anchor is present.
+            auto avdp = disk.readBlock(0x80000ull, 16);
+            Bytes a(avdp);
+            if (a.le16(0) == 2 && a.le16(2) >= 1 && a.le16(2) <= 3) {
+                r.detected = true; r.filesystem = "udf"; r.family = "udf"; r.confidence = 0.95;
+                return r;
+            }
             r.detected = true; r.filesystem = "iso9660"; r.family = "iso"; r.confidence = 1.0;
             auto pvd = disk.readBlock(0x8000, 2048);
             r.label = Bytes(pvd).trimmed(40, 32);

@@ -616,6 +616,62 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     res.technique("file_entry_walk");
     res.technique("allocation_descriptor_decoding");
     res.bump("file_identifiers", entries);
+
+    // ---- supplemental: device-wide File Identifier scan -------------------
+    // Some writers keep a live tree plus a legacy ";1"-versioned mirror, and
+    // a walker that follows only the file set descriptor sees just one of
+    // them. Sweep the device for FID records and recover their targets too.
+    prog.setPhase("scanning UDF file identifiers");
+    std::set<u32> seenIcb;
+    for (const auto& f : res.files) seenIcb.insert((u32)f.id);
+    const i64 fidChunk = 8LL * 1024 * 1024;
+    for (i64 base = 0; base < volume && !prog.cancelled(); base += fidChunk) {
+        prog.set(base, volume);
+        auto raw = disk.readBlock((u64)base, std::min<i64>(fidChunk, volume - base));
+        Bytes b(raw);
+        for (size_t p = 0; p + 64 <= raw.size(); p += 4) {
+            if (b.le16(p) != 0x0113) continue;
+            Tag t = readTag(b, p);
+            if (!t.valid) continue;
+            u8 chars = b.u8at(p + 18);
+            u8 idLen = b.u8at(p + 19);
+            if (idLen < 2 || idLen > 255) continue;
+            u32 childLb = b.le32(p + 24);
+            u16 lenImpl = b.le16(p + 36);
+            size_t nameOff = p + 38 + lenImpl;
+            if (!b.has(nameOff, idLen)) continue;
+            std::string name = dstring(b, nameOff, idLen);
+            if (name.empty() || name == "." || name == "..") continue;
+            if ((chars & 0x08) != 0) continue;                 // parent FID
+            if (!seenIcb.insert(childLb).second) continue;
+            Fe fe = readFileEntry(childLb);
+            if (!fe.valid) continue;
+            RecoveredFile f;
+            f.id = childLb;
+            f.name = name;
+            f.path = "/" + name;
+            f.is_dir = fe.isDir;
+            f.kind = fe.isDir ? FileKind::Directory : FileKind::Regular;
+            f.is_deleted = (chars & 0x04) != 0;
+            f.mtime = fe.mtime;
+            f.mode = fe.permissions & 0x0FFF;
+            f.nlink = fe.linkCount;
+            f.size = (i64)fe.informationLength;
+            f.method = "file_identifier_scan";
+            if (!fe.inlineData.empty()) {
+                f.resident = fe.inlineData;
+                f.method += "+inline_ad";
+            } else {
+                f.extents = fe.extents;
+            }
+            finalizeFile(f, volume);
+            res.files.push_back(std::move(f));
+            if ((i64)res.files.size() >= opt.max_files * 2) break;
+        }
+        if ((i64)res.files.size() >= opt.max_files * 2) break;
+    }
+    res.bump("file_identifiers_scanned", seenIcb.size());
+
     prog.setFound((i64)res.files.size());
     return res;
 }

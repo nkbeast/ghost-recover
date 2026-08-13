@@ -66,7 +66,9 @@ head2 "Filesystem identification"
 declare -A EXPECT=(
   [ext4]=ext4 [ext2]=ext2 [ntfs]=ntfs [fat32]=fat32 [exfat]=exfat
   [btrfs]=btrfs [xfs]=xfs [iso9660]=iso9660 [squashfs]=squashfs [minix]=minix
-  [cramfs]=cramfs [jffs2]=jffs2 [hfs]=hfs
+  [cramfs]=cramfs [jffs2]=jffs2 [hfs]=hfs [romfs]=romfs
+  [hfsplus]=hfsplus [hfsx]=hfsx [f2fs]=f2fs [ufs]=ufs [ufs2]=ufs2
+  [jfs]=jfs [reiserfs]=reiserfs
 )
 for fs in "${!EXPECT[@]}"; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
@@ -80,7 +82,9 @@ head2 "Recovery is byte-for-byte identical to the originals"
 for pair in "ext4:expected.md5" "ext2:expected.md5" "ntfs:expected.md5" "fat32:expected.md5" \
             "exfat:expected.md5" "btrfs:expected.md5" "xfs:expected.md5" "iso9660:expected.md5" \
             "squashfs:expected.md5" "cramfs:expected.md5" "udf:expected.md5" "jffs2:expected.md5" \
-            "hfs:expected-hfs.md5"; do
+            "hfs:expected-hfs.md5" "romfs:expected.md5" "hfsplus:expected.md5" "hfsx:expected.md5" \
+            "f2fs:expected.md5" "ufs:expected.md5" "ufs2:expected.md5" "jfs:expected.md5" \
+            "reiserfs:expected.md5"; do
   fs="${pair%%:*}"; exp="$WORK/${pair##*:}"
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
   out="$WORK/out-$fs"

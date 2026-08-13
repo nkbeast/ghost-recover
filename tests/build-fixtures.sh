@@ -170,6 +170,61 @@ if have mkfs.hfs && have hcopy; then
   done
 fi
 
+# ROMFS via genromfs (root-free; single-file tool from the genromfs package).
+have genromfs && genromfs -f "$IMG/romfs.img" -d "$SRC" -V GHOSTROM >/dev/null 2>&1
+
+# UFS1/UFS2 via NetBSD makefs (root-free, builds from a directory tree).
+if have makefs; then
+  makefs -t ffs -o version=1 -s 128m "$IMG/ufs.img" "$SRC" >/dev/null 2>&1
+  makefs -t ffs -o version=2 -s 128m "$IMG/ufs2.img" "$SRC" >/dev/null 2>&1
+fi
+
+# ---------------------------------------------------------------------------
+# The remaining walkers (hfsplus/hfsx, f2fs, ufs/ufs2, jfs, reiserfs) are
+# populated through kernel loop mounts, which need root. Running
+#   sudo tests/build-fixtures.sh <dir>
+# builds them; otherwise the suite skips those filesystems.
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" -eq 0 ] && [ -x "$IMG" ]; then
+  loop_mount_populate() { # <img> <dir> <fs> : mount, copy corpus, unmount
+    local img="$1" mnt="$2" fs="$3"
+    mkdir -p "$mnt"
+    if ! mount -t "$fs" -o loop "$img" "$mnt" >/dev/null 2>&1; then rmdir "$mnt" 2>/dev/null; return 1; fi
+    ( cd "$SRC" && tar cf - . ) | ( cd "$mnt" && tar xf - ) 2>/dev/null || true
+    umount "$mnt" 2>/dev/null || true
+    rmdir "$mnt" 2>/dev/null || true
+  }
+
+  if have mkfs.hfsplus; then
+    for sig in "hfsplus:" "hfsx:-s"; do
+      name="${sig%%:*}"; opt="${sig#*:}"
+      truncate -s 100M "$IMG/$name.img"
+      mkfs.hfsplus -v "GHOST$(echo "$name" | tr a-z A-Z)" $opt "$IMG/$name.img" >/dev/null 2>&1
+      loop_mount_populate "$IMG/$name.img" "$OUT/mnt-$name" hfsplus || echo "hfsplus mount unavailable ($name skipped)" >&2
+    done
+  fi
+
+  if have mkfs.f2fs; then
+    truncate -s 100M "$IMG/f2fs.img"
+    mkfs.f2fs -l GHOSTF2FS "$IMG/f2fs.img" >/dev/null 2>&1
+    loop_mount_populate "$IMG/f2fs.img" "$OUT/mnt-f2fs" f2fs || echo "f2fs mount unavailable (skipped)" >&2
+  fi
+
+  if have mkfs.jfs; then
+    truncate -s 100M "$IMG/jfs.img"
+    mkfs.jfs -q -L GHOSTJFS "$IMG/jfs.img" >/dev/null 2>&1
+    loop_mount_populate "$IMG/jfs.img" "$OUT/mnt-jfs" jfs || echo "jfs mount unavailable (skipped)" >&2
+  fi
+
+  # ReiserFS: the driver exists but the kernel dropped the module in 6.13+,
+  # so the mount commonly fails; try anyway for older kernels.
+  if have mkfs.reiserfs; then
+    truncate -s 100M "$IMG/reiserfs.img"
+    mkfs.reiserfs -f -q -l GHOSTREISER "$IMG/reiserfs.img" >/dev/null 2>&1
+    loop_mount_populate "$IMG/reiserfs.img" "$OUT/mnt-reiserfs" reiserfs || echo "reiserfs mount unavailable (skipped)" >&2
+  fi
+fi
+
 if have mkfs.jffs2; then
   # Read-only population; every data node is zlib-compressed by default, so
   # byte-identical recovery exercises the JFFS2 walker and zlib decode.

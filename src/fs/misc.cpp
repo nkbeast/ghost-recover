@@ -981,12 +981,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     u32 bsize = sb.le32(48);
     u32 fsize = sb.le32(52);
     u32 frag  = sb.le32(56);
-    u32 ncg   = sb.le32(44);
+    u32 ncg   = sb.le32(version == 2 ? 44 : 68);   // fs_ncg: v1 @0x44, v2 @0x2C
     u32 ipg   = sb.le32(184);
     u32 fpg   = sb.le32(188);
     u32 iblkno = sb.le32(16);
-    u32 cgoffset = sb.le32(36);
-    u32 cgmask   = sb.le32(40);
 
     if (bsize < 512 || bsize > 65536 || ncg == 0 || ipg == 0 || fpg == 0) {
         res.ok = false;
@@ -1003,8 +1001,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     const u32 dinodeSize = version == 2 ? 256 : 128;
     auto cgstart = [&](u32 c) -> u64 {
-        if (version == 2) return (u64)fpg * c;
-        return (u64)fpg * c + (u64)(cgoffset * (c & ~cgmask));
+        return (u64)fpg * c;   // FFS cgbase: each group is fs_fpg frags
     };
 
     struct UInode {
@@ -1051,7 +1048,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     in.gid = ib.le32(p + 116);
                 }
                 if (in.size > (u64)volume) continue;
-                inodes[(u64)c * ipg + k + i + 1] = std::move(in);
+                inodes[(u64)c * ipg + k + i] = std::move(in);   // on-disk inode number
             }
         }
         if ((i64)inodes.size() > opt.max_files * 2) break;
@@ -1418,6 +1415,74 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     const i64 chunkSize = 4LL * 1024 * 1024;
     i64 found = 0;
+    struct JfsDinode {
+        u32 number = 0;
+        u64 size = 0;
+        std::vector<u8> data;
+        std::vector<Extent> exts;
+        bool isDir = false;
+    };
+    std::vector<JfsDinode> dinodes;
+
+    auto parseNames = [&](const Bytes& page, size_t start, size_t end,
+                          std::unordered_map<u32, std::string>& nm) {
+        size_t i = start;
+        while (i + 8 < end) {
+            size_t o = (size_t)-1;
+            for (size_t q = i; q < end; q++) {
+                if (page.u8at(q) == 0xFF) { o = q; break; }
+            }
+            if (o == (size_t)-1 || o + 2 > end) break;
+            u32 nl = page.u8at(o + 1);
+            if (nl == 0 || nl > 0x3F || o + 2 + (size_t)nl * 2 > end) {
+                i = o + 1; continue;
+            }
+            u32 ino = page.le32(o - 4);
+            std::string nm16;
+            bool printable = true;
+            for (u32 c = 0; c < nl; c++) {
+                char16_t ch = page.le16(o + 2 + (size_t)c * 2);
+                if (ch > 0x7E || (ch < 0x20 && ch != 0)) { printable = false; break; }
+                nm16 += (char)ch;
+            }
+            if (!printable || ino == 0 || nm16.empty() || nm16 == "." || nm16 == "..") {
+                i = o + 1; continue;
+            }
+            if (nm.count(ino) == 0) nm[ino] = nm16;
+            i = o + 8 + (size_t)nl * 2;
+        }
+    };
+
+    // JFS dir entries also appear as fixed 8-byte records:
+    //   { ino u32 LE, next/slot u8, name_len u8, utf16 name }
+    // (0x114020: 41 00 00 00 02 0C "inline-c.txt" = ino 65, len 12). The
+    // 0xFF-chain above only catches a subset, so sweep every aligned slot.
+    auto parseFixed = [&](const Bytes& page, size_t start, size_t end,
+                          std::unordered_map<u32, std::string>& nm) {
+        for (size_t p = start; p + 8 <= end; p += 8) {
+            u32 ino = page.le32(p);
+            if (ino == 0 || ino > (1u << 28)) continue;
+            u8 nl = page.u8at(p + 5);
+            if (nl == 0 || nl > 0x3F) continue;
+            if (p + 6 + (size_t)nl * 2 > end) continue;
+            std::string nm16;
+            bool printable = true;
+            for (u32 c = 0; c < nl; c++) {
+                char16_t ch = page.le16(p + 6 + (size_t)c * 2);
+                if (ch == 0 || ch > 0x7E) { printable = false; break; }
+                nm16 += (char)ch;
+            }
+            if (!printable || nm16.empty() || nm16 == "." || nm16 == "..") continue;
+            if (nm.count(ino) == 0) nm[ino] = nm16;
+        }
+    };
+
+    auto parseDirs = [&](const Bytes& page, size_t start, size_t end,
+                         std::unordered_map<u32, std::string>& nm) {
+        parseNames(page, start, end, nm);
+        parseFixed(page, start, end, nm);
+    };
+
     for (i64 base = 0; base < limit && !prog.cancelled(); base += chunkSize) {
         prog.set(base, limit);
         auto chunk = disk.readBlock((u64)base, std::min(chunkSize, limit - base));
@@ -1427,59 +1492,80 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             u32 inostamp = cb.le32(p + 0);
             u32 fileset  = cb.le32(p + 4);
             u32 number   = cb.le32(p + 8);
-            u32 gen      = cb.le32(p + 12);
-            // di_ixpxd occupies 16..23; size follows at 24, and the ownership
-            // and mode fields sit after nblocks — reading them from 16/28/32/40
-            // landed in the extent descriptor and never validated.
-            u64 isize    = cb.le64(p + 24);
-            u32 nlink    = cb.le32(p + 40);
-            u32 uid      = cb.le32(p + 44);
-            u32 gid      = cb.le32(p + 48);
-            u32 mode     = cb.le32(p + 52);
-            if (inostamp == 0 || number == 0 || number > (1u << 28)) continue;
+            if (inostamp == 0 || inostamp == 0xFFFFFFFFu) continue;
+            if (number == 0 || number > (1u << 28)) continue;
             if (fileset != 16 && fileset != 0) continue;      // AGGREGATE_I / FILESYSTEM_I
-            u16 fmt = mode & 0xF000;
-            if (fmt != 0x8000 && fmt != 0x4000 && fmt != 0xA000) continue;
+            u64 isize = cb.le32(p + 24);                      // di_size
             if (isize > (u64)volume) continue;
-            if (nlink > 65535) continue;
-            (void)gen;
 
-            RecoveredFile f;
-            f.id = number;
-            f.name = "inode_" + std::to_string(number);
-            f.path = "/$jfs/" + f.name;
-            f.size = (i64)isize;
-            f.mode = mode & 0x0FFF;
-            f.uid = uid; f.gid = gid; f.nlink = nlink;
-            f.mtime = (i64)cb.le32(p + 72);   // di_mtime.tv_sec
-            f.kind = kindFromPosixMode(mode);
-            f.is_dir = f.kind == FileKind::Directory;
-            f.is_deleted = (nlink == 0);
-            f.method = "dinode_signature_scan";
-            f.confidence = 0.6;
-
-            // The xtree root sits at offset 0x100 in the dinode; leaf entries
-            // are xad_t (16 bytes) with a 40-bit address and 24-bit length.
-            size_t xtree = p + 0x100;
-            u8 xflag = cb.u8at(xtree + 0);
-            u16 nextIdx = cb.le16(xtree + 2);
-            if ((xflag & 0x01) && nextIdx > 2 && nextIdx < 20) {   // XAD_LEAF
-                for (u16 k = 2; k < nextIdx; k++) {
-                    size_t xad = xtree + 16 + (size_t)k * 16;
-                    if (!cb.has(xad, 16)) break;
-                    u32 len = cb.le24(xad + 1);
-                    u64 addr = ((u64)cb.le32(xad + 12)) | ((u64)cb.u8at(xad + 8) << 32);
-                    if (!len || !addr) continue;
-                    i64 off = (i64)(addr * bsize);
+            JfsDinode din;
+            din.number = number;
+            din.size = isize;
+            if (cb.has(p, 4096)) din.data.assign(cb.p + p, cb.p + p + 4096);
+            else if (cb.has(p, 512)) din.data.assign(cb.p + p, cb.p + p + 512);
+            for (u32 xbase : {0x108u}) {
+                size_t xt = p + xbase;
+                for (int z = 0; z < 8; z++) {
+                    size_t xap = xt + (size_t)z * 8;
+                    if (!cb.has(xap, 8)) break;
+                    u32 len = cb.le32(xap);
+                    u32 dbn = cb.le32(xap + 4);
+                    if (!dbn || len == 0) continue;
+                    if (len > (u32)(4 * 1024 * 1024)) continue;
+                    i64 off = (i64)dbn * bsize;
                     if (off < 0 || off >= volume) continue;
-                    f.extents.push_back(Extent(off, (i64)len * bsize));
+                    i64 extLen = (i64)len * bsize;
+                    if (extLen > volume - off) extLen = volume - off;
+                    din.exts.push_back(Extent(off, extLen));
                 }
             }
-            finalizeFile(f, volume);
-            res.files.push_back(std::move(f));
-            if (++found >= opt.max_files) break;
+            dinodes.push_back(std::move(din));
         }
-        if (found >= opt.max_files) break;
+    }
+
+    // Name resolution: entries live inline in directory dinodes or in their
+    // first data page; a dinode that yields entries is a directory.
+    std::unordered_map<u32, std::string> names;
+    for (auto& din : dinodes) {
+        Bytes db(din.data.data(), din.data.size());
+        std::unordered_map<u32, std::string> found;
+        parseDirs(db, 0x100, db.size(), found);
+        if (!found.empty()) din.isDir = true;
+        for (auto& [ino, nm] : found) if (names.count(ino) == 0) names[ino] = nm;
+        for (const Extent& ex : din.exts) {
+            if (ex.length < 512 || ex.length > (i64)bsize * 8) continue;
+            if (ex.offset + ex.length > volume) continue;
+            auto page = disk.readBlock((u64)ex.offset, std::min<i64>(ex.length, (i64)bsize * 8));
+            Bytes pb(page);
+            std::unordered_map<u32, std::string> pf;
+            parseDirs(pb, 0, pb.size(), pf);
+            if (!pf.empty()) din.isDir = true;
+            for (auto& [ino, nm] : pf) if (names.count(ino) == 0) names[ino] = nm;
+        }
+    }
+
+    for (const auto& din : dinodes) {
+        if (din.isDir) continue;
+        if (din.size == 0) continue;     // directory-sized inodes only
+        Bytes db(din.data.data(), din.data.size());
+        RecoveredFile f;
+        f.id = din.number;
+        auto it = names.find(din.number);
+        f.name = (it != names.end()) ? it->second : "inode_" + std::to_string(din.number);
+        f.path = "/$jfs/" + f.name;
+        f.size = (i64)din.size;
+        f.mode = 0;
+        f.uid = 0; f.gid = 0; f.nlink = 0;
+        f.mtime = (i64)db.le32(72);
+        f.kind = FileKind::Regular;
+        f.is_dir = false;
+        f.is_deleted = false;
+        f.method = "dinode_signature_scan";
+        f.confidence = 0.6;
+        f.extents = din.exts;
+        finalizeFile(f, volume);
+        res.files.push_back(std::move(f));
+        if (++found >= opt.max_files) break;
     }
     res.bump("dinodes_recovered", found);
     prog.setFound((i64)res.files.size());
