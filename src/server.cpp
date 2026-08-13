@@ -573,6 +573,15 @@ void launchBrowser(const std::string& url) {
     pid_t pid = ::fork();
     if (pid != 0) return;
     ::setsid();
+    // Detach the browser's output: it inherits our terminal, and Chromium
+    // floods stderr with GCM/TFLite startup noise that ends up in the
+    // launcher's console.
+    int devnull = ::open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        ::dup2(devnull, STDOUT_FILENO);
+        ::dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) ::close(devnull);
+    }
     const char* base = strrchr(browser, '/');
     base = base ? base + 1 : browser;
     if (strstr(base, "chrom") || strstr(base, "brave") || strstr(base, "edge")) {
