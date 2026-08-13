@@ -153,6 +153,23 @@ if have mkfs.exfat; then
 fi
 have mkfs.minix && { truncate -s 20M "$IMG/minix.img"; mkfs.minix -3 "$IMG/minix.img" >/dev/null 2>&1; }
 
+if have mkfs.hfs && have hcopy; then
+  # Classic HFS via hfsutils. hcopy converts LF->CR in .txt files and refuses
+  # large.bin/compressible.bin, so verify.sh builds a dedicated expectation.
+  dd if=/dev/zero of="$IMG/hfs.img" bs=1M count=24 status=none
+  mkfs.hfs -v GHOSTHFS "$IMG/hfs.img" >/dev/null 2>&1
+  ( cd "$SRC" && find . -type f ) | while read -r f; do
+    b=$(basename "$f")
+    [ "$b" = large.bin ] && continue
+    [ "$b" = compressible.bin ] && continue
+    d=$(dirname "$f" | sed 's|^\./||')
+    printf 'y\n' | hmount "$IMG/hfs.img" >/dev/null 2>&1
+    hls ":$d" >/dev/null 2>&1 || hmkdir ":$d" 2>/dev/null
+    printf 'y\n' | hcopy "$SRC/$f" ":$d/$b" >/dev/null 2>&1
+    hsumount >/dev/null 2>&1 || humount >/dev/null 2>&1 || true
+  done
+fi
+
 if have mkfs.jffs2; then
   # Read-only population; every data node is zlib-compressed by default, so
   # byte-identical recovery exercises the JFFS2 walker and zlib decode.

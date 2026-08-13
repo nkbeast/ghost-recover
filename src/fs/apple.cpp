@@ -53,7 +53,157 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     auto vhRaw = disk.readBlock(1024, 512);
     Bytes vh(vhRaw);
     u16 sig = vh.be16(0);
-    if (vhRaw.size() < 512 || (sig != 0x482B && sig != 0x4858)) {
+    if (vhRaw.size() < 512) {
+        res.error = "volume header not readable";
+        return res;
+    }
+    if (sig == 0x4244) {                      // 'BD' — classic HFS
+        // Master Directory Block at 1024; the catalog is a B*-tree (HFS
+        // node format: fLink/bLink/type/height/numRecords/reserved, records
+        // keyed {parID,name}, offsets at the node tail, roff[0] == 14).
+        // Allocation blocks are relative to the first allocation block.
+        res.filesystem = "hfs";
+        res.technique("catalog_btree_walk");
+        const u32 alBlkSiz = vh.be32(20);
+        if (alBlkSiz < 512 || alBlkSiz > (1u << 20) || (alBlkSiz & (alBlkSiz - 1))) {
+            res.error = "implausible HFS allocation block size";
+            return res;
+        }
+        res.block_size   = alBlkSiz;
+        res.bump("file_count", vh.be32(84));    // drFilCnt
+        res.bump("folder_count", vh.be32(88));  // drDirCnt
+        res.bump("free_blocks", vh.be16(34));   // drFreeBks
+
+        const u16 alBlSt  = vh.be16(28);
+        const u16 ctStart = vh.be16(150);       // drCTExtRec[0].xdrStABN
+        if (ctStart == 0) { res.error = "catalog file has no extents"; return res; }
+        const u64 catPhys = ((u64)alBlSt + ctStart) * 512;
+        i64 catLen = (i64)vh.be16(152) * 512;   // drCTExtRec[0].xdrNumABlks
+        if (catPhys >= (u64)volume || catLen > volume - (i64)catPhys)
+            catLen = (i64)std::max<i64>(0, volume - (i64)catPhys);
+        if (catLen < 512) { res.error = "catalog file unreadable"; return res; }
+
+        auto readCat = [&](u64 off, i64 len) -> std::vector<u8> {
+            if (off >= (u64)catLen) return {};
+            len = std::min<i64>(len, catLen - (i64)off);
+            if (len <= 0) return {};
+            return disk.readBlock(catPhys + off, len);
+        };
+
+        auto hnRaw = readCat(0, 512);
+        if (hnRaw.size() < 512) { res.error = "catalog header node unreadable"; return res; }
+        Bytes hb(hnRaw);
+        if (hb.u8at(8) != 1) {                  // ndType: 1 = header node
+            res.error = "catalog header node not found";
+            return res;
+        }
+        const u32 nodeSize = hb.be16(32);       // bthNodeSize in the header record
+        if (nodeSize < 512 || nodeSize > 65536 || (nodeSize & (nodeSize - 1))) {
+            res.error = "implausible HFS catalog node size";
+            return res;
+        }
+        u32 firstLeaf = hb.be32(24);            // bthFNode
+        prog.setPhase("walking HFS catalog");
+
+        res.ok = true;
+        std::unordered_map<u32, std::string> names;
+        std::unordered_map<u32, u32> parents;
+        std::vector<RecoveredFile> found;
+        i64 catEntries = 0;
+
+        u32 node = firstLeaf;
+        int guard = 0;
+        i64 leaves = 0;
+        while (node != 0 && guard++ < 4000000 && !prog.cancelled()) {
+            auto nb = readCat((u64)node * nodeSize, nodeSize);
+            if ((u32)nb.size() < nodeSize) break;
+            Bytes b(nb);
+            u32 fLink = b.be32(0);
+            i8  kind  = (i8)b.u8at(8);
+            u16 numRecs = b.be16(10);
+            if (kind != -1) { node = fLink; continue; }   // ndLeafNode == 0xFF
+            leaves++;
+            if (numRecs > nodeSize / 16) { node = fLink; continue; }
+
+            for (u16 r = 0; r < numRecs; r++) {
+                size_t offPos = nodeSize - (size_t)(r + 1) * 2;
+                size_t recOff = b.be16(offPos);
+                if (recOff < 14 || recOff >= nodeSize) continue;
+                u8 keyLen = b.u8at(recOff);
+                u32 parentID = b.be32(recOff + 2);
+                u8 nameLen = b.u8at(recOff + 6);
+                std::string name;
+                if (nameLen && b.has(recOff + 7, nameLen))
+                    name.assign((const char*)(b.p + recOff + 7), nameLen);
+                if (name.find('\0') != std::string::npos) name.clear();
+
+                size_t dataOff = recOff + ((2 + keyLen) & ~size_t(1));
+                if (dataOff + 2 > nodeSize) continue;
+                u8 recType = b.u8at(dataOff);
+
+                if (recType == 1) {                       // folder
+                    u32 id = b.be32(dataOff + 6);         // dirDirID
+                    if (id && !name.empty() && catEntries < (i64)opt.max_files * 2) {
+                        names[id] = name; parents[id] = parentID; catEntries++;
+                    }
+                } else if (recType == 2) {                // file
+                    if (dataOff + 100 > nodeSize) continue;
+                    RecoveredFile f;
+                    f.id = parentID;
+                    f.parent_id = parentID;
+                    f.name = name;
+                    f.size = b.be32(dataOff + 26);        // filLgLen
+                    f.crtime = hfsTimeToUnix(b.be32(dataOff + 44));
+                    f.mtime  = hfsTimeToUnix(b.be32(dataOff + 48));
+                    f.method = "catalog_btree_walk";
+                    for (int i = 0; i < 3; i++) {         // filExtRec, in allocation blocks
+                        u16 st  = b.be16(dataOff + 74 + (size_t)i * 4);
+                        u16 cnt = b.be16(dataOff + 76 + (size_t)i * 4);
+                        if (!cnt) continue;
+                        i64 off = ((i64)alBlSt + st) * alBlkSiz;
+                        i64 len = (i64)cnt * alBlkSiz;
+                        if (off < 0 || off >= volume) continue;
+                        f.extents.push_back(Extent(off, len));
+                    }
+                    finalizeFile(f, volume);
+                    found.push_back(std::move(f));
+                    if ((i64)found.size() >= opt.max_files) break;
+                }
+                // rtype 3/4 are file/dir thread records — only used for
+                // alias resolution, not for recovery.
+            }
+            if ((i64)found.size() >= opt.max_files) break;
+            node = fLink;
+        }
+        res.bump("catalog_leaf_nodes", leaves);
+
+        auto pathOf = [&](u32 par) -> std::string {
+            std::vector<std::string> parts;
+            u32 cur = par;
+            int g = 0;
+            while (cur > 2 && g++ < 128) {          // 2 = root directory
+                auto n = names.find(cur);
+                if (n == names.end()) break;
+                parts.push_back(n->second);
+                auto p = parents.find(cur);
+                if (p == parents.end()) break;
+                cur = p->second;
+            }
+            if (parts.empty()) return {};
+            std::string out;
+            for (auto it = parts.rbegin(); it != parts.rend(); ++it) { out += '/'; out += *it; }
+            return out;
+        };
+
+        for (auto& f : found) {
+            f.path = pathOf((u32)f.parent_id);
+            if (f.path.empty()) f.path = "/$orphans/" + f.name;
+            res.files.push_back(std::move(f));
+        }
+        prog.setFound((i64)res.files.size());
+        return res;
+    }
+    if (sig != 0x482B && sig != 0x4858) {
         // The alternate volume header lives in the second-to-last sector.
         auto alt = disk.readBlock((u64)std::max<i64>(0, volume - 1024), 512);
         Bytes ab(alt);
@@ -69,6 +219,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
     }
     if (sig == 0x4858) res.filesystem = "hfsx";
+
 
     const u32 blockSize   = vh.be32(40);
     const u32 totalBlocks = vh.be32(44);

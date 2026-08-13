@@ -614,17 +614,18 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     else if (magic == 0x138F) { version = 1; nameLen = 30; }
     else if (magic == 0x2468) { version = 2; nameLen = 14; }
     else if (magic == 0x2478) { version = 2; nameLen = 30; }
+    else if (b.le16(0x18) == 0x4D5A) { version = 3; nameLen = 60; }   // MINIX v3 magic sits at byte 24
     else {
         res.ok = false;
         res.error = "MINIX superblock magic not recognised";
         return res;
     }
 
-    u32 ninodes    = b.le16(0);
-    u32 imapBlocks = b.le16(4);
-    u32 zmapBlocks = b.le16(6);
-    u32 firstData  = b.le16(8);
-    u32 nzones     = (version == 2) ? b.le32(20) : b.le16(2);
+    u32 ninodes = (version == 3) ? b.le32(0)    : b.le16(0);
+    u32 imapBlocks = (version == 3) ? b.le16(6) : b.le16(4);
+    u32 zmapBlocks = (version == 3) ? b.le16(8) : b.le16(6);
+    u32 firstData  = (version == 3) ? b.le16(10) : b.le16(8);
+    u32 nzones     = (version >= 2) ? b.le32(20) : b.le16(2);
     if (ninodes == 0 || imapBlocks == 0) {
         res.ok = false;
         res.error = "implausible MINIX superblock";
@@ -671,7 +672,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 in.gid = ib.u8at(p + 12);
                 in.nlinks = ib.u8at(p + 13);
                 for (int z = 0; z < 9; z++) in.zones.push_back(ib.le16(p + 14 + (size_t)z * 2));
-            } else {
+            } else {   // v2 and v3 share the 64-byte inode layout
                 in.mode = ib.le16(p + 0);
                 if (in.mode == 0) continue;
                 in.nlinks = ib.le16(p + 2);
@@ -702,9 +703,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if ((int)in.zones.size() > direct && in.zones[direct]) {
             auto blk = disk.readBlock((u64)in.zones[direct] * kBlock, kBlock);
             Bytes bb(blk);
-            u32 per = (version == 2) ? kBlock / 4 : kBlock / 2;
+            u32 per = (version >= 2) ? kBlock / 4 : kBlock / 2;
             for (u32 i = 0; i < per; i++) {
-                u32 zn = (version == 2) ? bb.le32((size_t)i * 4) : bb.le16((size_t)i * 2);
+                u32 zn = (version >= 2) ? bb.le32((size_t)i * 4) : bb.le16((size_t)i * 2);
                 if (!zn) continue;
                 i64 off = (i64)zn * kBlock;
                 if (off < 0 || off >= volume) continue;
@@ -730,7 +731,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             auto buf = disk.readBlock((u64)e.offset, std::min<i64>(e.length, 256 * 1024));
             Bytes db(buf);
             for (size_t p = 0; p + entSize <= db.size(); p += entSize) {
-                u32 child = db.le16(p);
+                u32 child = (version == 3) ? db.le32(p) : db.le16(p);
                 if (!child) continue;
                 std::string nm = db.str(p + 2, nameLen);
                 while (!nm.empty() && nm.back() == '\0') nm.pop_back();

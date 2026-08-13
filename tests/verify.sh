@@ -45,12 +45,28 @@ else bad "selftest failed: $("$BIN" selftest 2>&1 | tr '\n' ' ')"; fi
   | awk '{n=$2; sub(/.*\//,"",n); print $1, n}' | sort > "$WORK/expected.md5"
 TOTAL=$(wc -l < "$WORK/expected.md5")
 
+# Classic HFS stores text as LF->CR and hcopy refuses large.bin and
+# compressible.bin, so its expectation diverges from the raw corpus.
+( cd "$SRC" && find . -type f ) | while read -r f; do
+  b=$(basename "$f")
+  [ "$b" = large.bin ] && continue
+  [ "$b" = compressible.bin ] && continue
+  conv=0; case "$f" in *.txt) conv=1;; esac
+  python3 -c "
+import hashlib
+d = open('$SRC/$f','rb').read()
+if $conv: d = d.replace(b'\n', b'\r')
+print(hashlib.md5(d).hexdigest() + ' $b')
+" >> "$WORK/expected-hfs.md5"
+done
+sort -o "$WORK/expected-hfs.md5" "$WORK/expected-hfs.md5"
+
 # --------------------------------------------------------------- detection
 head2 "Filesystem identification"
 declare -A EXPECT=(
   [ext4]=ext4 [ext2]=ext2 [ntfs]=ntfs [fat32]=fat32 [exfat]=exfat
   [btrfs]=btrfs [xfs]=xfs [iso9660]=iso9660 [squashfs]=squashfs [minix]=minix
-  [cramfs]=cramfs [jffs2]=jffs2
+  [cramfs]=cramfs [jffs2]=jffs2 [hfs]=hfs
 )
 for fs in "${!EXPECT[@]}"; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
@@ -61,7 +77,11 @@ done
 
 # --------------------------------------------------------------- extraction
 head2 "Recovery is byte-for-byte identical to the originals"
-for fs in ext4 ext2 ntfs fat32 exfat btrfs xfs iso9660 squashfs cramfs udf jffs2; do
+for pair in "ext4:expected.md5" "ext2:expected.md5" "ntfs:expected.md5" "fat32:expected.md5" \
+            "exfat:expected.md5" "btrfs:expected.md5" "xfs:expected.md5" "iso9660:expected.md5" \
+            "squashfs:expected.md5" "cramfs:expected.md5" "udf:expected.md5" "jffs2:expected.md5" \
+            "hfs:expected-hfs.md5"; do
+  fs="${pair%%:*}"; exp="$WORK/${pair##*:}"
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
   out="$WORK/out-$fs"
   # The UDF fixture is a hybrid image that is also ISO 9660; name the driver.
@@ -69,11 +89,12 @@ for fs in ext4 ext2 ntfs fat32 exfat btrfs xfs iso9660 squashfs cramfs udf jffs2
   "$BIN" recover "$IMG/$fs.img" $forcefs --out "$out" >/dev/null 2>&1
   ( cd "$out" 2>/dev/null && find . -type f ! -name 'ghost-manifest.*' -exec md5sum {} \; ) 2>/dev/null \
     | awk '{n=$2; sub(/.*\//,"",n); print $1, n}' | sort > "$WORK/got-$fs.md5"
-  n=$(comm -12 "$WORK/expected.md5" "$WORK/got-$fs.md5" | wc -l)
-  if [ "$n" -eq "$TOTAL" ]; then ok "$fs: $n/$TOTAL files identical"
+  want=$(wc -l < "$exp")
+  n=$(comm -12 "$exp" "$WORK/got-$fs.md5" | wc -l)
+  if [ "$n" -eq "$want" ]; then ok "$fs: $n/$want files identical"
   else
-    bad "$fs: only $n/$TOTAL files identical"
-    comm -23 "$WORK/expected.md5" "$WORK/got-$fs.md5" | sed 's/^/          missing: /'
+    bad "$fs: only $n/$want files identical"
+    comm -23 "$exp" "$WORK/got-$fs.md5" | sed 's/^/          missing: /'
   fi
 done
 
