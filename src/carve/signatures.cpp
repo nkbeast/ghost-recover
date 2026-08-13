@@ -2276,8 +2276,8 @@ i64 vVhdx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     for (u32 i = 0; i < count; i++) {
         const u8* e = rt.data() + 16 + i * 32;
         u64 fo = 0;
-        for (int k = 7; k >= 0; k--) fo = fo << 8 | e[16 + k];
-        u32 len = (u32)e[24] | (u32)e[25] << 8 | (u32)e[26] << 16 | (u32)e[27] << 24;
+        for (int k = 0; k < 8; k++) fo = fo << 8 | e[16 + k];
+        u32 len = (u32)e[27] | (u32)e[26] << 8 | (u32)e[25] << 16 | (u32)e[24] << 24;
         if (fo == 0 || len == 0) continue;
         // Known region GUIDs: BAT and Metadata Region (MS GUID byte order).
         static const u8 kBATGuid[16]   = {0x66,0x77,0xc2,0x2d,0x23,0xf6,0x00,0x42,
@@ -2932,10 +2932,10 @@ i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 total = 0;
     const i64 kLimit = (i64)1 << 28;
     while (pos < off + max && total < kLimit) {
+        u8 tag = s.byte(pos);
         // Top-level element: tag byte must be 0x30/0x31 (SEQUENCE/SET) for the
         // common .der/.p12 containers; a raw OCTET STRING wrapper is rare
         // (PKCS#12 is a sequence, so accept 0x30/0x31).
-        u8 tag = s.byte(pos);
         if (tag != 0x30 && tag != 0x31) break;
         bool constructed = (tag & 0x20) != 0;
         i64 p = pos + 1;

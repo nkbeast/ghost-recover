@@ -560,6 +560,14 @@ else
   skip "web API checks (curl not installed)"
 fi
 
+# ------------------------------------------------------- carver spec coverage
+head2 "Carver spec coverage (byte-exact fixtures, one per signature)"
+if python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec" >/dev/null 2>&1; then
+  ok "every signature carves its byte-exact fixture"
+else
+  bad "carve-spec mismatches — run: python3 $HERE/carve_spec_check.py --bin $BIN --work $WORK/carve-spec"
+fi
+
 # --------------------------------------------------------------- summary
 printf '\n\033[1m%d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"
 echo "fixtures kept in $FIX"
