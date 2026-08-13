@@ -176,7 +176,17 @@ function render() {
   // put it back — otherwise clicking a file re-renders and jumps to the top.
   const scrollables = $$('#app *').filter(el => el.scrollTop > 0 || el.scrollLeft > 0)
     .map(el => [el.className, el.scrollTop, el.scrollLeft]);
+  // The preview element carries a live <img>/<video>/<audio>/<iframe>/hex view.
+  // Replacing its HTML re-starts the fetch and resets playback, so when the
+  // selection has not actually changed, keep the live node and swap it into
+  // the new tree instead of letting syncPreview reload it from scratch.
+  const oldPreview = $('#preview');
+  const oldKey = oldPreview ? oldPreview.dataset.key : null;
   app.innerHTML = html;
+  const newPreview = $('#preview');
+  if (oldPreview && newPreview && oldKey === previewKey()) {
+    newPreview.parentNode.replaceChild(oldPreview, newPreview);
+  }
   scrollables.forEach(([cls, top, left]) => {
     if (!cls) return;
     const els = $$('.' + cls.split(' ').filter(Boolean).join('.'));
@@ -534,20 +544,39 @@ function enterWorkspace() {
 }
 
 /* -------------------------------------------------------------- workspace */
+// The progress bar is patched in place by pollJob while a job runs — a full
+// render() every 400 ms would restart the preview, blank the details pane and
+// steal focus from the filter input, so only this snippet is ever replaced.
+function jobBarHtml() {
+  if (!(S.job && (S.job.state === 'running' || S.job.state === 'queued'))) return '';
+  const pct = Number(S.job.percent) || 0;
+  return `<div class="jobbar">
+    <span class="pill info">${esc(S.job.kind)}</span>
+    <span class="muted nowrap" style="min-width:190px">${esc(S.job.phase || '')}</span>
+    <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <span class="muted mono">${pct.toFixed(0)}%</span>
+    ${S.job.found ? `<span class="muted">${fmtNum(S.job.found)} found</span>` : ''}
+    <button class="btn sm warn" onclick="cancelJob()">Cancel</button>
+  </div>`;
+}
+
+function updateJobBar() {
+  const bar = $('.jobbar');
+  if (bar) bar.outerHTML = jobBarHtml();
+  const stat = $('.topbar .stat');
+  if (stat) {
+    const busy = S.job && (S.job.state === 'running' || S.job.state === 'queued');
+    stat.innerHTML = `<span class="dot ${busy ? 'red' : 'green'}"></span> ` +
+                     (busy ? esc(S.job.phase || 'working') : 'idle');
+  }
+}
+
 function viewWorkspace() {
   const src = S.source;
   const busy = S.job && (S.job.state === 'running' || S.job.state === 'queued');
   const files = (S.results && S.results.files) || [];
 
-  const jobbar = busy ? `
-    <div class="jobbar">
-      <span class="pill info">${esc(S.job.kind)}</span>
-      <span class="muted nowrap" style="min-width:190px">${esc(S.job.phase || '')}</span>
-      <div class="bar"><i style="width:${(S.job.percent || 0).toFixed(1)}%"></i></div>
-      <span class="muted mono">${(S.job.percent || 0).toFixed(0)}%</span>
-      ${S.job.found ? `<span class="muted">${fmtNum(S.job.found)} found</span>` : ''}
-      <button class="btn sm warn" onclick="cancelJob()">Cancel</button>
-    </div>` : '';
+  const jobbar = busy ? jobBarHtml() : '';
 
   return `
   <div class="toolbar">
@@ -644,7 +673,7 @@ function viewFilters() {
       onkeydown="if(event.key==='Enter'){S.page=0;loadResults()}">
     <select class="input" onchange="S.filter.ext=this.value;S.page=0;loadResults()">
       <option value="">All types</option>
-      ${exts.map(([e, n]) => `<option value="${esc(e === '(none)' ? '' : e)}"
+      ${exts.map(([e, n]) => `<option value="${esc(e)}"
         ${S.filter.ext === e ? 'selected' : ''}>${esc(e)} (${n})</option>`).join('')}
     </select>
     <select class="input" onchange="S.filter.only=this.value;S.page=0;loadResults()">
@@ -787,15 +816,22 @@ function selectFile(i) {
  * re-render caused by anything else does not restart the fetch. The marker
  * lives on the element rather than in S: a render() replaces the pane's HTML,
  * and the new element must be repopulated even though the selection is the
- * same — otherwise the preview is left showing "Loading…" forever. */
+ * same — otherwise the preview is left showing "Loading…" forever. render()
+ * preserves the live element across unchanged re-renders, so this normally
+ * returns before touching the network. */
+function previewKey() {
+  const f = currentFile();
+  return f ? `${S.resultJob}:${f.index}:${S.previewMode}` : 'none';
+}
+
 function syncPreview() {
   const f = currentFile();
   const host = $('#preview');
   if (!host) return;
-  const key = f ? `${S.resultJob}:${f.index}:${S.previewMode}` : 'none';
+  renderDetails(f);
+  const key = previewKey();
   if (host.dataset.key === key) return;
   host.dataset.key = key;
-  renderDetails(f);
   if (!f) return;
   if (S.previewMode === 'hex') return loadHex(f, host);
   return loadPreview(f, host);
@@ -1110,7 +1146,7 @@ function pollJob(id) {
         S.jobPoll = null;
         onJobFinished(r);
       } else {
-        render();
+        updateJobBar();
       }
     } catch (e) {
       clearInterval(S.jobPoll);

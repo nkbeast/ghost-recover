@@ -1575,7 +1575,13 @@ int startServer(const ServerConfig& cfg) {
             const auto& f = stored->files[i];
             if (only == "deleted" && !f.is_deleted) continue;
             if (only == "live" && f.is_deleted) continue;
-            if (!ext.empty() && extensionOf(f.name) != ext) continue;
+            if (!ext.empty()) {
+                // "(none)" is the UI's sentinel for files with no extension at
+                // all; an empty string must stay "no filter".
+                const std::string fext = extensionOf(f.name);
+                const bool match = ext == "(none)" ? fext.empty() : fext == ext;
+                if (!match) continue;
+            }
             if (!q.empty()) {
                 std::string hay = toLower(f.path.empty() ? f.name : f.path);
                 if (hay.find(q) == std::string::npos) continue;
