@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <set>
 #include <thread>
 
 namespace ghost {
@@ -22,6 +23,8 @@ struct Job {
     std::string id;
     std::string kind;        // "scan" | "carve" | "deep" | "extract" | "image" | ...
     std::string target;      // device/image path, for display
+    u64         seq = 0;     // submission order; the serialisation gate runs
+                             // the lowest outstanding seq first (FIFO)
     std::atomic<JobState> state{JobState::Queued};
     Progress    progress;
     // Written by the worker thread, read by the HTTP thread while the job is
@@ -49,6 +52,10 @@ public:
     static JobManager& instance();
 
     // Starts `fn` on a worker thread and returns the new job id immediately.
+    // Heavy jobs (scan/carve/deep/extract/image/raid) are serialised: at most
+    // one runs at a time and the rest wait in "queued" state. Two concurrent
+    // scans of a large disk each hold their whole result in RAM, so on a 1 GiB
+    // box a second job was the difference between slow and OOM-killed.
     std::string submit(const std::string& kind, const std::string& target, JobFn fn);
 
     std::shared_ptr<Job> get(const std::string& id) const;
@@ -67,6 +74,18 @@ private:
     std::vector<std::thread> workers_;   // joined on shutdown, guarded by mu_
     u64  counter_ = 0;
     bool stopping_ = false;
+
+    // Serialisation gate: only the job whose seq matches nextToRun_ may run;
+    // everyone else waits on gateCv_ holding no lock at all. When the turn is
+    // passed (completion or a cancelled job leaving the queue) nextToRun_
+    // advances past any cancelled entries still in line, so jobs run strictly
+    // in submission order and a cancel can never wedge the queue.
+    std::mutex              gate_;
+    std::condition_variable gateCv_;
+    u64                     nextToRun_ = 1;
+    std::set<u64>           skipped_;   // cancelled-while-queued seqs (guarded by gate_)
+
+    void advanceLine();                 // caller holds gate_
 };
 
 }  // namespace ghost

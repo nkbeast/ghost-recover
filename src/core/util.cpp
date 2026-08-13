@@ -649,4 +649,15 @@ i64 systemRamKB() {
     return 0;
 }
 
+// Bound in-memory job results so a scan can never silently eat the whole box:
+// each recovered file costs roughly 1.2 KiB resident (name/path strings, extent
+// list, flags), so the default caps a result at ~RAM/4. On 1 GiB that is ~200k
+// files, on 16 GiB ~3.3 M. A box with unknown RAM keeps the previous 500k.
+i64 defaultMaxFiles() {
+    const i64 kb = systemRamKB();
+    if (kb <= 0) return 500000;
+    i64 n = kb * 1024 / 4 / 1280;
+    return std::clamp<i64>(n, 50000, 5000000);
+}
+
 }  // namespace ghost

@@ -198,10 +198,15 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     std::atomic<size_t> nextUnit{0};
     std::atomic<i64> scanned{0};
     std::atomic<bool> overflow{false};
-    // 2 M candidates ≈ 32 MB of Candidate entries (plus the sorted offsets and
-    // the dedup copy transiently). 8 M was ~192 MB on a box that may only have
-    // 1 GiB; on a real disk 2 M candidates still means one hit per 256 KiB.
-    const size_t kMaxCandidates = 2 * 1000 * 1000;
+    // See the RAM-scaling comment below: the cap is lowered on small boxes so
+    // candidates + validated array + the resident scan result fit in RAM.
+    size_t kMaxCandidates = 2 * 1000 * 1000;
+    {
+        const i64 ramGB = std::max<i64>(1, systemRamKB() / (1024 * 1024));
+        size_t cap = (size_t)std::min<i64>(2LL * 1000 * 1000,
+                                           std::max<i64>(500LL * 1000, 500LL * 1000 * ramGB));
+        kMaxCandidates = cap;
+    }
 
     auto worker = [&]() {
         auto reader = disk.clone();
@@ -397,13 +402,20 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     i64 acceptedStart = -1;
     bool acceptedValidated = false;   // only a structurally verified file masks others
 
-    prog.set(0, (i64)candidates.size());
+    // Progress runs 0..2n across the two phases so the bar is monotonic and
+    // never fakes: validation drives [0, n), the serial walk continues [n, 2n).
+    // Without this the validation phase — on a flood disk the bulk of the wall
+    // time — sat at 0% and the walk restarted the bar from zero, so the UI
+    // looked frozen or rewinding.
+    const i64 progTotal = 2 * (i64)candidates.size();
+    prog.set(0, progTotal);
 
     // Phase A: validate every candidate in parallel. Pure read work, so the
     // whole set goes at once (slabs only bound how many reads each worker
     // claims). No masking here: that decision belongs to the serial pass.
     {
         std::atomic<size_t> nextCand{0};
+        std::atomic<size_t> validatedCount{0};
         std::vector<std::thread> pool;
         for (int i = 0; i < threads; i++)
             pool.emplace_back([&]() {
@@ -416,6 +428,8 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                     size_t end = std::min(beg + kGrain, candidates.size());
                     for (size_t ci = beg; ci < end; ci++)
                         examine(ci, candidates[ci], *reader, src);
+                    validatedCount += end - beg;
+                    prog.set((i64)validatedCount.load(), progTotal);
                 }
             });
         for (auto& t : pool) t.join();
@@ -450,7 +464,8 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     // whole-file dedup, and final stream-out are all ordered decisions.
     for (size_t ci = 0; ci < candidates.size(); ci++) {
         if (prog.cancelled()) break;
-        if ((ci & 1023) == 0) prog.set((i64)ci, (i64)candidates.size());
+        if ((ci & 1023) == 0)
+            prog.set((i64)candidates.size() + (i64)ci, progTotal);
         if ((i64)result.files.size() >= opt.max_files) break;
 
         const Candidate& cand = candidates[ci];

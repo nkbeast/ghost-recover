@@ -172,7 +172,7 @@ int cmdScan(const Args& a) {
     // --limit caps how many rows are printed; the scan itself is not truncated,
     // so the reported totals always describe the whole volume.
     const i64 showLimit = a.getInt("--limit", 200);
-    opt.max_files = a.getInt("--max-files", 500000);
+    opt.max_files = a.getInt("--max-files", defaultMaxFiles());
     Progress prog;
     ScanResult r = scanVolume(*disk, a.get("--fs"), opt, prog);
     if (!r.ok) {
@@ -404,6 +404,16 @@ int cmdCarvers(const Args&) {
 
 int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
+
+    // glibc inflates one ~64 MB virtual malloc arena per thread (up to 8x
+    // cores); on a 1 GiB box with strict overcommit that reservation alone
+    // exhausts the address space before any real work. Cap the arenas early —
+    // the env var is read when the first extra arena is created.
+    {
+        const i64 ramGB = ghost::systemRamKB() / (1024 * 1024);
+        if (ramGB > 0 && ramGB <= 4)
+            ::setenv("MALLOC_ARENA_MAX", std::to_string(std::clamp<i64>(ramGB, 2, 4)).c_str(), 1);
+    }
 
     Args args;
     for (int i = 1; i < argc; i++) {

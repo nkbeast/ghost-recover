@@ -94,7 +94,12 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             // merely contains FF xx. Do not trust segment lengths here —
             // step to the next candidate marker byte.
             p++;
-            if (p - off > 512 * 1024 && !sawSOF) return -1;
+            // 128 KiB of marker scanning without any SOF: random data that
+            // merely contains FF D8 FF (or a payload full of FF xx). 512 KiB
+            // cost ~125 GB of window reads on a flood of false candidates —
+            // the exact case that hangs a 1 GiB box for minutes. Real JPEGs
+            // reach SOF within the first few KiB.
+            if (p - off > 128 * 1024 && !sawSOF) return -1;
             continue;
         }
         u16 len = s.be16(p + 2);

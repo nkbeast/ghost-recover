@@ -25,6 +25,14 @@ JobManager& JobManager::instance() {
 
 JobManager::~JobManager() { shutdown(); }
 
+// Moves the gate's turn forward past any cancelled-while-queued entries.
+// Caller must hold gate_.
+void JobManager::advanceLine() {
+    do {
+        nextToRun_++;
+    } while (skipped_.erase(nextToRun_));
+}
+
 void JobManager::shutdown() {
     {
         const std::lock_guard<std::mutex> lk(mu_);
@@ -53,19 +61,58 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
         job->id = buf;
         job->kind = kind;
         job->target = target;
+        job->seq = counter_;
         job->created_ms = nowMs();
         jobs_[job->id] = job;
     }
 
-    std::thread worker([job, fn]() {
+    std::thread worker([this, job, fn]() {
+        // Wait for the serialisation gate. The state stays Queued while
+        // waiting, so the UI shows an honest "queued" instead of a fake
+        // "running" that never advances. Only the job with the lowest
+        // outstanding seq runs; the rest wait in submission order.
+        bool skip = false;
         {
-            // State and timing are recorded under the same lock as the
-            // terminal store below; a concurrent cancel()/prune() therefore
-            // never sees a job mid-transition or stuck on "running" after it
-            // already stored its result.
-            const std::lock_guard<std::mutex> lk(job->mu);
-            job->state = JobState::Running;
-            job->started_ms = nowMs();
+            std::unique_lock<std::mutex> lk(gate_);
+            // wait_for instead of wait: cancel() only sets a flag and can
+            // never notify the shared gate, so a queued job must re-check its
+            // own cancellation every so often while it waits its turn. The
+            // predicate form returns the predicate's value, so on timeout
+            // (false) the loop simply keeps waiting.
+            while (!(stopping_ || job->progress.cancelled() ||
+                     job->seq == nextToRun_))
+                gateCv_.wait_for(lk, std::chrono::milliseconds(500));
+            skip = stopping_ || job->progress.cancelled();
+            if (skip) {
+                // Record our place in the line so the turn-holder's
+                // advanceLine() can jump straight past us — even if we are not
+                // the holder (the line may not reach our seq for a while).
+                skipped_.insert(job->seq);
+                if (job->seq == nextToRun_)
+                    advanceLine();      // we were the holder: pass the turn on
+            } else {
+                {
+                    // State and timing are recorded under the same lock as the
+                    // terminal store below; a concurrent cancel()/prune()
+                    // therefore never sees a job mid-transition or stuck on
+                    // "running" after it already stored its result.
+                    const std::lock_guard<std::mutex> jl(job->mu);
+                    job->state = JobState::Running;
+                    job->started_ms = nowMs();
+                }
+            }
+            lk.unlock();
+            if (skip) {
+                gateCv_.notify_all();
+                job->finished_ms = nowMs();
+                {
+                    const std::lock_guard<std::mutex> jl(job->mu);
+                    job->state = JobState::Cancelled;
+                    job->error = "cancelled";
+                }
+                job->progress.setPhase("cancelled");
+                return;
+            }
         }
         std::string out;
         std::string err;
@@ -81,7 +128,7 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
             // Result and state are decided under one lock so a concurrent
             // cancel() can never observe a "running" job that already stored
             // a terminal state (or vice versa).
-            const std::lock_guard<std::mutex> lk(job->mu);
+            const std::lock_guard<std::mutex> jl(job->mu);
             job->result_json = out;
             if (!err.empty()) job->error = err;
             if (!err.empty())                   job->state = JobState::Failed;
@@ -89,6 +136,11 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
             else                                job->state = JobState::Done;
         }
         job->progress.setPhase(jobStateName(job->state.load()));
+        {
+            const std::lock_guard<std::mutex> gl(gate_);
+            advanceLine();           // pass the turn to the next queued job
+        }
+        gateCv_.notify_all();
     });
 
     // Tracked rather than detached so shutdown() can join every worker.

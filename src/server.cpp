@@ -178,7 +178,7 @@ public:
         // In-flight downloads are unaffected: the content providers hold their
         // own shared_ptr to the entry.
         const i64 budget = std::min<i64>(2LL * 1024 * 1024 * 1024,
-                                         std::max<i64>(512LL * 1024 * 1024,
+                                         std::max<i64>(128LL * 1024 * 1024,
                                                        systemRamKB() * 1024 / 5));
         i64 total = 0;
         for (const auto& kv : results_) total += storedResultBytes(kv.second);
@@ -387,9 +387,9 @@ ScanOptions readScanOptions(const json::Value& body) {
     o.orphans       = body.getBool("orphans", true);
     o.include_live  = body.getBool("include_live", true);
     o.resolve_paths = body.getBool("resolve_paths", true);
-    o.max_files     = body.getInt("max_files", 500000);
+    o.max_files     = body.getInt("max_files", defaultMaxFiles());
     if (o.max_files < 1) o.max_files = 1;
-    if (o.max_files > 5000000) o.max_files = 5000000;
+    if (o.max_files > defaultMaxFiles()) o.max_files = defaultMaxFiles();
     return o;
 }
 
@@ -887,6 +887,17 @@ int startServer(const ServerConfig& cfg) {
     const std::string webRoot = webRootPath(cfg.web_root);
 
     httplib::Server svr;
+    // Bound the HTTP pool to what a single-user local UI needs. The default
+    // (cores - 1, growing) spawns a thread per core just to answer API calls
+    // the scan/carve workers never use; each 8 MB stack plus a malloc arena
+    // eats address space a 1 GiB box cannot spare. 4-8 base threads is ample.
+    {
+        const i64 ramGB = systemRamKB() / (1024 * 1024);
+        const size_t base = (size_t)std::clamp<i64>(ramGB > 0 ? ramGB : 4, 4, 8);
+        svr.new_task_queue = [base]() {
+            return new httplib::ThreadPool(base, base * 4);
+        };
+    }
     // Without SO_REUSEADDR the privilege handover fails: the old instance's
     // socket lingers in TIME_WAIT for 60 seconds (the browser keeps polling
     // /api/health), and the elevated instance gives up after 15. SO_REUSEPORT

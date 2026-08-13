@@ -126,5 +126,7 @@ i64 nowMs();
 
 // Physical RAM in KiB as reported by /proc/meminfo, 0 if it cannot be read.
 i64 systemRamKB();
+// RAM-scaled cap for in-memory scan/result lists (see util.cpp).
+i64 defaultMaxFiles();
 
 }  // namespace ghost
