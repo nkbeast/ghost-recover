@@ -977,7 +977,7 @@ reg('PSD', make_psd, 'image')
 reg('XCF', make_stub(b'gimp xcf '), 'image')
 reg('JP2', make_stub(bytes([0x00, 0x00, 0x00, 0x0C]) + b'jP\x20\x20'), 'image')
 reg('J2K', make_stub(bytes([0xFF, 0x4F, 0xFF, 0x51])), 'image')
-reg('JXL', make_stub(bytes([0xFF, 0x0A])), 'image')
+reg('JXL', lambda _n: bytes([0xFF, 0x0A]) + struct.pack('>I', 66) + b'\x00' * 66, 'image')  # codestream: 4-byte BE size + zero-prefixed payload
 reg('JXL_ISO', make_stub(bytes([0x00, 0x00, 0x00, 0x0C]) + b'JXL\x20'), 'image')
 reg('QOI', make_qoi, 'image')
 reg('DDS', make_stub(b'DDS '), 'image')
@@ -1145,7 +1145,7 @@ reg('PKCS12', make_der, 'crypto')
 reg('JKS', make_stub(bytes([0xFE, 0xED, 0xFE, 0xED])), 'crypto')
 reg('KDBX', make_stub(bytes([0x03, 0xD9, 0xA2, 0x9A, 0x67, 0xFB, 0x4B, 0xB5])), 'crypto')
 reg('KDB', make_stub(bytes([0x03, 0xD9, 0xA2, 0x9A, 0x65, 0xFB, 0x4B, 0xB5])), 'crypto')
-reg('GPG_KEYRING', make_stub(bytes([0x99, 0x01])), 'crypto')
+reg('GPG_KEYRING', lambda _n: bytes([0x99, 0x01, 0x1D, 0x01]) + b'\x00' * 284, 'crypto')  # self-consistent 288-byte key: len 0x011D=288-3, v1 body
 reg('BITCOIN_WALLET', make_stub(bytes([0x00, 0x05, 0x31, 0x62, 0x00, 0x09, 0x00, 0x00])), 'crypto')
 
 # ---------------- executables ----------------

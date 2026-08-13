@@ -756,14 +756,38 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     i64 lastEnd = p;
     int frames = 0, layer0 = -1, ver0 = -1, sr0 = -1;
+    const i64 kResync = 32 * 1024;   // bridge small overwritten regions
     while (p + 4 <= off + max && frames < 4000000) {
         auto f = s.read(p, 4);
-        if (f.size() < 4 || f[0] != 0xFF) break;
+        if (f.size() < 4) break;
         int layer = 0, ver = 0, sr = 0;
-        int size = mpegFrameSize(f[1], f[2], f[3], &layer, &ver, &sr);
-        if (!size) break;
+        int size = (f[0] == 0xFF) ? mpegFrameSize(f[1], f[2], f[3], &layer, &ver, &sr) : 0;
+        if (size && frames > 0 && (layer != layer0 || ver != ver0 || sr != sr0))
+            break;   // a different stream layout — hard stop, not a gap
+        if (!size) {
+            // Deleted files are often partially overwritten in cluster-sized
+            // chunks. A bad frame used to end the file, carving every run of
+            // frames as a separate "MP3_FRAME_0000N". Resync within a bounded
+            // window instead, requiring a frame with the exact same layout.
+            if (frames == 0) break;
+            const i64 scanEnd = std::min<i64>(off + max, p + kResync);
+            auto win = s.read(p, scanEnd - p);
+            bool found = false;
+            for (i64 i = 0; i + 4 <= (i64)win.size(); i++) {
+                if (win[(size_t)i] != 0xFF) continue;
+                int l2 = 0, v2 = 0, s2 = 0;
+                int sz2 = mpegFrameSize(win[(size_t)(i + 1)], win[(size_t)(i + 2)],
+                                        win[(size_t)(i + 3)], &l2, &v2, &s2);
+                if (sz2 && l2 == layer0 && v2 == ver0 && s2 == sr0) {
+                    p += i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) break;
+            continue;
+        }
         if (frames == 0) { layer0 = layer; ver0 = ver; sr0 = sr; }
-        else if (layer != layer0 || ver != ver0 || sr != sr0) break;
         if (p + size > off + max) break;
         lastEnd = p + size;
         p = lastEnd;
@@ -781,6 +805,7 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off, lastEnd = off;
     int frames = 0, sr0 = -1, prof0 = -1;
+    const i64 kResync = 32 * 1024;
     while (p + 7 <= off + max && frames < 4000000) {
         auto h = s.read(p, 7);
         if (h.size() < 7 || h[0] != 0xFF || (h[1] & 0xF0) != 0xF0) break;
@@ -795,8 +820,75 @@ i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         lastEnd = p + len;
         p = lastEnd;
         frames++;
+        if (frames < 4) continue;
+        // Peek the next frame header; if it is not a valid frame of the same
+        // layout, the bytes in between were overwritten. Resync over a bounded
+        // window instead of fragmenting the file at the first bad byte
+        // (deleted files are usually overwritten in cluster-sized chunks).
+        auto nxt = s.read(p, 7);
+        bool gap = nxt.size() < 7;
+        if (!gap) {
+            u32 len2 = ((u32)(nxt[3] & 0x03) << 11) | ((u32)nxt[4] << 3) |
+                       ((u32)(nxt[5] >> 5) & 7);
+            int sr2 = (nxt[2] >> 2) & 0xF;
+            int prof2 = (nxt[2] >> 6) & 3;
+            gap = nxt[0] != 0xFF || (nxt[1] & 0xF0) != 0xF0 || len2 < 7 ||
+                  len2 > 8192 || sr2 != sr0 || prof2 != prof0;
+        }
+        if (gap) {
+            const i64 scanEnd = std::min<i64>(off + max, p + kResync);
+            auto win = s.read(p, scanEnd - p);
+            bool found = false;
+            for (i64 i = 0; i + 7 <= (i64)win.size(); i++) {
+                if (win[(size_t)i] != 0xFF || (win[(size_t)(i + 1)] & 0xF0) != 0xF0) continue;
+                u32 l2 = ((u32)(win[(size_t)(i + 3)] & 0x03) << 11) |
+                         ((u32)win[(size_t)(i + 4)] << 3) | ((u32)(win[(size_t)(i + 5)] >> 5) & 7);
+                if (l2 < 7 || l2 > 8192) continue;
+                int s2 = (win[(size_t)(i + 2)] >> 2) & 0xF;
+                int pf2 = (win[(size_t)(i + 2)] >> 6) & 3;
+                if (s2 == sr0 && pf2 == prof0 && p + i + (i64)l2 <= off + max) {
+                    p += i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) break;
+        }
     }
     if (frames < 4) return -1;
+    return lastEnd - off;
+}
+
+// --- JPEG XL: the raw codestream carries its size in the header. ------------
+i64 vJxl(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto h = s.read(off, 7);
+    if (h.size() < 7) return -1;
+    if (h[0] != 0xFF || h[1] != 0x0A) return -1;
+    u32 len = ((u32)h[2] << 24) | ((u32)h[3] << 16) | ((u32)h[4] << 8) | (u32)h[5];
+    if (len < 8 || len > max - 6) return -1;
+    // A conforming codestream opens with a zero byte (entropy-coded layer
+    // header); random data fails this almost always.
+    if (h[6] != 0x00) return -1;
+    return 6 + (i64)len;
+}
+
+// --- PGP keyring: walk the old-format public-key packet chain. --------------
+i64 vGpg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 p = off, lastEnd = off;
+    int keys = 0;
+    while (p + 3 <= off + max && keys < 1000000) {
+        auto h = s.read(p, 3);
+        if (h.size() < 3) break;
+        if (h[0] != 0x99 && h[0] != 0x98) break;   // pubkey / seckey packet
+        int len = ((int)h[1] << 8) | h[2];
+        if (len < 269 || len > 8192) break;        // key body length is bounded
+        auto b = s.read(p + 3, 1);
+        if (b.empty() || (b[0] != 0x01 && b[0] != 0x02)) break;
+        lastEnd = p + 3 + len;
+        p = lastEnd;
+        keys++;
+    }
+    if (keys == 0) return -1;
     return lastEnd - off;
 }
 
@@ -3237,7 +3329,7 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("XCF", "xcf", "image", S("gimp xcf "), 512*MB));
     add(mk("JP2", "jp2", "image", B({0x00,0x00,0x00,0x0C,'j','P',0x20,0x20}), 256*MB));
     add(mk("J2K", "j2k", "image", B({0xFF,0x4F,0xFF,0x51}), 256*MB));
-    add(mk("JXL", "jxl", "image", B({0xFF,0x0A}), 256*MB));
+    add(mk("JXL", "jxl", "image", B({0xFF,0x0A}), 256*MB, SizeMode::Header, vJxl));
     add(mk("JXL_ISO", "jxl", "image", B({0x00,0x00,0x00,0x0C,'J','X','L',0x20}), 256*MB));
     add(mk("QOI", "qoi", "image", S("qoif"), 256*MB, SizeMode::Heuristic, vQoi));
     add(mk("DDS", "dds", "image", S("DDS "), 512*MB));
@@ -3523,7 +3615,7 @@ std::vector<CarveSpec> buildRegistry() {
     add(mk("JKS", "jks", "crypto", B({0xFE,0xED,0xFE,0xED}), 16*MB));
     add(mk("KDBX", "kdbx", "crypto", B({0x03,0xD9,0xA2,0x9A,0x67,0xFB,0x4B,0xB5}), 256*MB));
     add(mk("KDB", "kdb", "crypto", B({0x03,0xD9,0xA2,0x9A,0x65,0xFB,0x4B,0xB5}), 256*MB));
-    add(mk("GPG_KEYRING", "gpg", "crypto", B({0x99,0x01}), 16*MB));
+    add(mk("GPG_KEYRING", "gpg", "crypto", B({0x99,0x01}), 16*MB, SizeMode::FrameStream, vGpg));
     add(mk("BITCOIN_WALLET", "dat", "crypto", B({0x00,0x05,0x31,0x62,0x00,0x09,0x00,0x00}), 512*MB));
 
     // ---------------- executables ----------------

@@ -1035,12 +1035,20 @@ async function loadPreview(f, host) {
     return;
   }
   if (VID.includes(ext)) {
+    // A carved video's true size is unknown: feeding a multi-GB stream to
+    // the <video> element can balloon the renderer's memory and crash the
+    // tab. The engine holds its result memory meanwhile, so the GUI appears
+    // wedged. Cap the preview stream (the server clamps at 256 MB) and serve
+    // the complete file through Download instead.
     const video = document.createElement('video');
-    video.src = unlimited;
+    video.src = contentUrl(f.index, 256 * 1024 * 1024);
     video.controls = true;
-    video.preload = 'metadata';
+    video.preload = 'none';
     video.onerror = bail;
-    host.innerHTML = partialWarn(f);
+    host.innerHTML = partialWarn(f) +
+      (f.size > 256 * 1024 * 1024
+        ? '<div class="empty" style="margin-bottom:10px">Previewing the first 256 MB. Use Download for the complete file.</div>'
+        : '');
     host.appendChild(video);
     return;
   }
