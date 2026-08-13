@@ -756,6 +756,7 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     i64 lastEnd = p;
     int frames = 0, layer0 = -1, ver0 = -1, sr0 = -1;
+    int consecResync = 0;   // random data must not chain through resyncs
     const i64 kResync = 32 * 1024;   // bridge small overwritten regions
     while (p + 4 <= off + max && frames < 4000000) {
         auto f = s.read(p, 4);
@@ -768,23 +769,31 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             // Deleted files are often partially overwritten in cluster-sized
             // chunks. A bad frame used to end the file, carving every run of
             // frames as a separate "MP3_FRAME_0000N". Resync within a bounded
-            // window instead, requiring a frame with the exact same layout.
+            // window instead, requiring a frame of the exact same layout whose
+            // successor parses too — one lucky byte pattern proves nothing.
             if (frames == 0) break;
             const i64 scanEnd = std::min<i64>(off + max, p + kResync);
             auto win = s.read(p, scanEnd - p);
             bool found = false;
-            for (i64 i = 0; i + 4 <= (i64)win.size(); i++) {
+            for (i64 i = 0; i + 8 <= (i64)win.size(); i++) {
                 if (win[(size_t)i] != 0xFF) continue;
                 int l2 = 0, v2 = 0, s2 = 0;
                 int sz2 = mpegFrameSize(win[(size_t)(i + 1)], win[(size_t)(i + 2)],
                                         win[(size_t)(i + 3)], &l2, &v2, &s2);
-                if (sz2 && l2 == layer0 && v2 == ver0 && s2 == sr0) {
-                    p += i;
-                    found = true;
-                    break;
-                }
+                if (!sz2 || l2 != layer0 || v2 != ver0 || s2 != sr0) continue;
+                i64 nxt = i + sz2;
+                if (nxt + 4 > (i64)win.size()) break;
+                if (win[(size_t)nxt] != 0xFF) continue;
+                int l3 = 0, v3 = 0, s3 = 0;
+                int sz3 = mpegFrameSize(win[(size_t)(nxt + 1)], win[(size_t)(nxt + 2)],
+                                        win[(size_t)(nxt + 3)], &l3, &v3, &s3);
+                if (!sz3 || l3 != layer0 || v3 != ver0 || s3 != sr0) continue;
+                p += i;
+                found = true;
+                break;
             }
             if (!found) break;
+            if (++consecResync >= 4) break;
             continue;
         }
         if (frames == 0) { layer0 = layer; ver0 = ver; sr0 = sr; }
@@ -792,6 +801,7 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         lastEnd = p + size;
         p = lastEnd;
         frames++;
+        consecResync = 0;
     }
     if (frames < 3) return -1;
     // ID3v1 trailer, if present.
@@ -805,6 +815,7 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off, lastEnd = off;
     int frames = 0, sr0 = -1, prof0 = -1;
+    int consecResync = 0;
     const i64 kResync = 32 * 1024;
     while (p + 7 <= off + max && frames < 4000000) {
         auto h = s.read(p, 7);
@@ -820,6 +831,7 @@ i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         lastEnd = p + len;
         p = lastEnd;
         frames++;
+        consecResync = 0;
         if (frames < 4) continue;
         // Peek the next frame header; if it is not a valid frame of the same
         // layout, the bytes in between were overwritten. Resync over a bounded
@@ -846,13 +858,20 @@ i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 if (l2 < 7 || l2 > 8192) continue;
                 int s2 = (win[(size_t)(i + 2)] >> 2) & 0xF;
                 int pf2 = (win[(size_t)(i + 2)] >> 6) & 3;
-                if (s2 == sr0 && pf2 == prof0 && p + i + (i64)l2 <= off + max) {
-                    p += i;
-                    found = true;
-                    break;
-                }
+                if (s2 > 12 || s2 != sr0 || pf2 != prof0) continue;
+                i64 nxt = i + (i64)l2;
+                if (nxt + 7 > (i64)win.size()) break;
+                if (win[(size_t)nxt] != 0xFF || (win[(size_t)(nxt + 1)] & 0xF0) != 0xF0) continue;
+                u32 l3 = ((u32)(win[(size_t)(nxt + 3)] & 0x03) << 11) |
+                         ((u32)win[(size_t)(nxt + 4)] << 3) | ((u32)(win[(size_t)(nxt + 5)] >> 5) & 7);
+                if (l3 < 7 || l3 > 8192) continue;
+                int s3 = (win[(size_t)(nxt + 2)] >> 2) & 0xF;
+                int pf3 = (win[(size_t)(nxt + 2)] >> 6) & 3;
+                if (s3 != sr0 || pf3 != prof0) continue;
+                if (p + i + (i64)l2 <= off + max) { p += i; found = true; break; }
             }
             if (!found) break;
+            if (++consecResync >= 4) break;
         }
     }
     if (frames < 4) return -1;
@@ -906,9 +925,29 @@ i64 vAc3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     };
     i64 p = off, lastEnd = off;
     int frames = 0, fscod0 = -1;
+    int consecResync = 0;
+    const i64 kResync = 32 * 1024;
     while (p + 6 <= off + max && frames < 2000000) {
         auto h = s.read(p, 6);
-        if (h.size() < 6 || h[0] != 0x0B || h[1] != 0x77) break;
+        if (h.size() < 6 || h[0] != 0x0B || h[1] != 0x77) {
+            // Overwritten region: resync like vMp3/vAac instead of
+            // fragmenting the file at the first bad frame.
+            if (frames == 0) break;
+            const i64 scanEnd = std::min<i64>(off + max, p + kResync);
+            auto win = s.read(p, scanEnd - p);
+            bool found = false;
+            for (i64 i = 0; i + 6 <= (i64)win.size(); i++) {
+                if (win[(size_t)i] != 0x0B || win[(size_t)(i + 1)] != 0x77) continue;
+                int f2 = (win[(size_t)(i + 4)] >> 6) & 3;
+                int fs2 = win[(size_t)(i + 4)] & 0x3F;
+                if (f2 != fscod0 || f2 == 3 || fs2 > 37) continue;
+                i64 sz2 = (i64)kFrameSizes[fs2][f2] * 2;
+                if (p + i + sz2 <= off + max) { p += i; found = true; break; }
+            }
+            if (!found) break;
+            if (++consecResync >= 4) break;
+            continue;
+        }
         int fscod = (h[4] >> 6) & 3;
         int frmsizecod = h[4] & 0x3F;
         if (fscod == 3 || frmsizecod > 37) break;
@@ -919,6 +958,7 @@ i64 vAc3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         lastEnd = p + size;
         p = lastEnd;
         frames++;
+        consecResync = 0;
     }
     if (frames < 4) return -1;
     return lastEnd - off;
@@ -1099,6 +1139,8 @@ i64 vAmr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     static const int kWb[16] = {17,23,32,36,40,46,50,58,60,5,0,0,0,0,0,0};
     int frames = 0;
     bool real = false;   // any non-zero frame TOC seen so far
+    int consecResync = 0;
+    const i64 kResync = 8 * 1024;
     while (p < off + max && frames < 2000000) {
         u8 toc = s.byte(p);
         int mode = (toc >> 3) & 0xF;
@@ -1112,9 +1154,25 @@ i64 vAmr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (toc != 0) real = true;
         if (real && frames >= 4 && toc == 0 && b1 == 0 && b2 == 0 && b3 == 0) break;
         int sz = wb ? kWb[mode] : kNb[mode];
-        if (sz == 0) break;
+        if (sz == 0) {
+            // Invalid/future frame mode: overwritten region. Resync over a
+            // bounded window (same rationale as vMp3/vAac/vAc3).
+            if (frames < 4) break;
+            const i64 scanEnd = std::min<i64>(off + max, p + kResync);
+            auto win = s.read(p, scanEnd - p);
+            bool found = false;
+            for (i64 i = 0; i < (i64)win.size(); i++) {
+                int m2 = (win[(size_t)i] >> 3) & 0xF;
+                int s2 = wb ? kWb[m2] : kNb[m2];
+                if (m2 < 15 && s2 > 0) { p += i; found = true; break; }
+            }
+            if (!found) break;
+            if (++consecResync >= 4) break;
+            continue;
+        }
         p += 1 + sz;
         frames++;
+        consecResync = 0;
     }
     if (frames < 4) return -1;
     return p - off;
