@@ -186,6 +186,17 @@ def make_jpeg(_):
     return b'\xFF\xD8' + seg + b'\xFF\xD9'
 
 
+def make_jpeg_eoi_tail(_):
+    # Entropy data with an unescaped EOI followed by a well-formed entropy
+    # continuation (every FF stuffed) and a final EOI: the later EOI is the
+    # real end ("data after EOI"), the spurious one must be skipped.
+    seg = b'\xFF\xC0' + u16be(11) + bytes([8, 0, 8, 0, 8, 1, 0x11, 0])
+    seg += b'\xFF\xDA' + u16be(8) + junk(8)
+    head = b'\xFF\xD8' + seg
+    entropy = b'\x11\x22\x33' + b'\xFF\x00\x44\x55' + b'\xFF\xFF\x66\x77' + junk(64)
+    return head + entropy + b'\xFF\xD9' + b'\x88\x99' + b'\xFF\x00\xAA' + junk(128) + b'\xFF\xD9'
+
+
 def make_png(_):
     b = bytearray()
     b += bytes([0x89]) + b'PNG' + bytes([0x0D, 0x0A, 0x1A, 0x0A])
@@ -988,6 +999,7 @@ def reg(name, builder, cat):
 
 # ---------------- images ----------------
 reg('JPEG', make_jpeg, 'image')
+reg('JPEG_EOI_TAIL', make_jpeg_eoi_tail, 'image')
 reg('PNG', make_png, 'image')
 reg('GIF89a', lambda n: make_gif(b'GIF89a'), 'image')
 reg('GIF87a', lambda n: make_gif(b'GIF87a'), 'image')

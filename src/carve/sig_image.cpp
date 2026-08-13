@@ -32,6 +32,32 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 2;
     int segments = 0;
     bool sawSOF = false;
+    // "Data after EOI": files that were edited or repaired in place can carry
+    // a raw continuation of the entropy stream past an unescaped EOI. The
+    // later EOI is only trusted as the real end when the whole span between
+    // the two is well-formed entropy data — every FF stuffed as FF 00 / FF FF
+    // or a restart marker, with no silent run longer than 1 MiB (zeros and
+    // file-system gaps are not entropy data). Any other unescaped FF (a gap,
+    // a new SOI, a segment marker) ends the scan at the first EOI, so a real
+    // file followed by unrelated bytes still carves exactly as before.
+    const i64 kTailMax = 64 * 1024 * 1024;
+    const i64 kNoFFRun = 1024 * 1024;
+    auto eoiEnd = [&](i64 eoiPos) -> i64 {
+        i64 end = eoiPos + 2, last = end, j = end, lastFF = end;
+        while (j + 1 < off + max && j - end < kTailMax) {
+            if (s.byte(j) != 0xFF) {
+                j++;
+                if (j - lastFF > kNoFFRun) break;
+                continue;
+            }
+            lastFF = j;
+            u8 m = s.byte(j + 1);
+            if (m == 0x00 || m == 0xFF || (m >= 0xD0 && m <= 0xD7)) { j += 2; continue; }
+            if (m == 0xD9) { last = j + 2; j += 2; continue; }
+            break;
+        }
+        return last;
+    };
     // A start-of-frame header is the only reliable anchor for the size of a
     // JPEG: the compressed data is bounded by the uncompressed image mass,
     // W x H pixels x ~2 bytes. Everything the walk does must stay inside a
@@ -59,7 +85,7 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         }
         u8 marker = s.byte(p + 1);
         if (marker == 0xFF) { p++; continue; }
-        if (marker == 0xD9) return (p + 2) - off;            // EOI
+        if (marker == 0xD9) return eoiEnd(p) - off;            // EOI
         if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
         if (!markerOk(marker)) {
             // A byte that is not a real marker at all: random data that
@@ -112,7 +138,7 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 if (q - p > 64 * 1024 * 1024) { p = off + max; break; }
                 if (s.byte(q) == 0xFF) {
                     u8 m = s.byte(q + 1);
-                    if (m == 0xD9) return (q + 2) - off;
+                    if (m == 0xD9) return eoiEnd(q) - off;
                     if (m != 0x00 && !(m >= 0xD0 && m <= 0xD7)) { p = q; break; }
                 }
                 q++;
