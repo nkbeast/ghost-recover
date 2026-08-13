@@ -62,7 +62,7 @@ std::atomic<bool> g_handedOver{false};
 // engine down, releasing every scan result and device page-cache page instead
 // of pinning them in the background.
 std::atomic<i64> g_lastActivityMs{0};
-constexpr i64 kIdleShutdownMs = 10 * 60 * 1000;   // 10 minutes of silence
+constexpr i64 kIdleShutdownMs = 5 * 60 * 1000;   // 5 minutes of silence
 
 // Session token guarding the API. Non-empty only on instances that run with
 // root privileges (elevated via the handover, or started as root directly):
@@ -2248,16 +2248,36 @@ int startServer(const ServerConfig& cfg) {
     // Idle watchdog: when no browser is talking to the engine, shut down
     // gracefully so a finished scan's results do not pin RAM in the
     // background. A running job or an open UI (health heartbeat) counts as
-    // activity. Detached: the process exits right after stop() returns.
+    // activity. The UI heartbeats every ~45 s, so five minutes of silence
+    // means the browser is genuinely closed. A running job used to keep the
+    // engine alive until it completed — closing the page during a whole-disk
+    // scan then left multiple gigabytes pinned in the background for hours.
+    // The watchdog now cancels the running job on that same silence signal,
+    // waits for the worker to unwind, and shuts down. Detached: the process
+    // exits right after stop() returns.
     g_lastActivityMs = nowMs();
     std::thread([&]() {
+        bool cancelling = false;
         while (true) {
             for (int i = 0; i < 30; i++) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (g_server == nullptr) return;   // engine went down
             }
-            if (JobManager::instance().hasRunningJob()) continue;
             if (nowMs() - g_lastActivityMs.load() < kIdleShutdownMs) continue;
+            if (JobManager::instance().hasRunningJob()) {
+                if (!cancelling) {
+                    fprintf(stderr,
+                            "ghost-recover: no activity for %lld ms — cancelling running "
+                            "job and shutting down\n", (long long)kIdleShutdownMs);
+                    for (const auto& job : JobManager::instance().list()) {
+                        JobState st = job->state.load();
+                        if (st == JobState::Queued || st == JobState::Running)
+                            JobManager::instance().cancel(job->id);
+                    }
+                    cancelling = true;
+                }
+                continue;   // wait for the worker thread to unwind
+            }
             fprintf(stderr, "ghost-recover: no activity for %lld ms — shutting down\n",
                     (long long)kIdleShutdownMs);
             requestEngineShutdown();
