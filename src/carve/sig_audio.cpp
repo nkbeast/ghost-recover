@@ -536,6 +536,24 @@ i64 vMidi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return p - off;
 }
 
+// --- MPC (Musepack): both stream versions carry a total size in the header.
+// SV8 "MPCK": u32 LE size at +8 (whole stream incl. 8-byte header). SV7 "MP+":
+// version byte 0x07 at +3, u32 BE size at +4 (incl. 16-byte header). A size
+// that parses and fits the device is exact, so MPC is a length-verified file.
+i64 vMpc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (max < 16) return -1;
+    if (s.byte(off) == 'M' && s.byte(off + 1) == 'P' && s.byte(off + 2) == 'C' &&
+        s.byte(off + 3) == 'K') {
+        i64 size = (i64)s.le32(off + 8);
+        if (size < 12 || size > max) return -1;
+        return size;
+    }
+    if (s.byte(off + 3) != 0x07) return -1;
+    i64 size = (i64)s.be32(off + 4);
+    if (size < 16 || size > max) return -1;
+    return size;
+}
+
 void registerAudio(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -585,8 +603,10 @@ void registerAudio(Registry& r) {
     add(mk("DTS", "dts", "audio", B({0x7F,0xFE,0x80,0x01}), 1*GB, SizeMode::Container, vDts));
     add(mk("APE", "ape", "audio", S("MAC "), 1*GB));
     add(mk("WV", "wv", "audio", S("wvpk"), 1*GB));
-    add(mk("MPC", "mpc", "audio", S("MPCK"), 512*MB));
-    add(mk("MPC_SV7", "mpc", "audio", S("MP+"), 512*MB));
+    { auto c = mk("MPC", "mpc", "audio", S("MPCK"), 512*MB, SizeMode::Header, vMpc);
+      c.min_size = 32; add(c); }
+    { auto c = mk("MPC_SV7", "mpc", "audio", S("MP+"), 512*MB, SizeMode::Header, vMpc);
+      c.min_size = 32; add(c); }
     add(mk("AU", "au", "audio", B({0x2E,'s','n','d'}), 512*MB, SizeMode::Container, vAu));
     add(mk("CAF", "caf", "audio", S("caff"), 2*GB, SizeMode::Container, vCaf));
     add(mk("VOC", "voc", "audio", S("Creative Voice File"), 256*MB, SizeMode::Container, vVoc));

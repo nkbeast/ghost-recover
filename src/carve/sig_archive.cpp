@@ -58,6 +58,17 @@ i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     while (p + hdrLen <= off + max && entries < 1000000) {
         auto h = s.read(p, hdrLen);
         if (h.size() < (size_t)hdrLen) break;
+        // Every entry must carry the archive magic: the walk jumps straight
+        // to the next header via namesize/filesize, so without this check
+        // arbitrary data can chain (random filesize fields advance the walk
+        // and the "magic" from the candidate offset is never re-tested) and
+        // a bogus archive can span hundreds of MB.
+        bool okMagic = newc ? (std::memcmp(h.data(), "070701", 6) == 0 ||
+                               std::memcmp(h.data(), "070702", 6) == 0)
+                            : (odc ? std::memcmp(h.data(), "070707", 6) == 0
+                                   : (h[0] == (u8)0xC7 &&
+                                      (h[1] == (u8)0x71 || h[1] == (u8)0x72)));
+        if (!okMagic) return -1;
         i64 ns = -1, fs = -1;
         if (newc) {
             ns = hexn(p + 94, 8);
@@ -118,6 +129,26 @@ i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     if (entries == 0) return -1;
     return p - off;
+}
+
+// --- .lzma (alone) header screen. -------------------------------------------
+// No decoder is invoked, but the 13-byte header is largely self-describing:
+// props must encode lc/lp/pb in range, the dict size must be a plausible
+// power-of-two-ish value, and the uncompressed size must be 0xFFFF... (unknown)
+// or sane. That leaves few false positives for the 5D 00 00 magic, and any
+// survivor is bounded to the next signature and never masks other files.
+i64 vLzmaAlone(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (max < 29) return -1;
+    u8 props = s.byte(off);
+    u32 dict = s.le32(off + 1);
+    u64 usize = 0;
+    for (int k = 0; k < 8; k++) usize |= (u64)s.byte(off + 5 + k) << (8 * k);
+    i64 lc = props % 9, lp = (props / 9) % 5, pb = props / 45;
+    if (lc + lp > 4 || pb > 4) return -1;         // LZMA SDK/xz parameter range
+    if (dict < 4096 || dict > (u32)(1 << 30)) return -1;
+    if (usize == 0) return -1;                    // empty stream: pointless
+    if (usize != 0xFFFFFFFFFFFFFFFFull && usize > (4ull << 30)) return -1;
+    return 0;   // valid header: length unknown, clamp to the next signature
 }
 
 // --- gzip: walk the deflate member chain with inflate. ---------------------
@@ -429,7 +460,8 @@ void registerArchives(Registry& r) {
     add(mk("ZSTD", "zst", "archive", B({0x28,0xB5,0x2F,0xFD}), 8*GB));
     add(mk("LZ4", "lz4", "archive", B({0x04,0x22,0x4D,0x18}), 8*GB));
     add(mk("LZIP", "lz", "archive", S("LZIP"), 8*GB));
-    add(mk("LZMA_ALONE", "lzma", "archive", B({0x5D,0x00,0x00}), 8*GB));
+    { auto c = mk("LZMA_ALONE", "lzma", "archive", B({0x5D,0x00,0x00}), 8*GB, SizeMode::Heuristic, vLzmaAlone);
+      c.min_size = 29; add(c); }
     add(mk("RPM", "rpm", "archive", B({0xED,0xAB,0xEE,0xDB}), 2*GB));
     add(mk("CPIO_ASCII", "cpio", "archive", S("070701"), 2*GB, SizeMode::Container, vCpio));
     add(mk("CPIO_ODC", "cpio", "archive", S("070707"), 2*GB, SizeMode::Container, vCpio));

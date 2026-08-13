@@ -368,6 +368,40 @@ i64 vPsd(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return total;
 }
 
+// --- SVG behind an XML declaration: real-world SVGs routinely open with
+// <?xml version=...?>, so the <svg magic never fires. Confirm the root tag
+// within the first 8 KB, then treat it as the plain-text run it is. ---------
+i64 vSvgXml(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
+    auto head = s.read(off, std::min<i64>(max, 8192));
+    if (head.size() < 16) return -1;
+    bool found = false;
+    for (size_t i = 0; i + 4 <= head.size(); i++) {
+        if (std::memcmp(head.data() + i, "<svg", 4) == 0) { found = true; break; }
+    }
+    if (!found) return -1;
+    i64 size = vText(s, off, max, spec);
+    if (size <= 0) return -1;
+    // Text carving runs into whatever printable bytes follow the file (a
+    // random ASCII byte in the slack region pads the recovered copy). An SVG
+    // is a document: it ends with a closing root tag, so trim the run back to
+    // the end of the last </svg> plus its trailing newline.
+    i64 end = off + size;
+    const i64 kProbe = std::min<i64>(size, 64 * KB);
+    auto run = s.read(off, kProbe);
+    i64 lastClose = -1;
+    for (i64 i = 0; i + 6 <= (i64)run.size(); i++) {
+        if (std::memcmp(run.data() + (size_t)i, "</svg", 5) == 0) lastClose = i + 5;
+    }
+    if (lastClose >= 0) {
+        i64 trimmed = lastClose;
+        if (trimmed < (i64)run.size() && run[(size_t)trimmed] == '>') trimmed++;
+        if (trimmed < (i64)run.size() && run[(size_t)trimmed] == '\r') trimmed++;
+        if (trimmed < (i64)run.size() && run[(size_t)trimmed] == '\n') trimmed++;
+        if (trimmed > 0 && trimmed < size) size = trimmed;
+    }
+    return size;
+}
+
 void registerImages(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -429,6 +463,8 @@ void registerImages(Registry& r) {
     add(mk("WMF", "wmf", "image", B({0xD7,0xCD,0xC6,0x9A}), 64*MB));
     { auto c = mk("SVG", "svg", "image", S("<svg"), 32*MB, SizeMode::Text, vText);
       c.min_size = 64; add(c); }
+    { auto c = mk("SVG_XML", "svg", "image", S("<?xml"), 32*MB, SizeMode::Text, vSvgXml);
+      c.min_size = 64; c.priority = 15; add(c); }
     add(mk("CDR", "cdr", "image", S("RIFF"), 256*MB, SizeMode::Header, vRiff));
 }
 

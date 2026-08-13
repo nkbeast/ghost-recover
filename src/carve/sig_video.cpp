@@ -91,12 +91,44 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     int depth = 0;
     limits[0] = off + max;
     int unknownStreak = 0;
+    u64 unknownParent = 0;
+    int unknownChildDepth = -1;
+    i64 firstSegEnd = -1;   // end of the first top-level Segment: the file's
+                            // last byte — a real MKV is header+Segment, and
+                            // anything after it is the next file on the disk.
 
     while (p < off + max && elems < 2000000) {
         while (depth > 0 && p >= limits[depth]) depth--;
+        if (depth == 0 && firstSegEnd >= 0 && p >= firstSegEnd) break;
         int idW = 0;
         u64 id = ebmlNum(s, p, idW, false);
         if (idW == 0 || id == 0) break;
+        // Inside an unknown-length Segment/Cluster only that container's
+        // children may continue the walk. The classic streaming MKV writes
+        // "Segment size = unknown", so the walker trusts the cluster chain to
+        // end the file — but the chain of *sized* elements it happily merged
+        // kept consuming the next file on the disk (another MKV's EBML header
+        // is itself a valid sized element). Seeing a known id outside the
+        // container's child set means a foreign document starts here: stop.
+        if (unknownParent && depth == unknownChildDepth) {
+            bool child = false;
+            switch (unknownParent) {
+                case 0x18538067:   // Segment children
+                    child = id == 0x114D9B74 || id == 0x1549A966 ||
+                            id == 0x1654AE6B || id == 0x1F43B675 ||
+                            id == 0x1C53BB6B || id == 0x1941A469 ||
+                            id == 0x1043A770 || id == 0x1254C367 ||
+                            id == 0xEC || id == 0xBF;
+                    break;
+                case 0x1F43B675:   // Cluster children
+                    child = id == 0xE7 || id == 0xAB || id == 0xA3 ||
+                            id == 0xA0 || id == 0xA7 || id == 0xA5 ||
+                            id == 0xEC || id == 0xEF || id == 0xA6;
+                    break;
+                default: child = true;
+            }
+            if (!child && knownEbmlId(id)) break;
+        }
         i64 szW = 0;
         u64 sz = 0;
         bool leaf = !knownEbmlId(id);
@@ -154,6 +186,10 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 limits[depth] = limits[depth - 1];
                 p += hdr;
                 lastValid = p;
+                if (id == 0x18538067 || id == 0x1F43B675) {
+                    unknownParent = id;
+                    unknownChildDepth = depth;
+                }
                 elems++;
                 continue;
             }
@@ -162,6 +198,7 @@ i64 vEbml(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         i64 end = p + hdr + (i64)sz;
         if (end <= p || end > limits[depth]) break;
         lastValid = end;
+        if (depth == 0 && id == 0x18538067 && firstSegEnd < 0) firstSegEnd = end;
         p = end;
         if (ebmlContainerId(id)) {
             if (depth < kMaxDepth - 1) {
@@ -419,6 +456,52 @@ i64 vSwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return (i64)len;
 }
 
+// --- ZWS (SWF in LZMA): the header self-describes the compressed payload
+// ("ZWS" + version + u32 LE compressed length + u32 LE uncompressed length),
+// so the file length is exact: 12 + compressedLen. ---------------------------
+i64 vZws(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (max < 16) return -1;
+    u32 compLen = s.le32(off + 4);
+    u32 uncompLen = s.le32(off + 8);
+    if (compLen < 5 || uncompLen < 1) return -1;          // payload must cover the LZMA props
+    if (compLen > 512 * MB || uncompLen > 4LL * GB) return -1;
+    i64 size = 12 + (i64)compLen;
+    if (size > max) return -1;
+    return size;
+}
+
+// --- Bink video: the header names the width/height/frames and the frame
+// size table that immediately follows the header (4 bytes per frame), so the
+// walk over the table yields the exact file length. Field layout (RAD bink):
+// "BIK" + version char + u32 version/width/height/frames/fps/flags, then for
+// v2/v3 the audio frame counts/rate; v1 keeps 12 reserved bytes. Frame sizes
+// sum to the total frame data that follows the table. ------------------------
+i64 vBik(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u8 ver = s.byte(off + 3);
+    if (ver != 'b' && ver != 'f' && ver != 'g') return -1;
+    i64 hdrLen = (ver == 'b') ? 40 : 48;
+    if (max < hdrLen + 4) return -1;
+    u32 width = s.le32(off + 8), height = s.le32(off + 12);
+    u32 frames = s.le32(off + 16), fps = s.le32(off + 20);
+    if (width < 1 || width > 32768 || height < 1 || height > 32768) return -1;
+    if (frames < 1 || frames > (1u << 20)) return -1;
+    if (fps < 1 || fps > 100000) return -1;
+    u32 total = (ver == 'b') ? frames
+                             : s.le32(off + 28) + s.le32(off + 32);
+    if (total < 1 || total > (1u << 20)) return -1;
+    i64 tableEnd = hdrLen + 4LL * total;
+    if (tableEnd > max) return -1;
+    i64 sum = 0;
+    for (u32 i = 0; i < total; i++) {
+        u32 fs = s.le32(off + hdrLen + 4LL * i);
+        if (fs < 1 || fs > 128 * MB) return -1;
+        sum += fs;
+    }
+    i64 size = tableEnd + sum;
+    if (size > max) return -1;
+    return size;
+}
+
 void registerVideo(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -463,10 +546,12 @@ void registerVideo(Registry& r) {
            SizeMode::Container, vMxf));
     add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB, SizeMode::Container, vIvf));
     add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB));
-    add(mk("BIK", "bik", "video", S("BIK"), 4*GB));
+    { auto c = mk("BIK", "bik", "video", S("BIK"), 4*GB, SizeMode::Container, vBik);
+      c.min_size = 64; add(c); }
     add(mk("SWF", "swf", "video", S("FWS"), 256*MB, SizeMode::Header, vSwf));
     add(mk("SWF_ZLIB", "swf", "video", S("CWS"), 256*MB, SizeMode::Header, vSwf));
-    add(mk("SWF_LZMA", "swf", "video", S("ZWS"), 256*MB));
+    { auto c = mk("SWF_LZMA", "swf", "video", S("ZWS"), 256*MB, SizeMode::Header, vZws);
+      c.min_size = 32; add(c); }
     { auto c = mk("OGV", "ogv", "video", S("OggS"), 4*GB, SizeMode::Container, vOgg);
       withConfirm(c, S("theora"), -1, 512); c.priority = 20; c.min_size = 512; add(c); }
 }

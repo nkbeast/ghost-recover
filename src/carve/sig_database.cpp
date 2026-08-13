@@ -203,7 +203,10 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 pos = ascii ? off : off + 2;
     while (pos < end) {
         u8 op = s.byte(pos);
-        if (op == 0x2E) return pos - off + 1;   // STOP: the pickle ends here
+        if (op == 0x2E) {                       // STOP: the pickle ends here
+            if (pos - off + 1 < 10) return -1;  // reject empty-opcode stubs
+            return pos - off + 1;
+        }
         i64 n;
         switch (op) {
             case 0x80: {                        // PROTO (never in ascii mode)

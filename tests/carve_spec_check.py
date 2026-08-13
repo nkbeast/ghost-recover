@@ -627,11 +627,18 @@ def make_ssh_pub(name):
 
 
 def make_der(_):
-    return bytes([0x30, 0x82, 0x00, 0x08, 0x30, 0x82, 0x00, 0x04, 0x04, 0x02, 0xAA, 0xBB])
+    # 30 82 <len> + content of nested valid TLVs: exactly 32 bytes, so the
+    # walk parses cleanly and clears the spec's default min_size.
+    return (bytes([0x30, 0x82, 0x00, 0x1C])
+            + bytes([0x30, 0x82, 0x00, 0x04, 0x04, 0x02, 0xAA, 0xBB])
+            + bytes([0x04, 0x02, 0xAA, 0xBB])
+            + b'\x02\x00' * 8)
 
 
 def make_der_small(_):
-    return bytes([0x30, 0x81, 0x04, 0x04, 0x02, 0xAA, 0xBB])
+    # 30 81 <len> + content of valid TLVs: exactly 32 bytes (the spec's
+    # min_size), and the inner TLVs parse cleanly.
+    return bytes([0x30, 0x81, 0x1D]) + bytes([0x04, 0x01, 0xAA]) + b'\x02\x00' * 13
 
 
 def make_plist_bin(_):
@@ -899,6 +906,7 @@ def make_text(name):
         'HTML_TAG': (b'<html>', 64), 'XML': (b'<?xml version="1.0"?>', 32),
         'LATEX': (b'\\documentclass{article}', 32),
         'SVG': (b'<svg', 64),
+        'SVG_XML': (b'<?xml version="1.0" encoding="UTF-8"?>\r\n<svg xmlns="http://www.w3.org/2000/svg"', 64),
         'MBOX': (b'From sender@example.com Thu Jan  1 00:00:00 2026', 256),
         'EML': (b'Received: from mail.example.com by ghost.example.com', 128),
         'EML_MSGID': (b'Message-ID: <ghost-42@example.com>', 128),
@@ -935,6 +943,35 @@ def make_stub(magic, n=64):
     def b(_):
         return nonzero(magic + junk(n))
     return b
+
+
+def make_bik(_):
+    # 'BIK' + version char + u32 version/width/height/frames/fps/flags,
+    # 12 reserved bytes (v1), then the frame size table (4 bytes per frame)
+    # and the frame payloads it sizes.
+    hdr = b'BIKb' + u32le(0) + u32le(640) + u32le(480) + u32le(1) + u32le(30) + u32le(0)
+    hdr += b'\x00' * 12
+    return nonzero(hdr + u32le(10) + junk(10))
+
+
+def make_zws(_):
+    # 'ZWS' + version + u32 LE compressed length + u32 LE uncompressed
+    # length + LZMA props + payload; file length = 8 + compressed length.
+    return b'ZWS' + bytes([0x13]) + u32le(12) + u32le(1024) + bytes([0x5D, 0x00, 0x00, 0x80, 0x00]) + junk(7)
+
+
+def make_mpc(name):
+    if name == 'MPC':       # SV8 "MPCK": magic + crc32 + u32 LE total size
+        return b'MPCK' + u32le(0) + u32le(16) + b'\x00' * 4
+    # SV7 "MP+": version 0x07 + u32 BE total size (incl. 16-byte header)
+    return b'MP+' + bytes([0x07]) + struct.pack('>I', 17) + b'\x00' * 9
+
+
+def make_lzma_alone(_):
+    # props (lc=3,lp=0,pb=0) + u32 LE dict size + u64 LE uncompressed size
+    # (0xFFFF... = unknown) + payload: a full 13-byte header plus 16 bytes.
+    # dict 0x10000 keeps the 5D 00 00 magic (low 16 bits zero) and ≥ 4096.
+    return bytes([0x5D]) + u32le(0x10000) + b'\xFF' * 8 + junk(16)
 
 
 def make_dxf(_):
@@ -988,6 +1025,7 @@ reg('ICNS', make_stub(b'icns'), 'image')
 reg('EMF', make_stub(bytes([0x01, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00])), 'image')
 reg('WMF', make_stub(bytes([0xD7, 0xCD, 0xC6, 0x9A])), 'image')
 reg('SVG', make_text, 'image')
+reg('SVG_XML', make_text, 'image')
 reg('CDR', make_cdr, 'image')
 
 # ---------------- video ----------------
@@ -1014,10 +1052,10 @@ reg('RM', make_stub(b'.RMF'), 'video')
 reg('MXF', make_mxf, 'video')
 reg('IVF', make_ivf, 'video')
 reg('Y4M', make_stub(b'YUV4MPEG2'), 'video')
-reg('BIK', make_stub(b'BIK'), 'video')
+reg('BIK', make_bik, 'video')
 reg('SWF', make_swf, 'video')
 reg('SWF_ZLIB', make_swf, 'video')
-reg('SWF_LZMA', make_stub(b'ZWS'), 'video')
+reg('SWF_LZMA', make_zws, 'video')
 
 # ---------------- audio ----------------
 reg('MP3_ID3', make_mp3_id3, 'audio')
@@ -1039,8 +1077,8 @@ reg('MIDI', make_midi, 'audio')
 reg('DTS', make_dts, 'audio')
 reg('APE', make_stub(b'MAC '), 'audio')
 reg('WV', make_stub(b'wvpk'), 'audio')
-reg('MPC', make_stub(b'MPCK'), 'audio')
-reg('MPC_SV7', make_stub(b'MP+'), 'audio')
+reg('MPC', make_mpc, 'audio')
+reg('MPC_SV7', make_mpc, 'audio')
 reg('AU', make_au, 'audio')
 reg('CAF', make_caf, 'audio')
 reg('VOC', make_voc, 'audio')
@@ -1089,7 +1127,7 @@ reg('CAB', make_cab, 'archive')
 reg('ZSTD', make_stub(bytes([0x28, 0xB5, 0x2F, 0xFD])), 'archive')
 reg('LZ4', make_stub(bytes([0x04, 0x22, 0x4D, 0x18])), 'archive')
 reg('LZIP', make_stub(b'LZIP'), 'archive')
-reg('LZMA_ALONE', make_stub(bytes([0x5D, 0x00, 0x00])), 'archive')
+reg('LZMA_ALONE', make_lzma_alone, 'archive')
 reg('RPM', make_stub(bytes([0xED, 0xAB, 0xEE, 0xDB])), 'archive')
 reg('CPIO_ASCII', make_cpio, 'archive')
 reg('CPIO_ODC', make_cpio_odc, 'archive')

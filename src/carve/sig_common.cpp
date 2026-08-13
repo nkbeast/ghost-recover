@@ -196,7 +196,7 @@ i64 vText(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     return p >= spec.min_size ? p : -1;
 }
 
-i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     struct El { i64 pos; i64 contentEnd; };
     std::vector<El> stack;
     i64 pos = off;
@@ -255,6 +255,7 @@ i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
     if (lastEnd < 0) return -1;
     if (lastEnd - off > max) return -1;
+    if (spec.min_size > 0 && lastEnd - off < spec.min_size) return -1;
     return lastEnd - off;
 }
 
@@ -271,7 +272,7 @@ bool walksWholeFile(SizeFn fn) {
 // the next signature on the device, so the engine clamps the result to it.
 bool walksToBoundary(SizeFn fn) {
     static const SizeFn kBounded[] = {
-        vMat, vPickle, vDer, vPlistBin, vQcow, vVhd, vVhdx, vVdi, vSwf, nullptr};
+        vGpg, vMat, vPickle, vDer, vPlistBin, vQcow, vVhd, vVhdx, vVdi, vSwf, nullptr};
     for (int i = 0; kBounded[i]; i++) if (fn == kBounded[i]) return true;
     return false;
 }

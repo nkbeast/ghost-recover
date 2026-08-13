@@ -220,7 +220,7 @@ void registerMisc(Registry& r) {
     add(mk("PLIST_BIN", "plist", "misc", S("bplist00"), 16*MB, SizeMode::Header, vPlistBin));
     add(mk("DER", "der", "misc", B({0x30,0x82}), 64*MB, SizeMode::Header, vDer));
     { auto c = mk("DER_SMALL", "der", "misc", B({0x30,0x81}), 64*MB, SizeMode::Header, vDer);
-      c.priority = 10; add(c); }
+      c.priority = 10; c.min_size = 32; add(c); }
     add(mk("OPENVPN", "ovpn", "misc", S("client\ndev tun"), 1*MB));
 }
 
