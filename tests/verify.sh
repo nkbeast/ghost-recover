@@ -562,10 +562,12 @@ fi
 
 # ------------------------------------------------------- carver spec coverage
 head2 "Carver spec coverage (byte-exact fixtures, one per signature)"
-if python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec" >/dev/null 2>&1; then
+if python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec" \
+     >"$WORK/carve-spec.log" 2>&1; then
   ok "every signature carves its byte-exact fixture"
 else
-  bad "carve-spec mismatches — run: python3 $HERE/carve_spec_check.py --bin $BIN --work $WORK/carve-spec"
+  bad "carve-spec mismatches ($(grep -c '^FAIL' "$WORK/carve-spec.log" 2>/dev/null || echo '?') of 260) — tail:"
+  tail -12 "$WORK/carve-spec.log" | sed 's/^/    /'
 fi
 
 # --------------------------------------------------------------- summary
