@@ -463,8 +463,7 @@ i64 vZws(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (max < 16) return -1;
     u32 compLen = s.le32(off + 4);
     u32 uncompLen = s.le32(off + 8);
-    if (compLen < 5 || uncompLen < 1) return -1;          // payload must cover the LZMA props
-    if (compLen > 512 * MB || uncompLen > 4LL * GB) return -1;
+    if (compLen < 5 || compLen > 512 * MB || uncompLen < 1) return -1;
     i64 size = 12 + (i64)compLen;
     if (size > max) return -1;
     return size;

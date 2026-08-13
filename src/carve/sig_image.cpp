@@ -385,7 +385,6 @@ i64 vSvgXml(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     // random ASCII byte in the slack region pads the recovered copy). An SVG
     // is a document: it ends with a closing root tag, so trim the run back to
     // the end of the last </svg> plus its trailing newline.
-    i64 end = off + size;
     const i64 kProbe = std::min<i64>(size, 64 * KB);
     auto run = s.read(off, kProbe);
     i64 lastClose = -1;
