@@ -258,7 +258,7 @@ function viewWelcome() {
       <button class="btn" onclick="openModal('image')">Clone a failing disk first</button>
       <button class="btn" onclick="openModal('about')">What this can do</button>
     </div>
-    ${h.is_root ? '' : `<div class="caps" style="color:var(--amber);margin-top:18px">
+    ${h.is_root ? '' : `<div class="caps" style="color:var(--warn);margin-top:18px">
       Physical disks are not readable yet — that needs administrator access.
       <br><button class="btn warn" style="margin-top:12px" onclick="openModal('elevate')">
         🔒 Unlock disk access</button></div>`}
@@ -270,15 +270,15 @@ function viewSource() {
   const disks = S.disks;
   const cards = disks.length ? disks.map((d, i) => {
     const icon = { hdd: '🖴', ssd: '🖴', nvme: '⚡', usb: '🔌', sdcard: '💾', virtio: '🖥' }[d.type] || '🖴';
-    const colour = { hdd: '#ff8a3a', ssd: 'var(--blue)', nvme: 'var(--green)',
-                     usb: 'var(--red)', sdcard: 'var(--purple)' }[d.type] || 'var(--blue)';
+    const colour = { hdd: '#ff8a3a', ssd: 'var(--link)', nvme: 'var(--ok)',
+                     usb: 'var(--danger)', sdcard: 'var(--violet)' }[d.type] || 'var(--link)';
     return `<div class="card ${S.selDisk === d.device_path ? 'sel' : ''}" onclick="pickDisk(${i})">
       <div class="ico" style="color:${colour}">${icon}</div>
       <div class="grow">
         <div class="t nowrap">${esc(d.display_name || d.name)}</div>
         <div class="m mono">${esc(d.device_path)}</div>
         <div class="m">${esc(d.type_label)}${d.partition_count ? ' · ' + d.partition_count + ' partitions' : ''}</div>
-        ${d.accessible ? '' : `<div class="m" style="color:var(--amber);margin-top:4px">
+        ${d.accessible ? '' : `<div class="m" style="color:var(--warn);margin-top:4px">
           🔒 ${esc(d.status_message)}
           ${S.health.is_root ? '' : `<button class="btn sm warn" style="margin-top:6px"
              onclick="event.stopPropagation();openModal('elevate')">Unlock</button>`}</div>`}
@@ -388,7 +388,7 @@ async function loadPartitions() {
   render();
 }
 
-const PART_COLOURS = ['#35c8ff', '#00e57a', '#ffb020', '#b06cff', '#ff2d55',
+const PART_COLOURS = ['#35c8ff', '#3fe0b8', '#ffb020', '#b06cff', '#ff5a68',
                       '#ff8a3a', '#5dd6ff', '#7dffb2', '#ffd36b', '#d6a3ff'];
 
 function viewPartitions() {
@@ -444,7 +444,7 @@ function viewPartitions() {
       rows += `<tr class="${S.selPartition === i ? 'sel' : ''}" onclick="usePartition(${i})">
         <td style="color:${PART_COLOURS[i % PART_COLOURS.length]};font-weight:700">P${x.entry}</td>
         <td>${esc(x.label || x.name || '—')}</td>
-        <td>${x.filesystem ? `<span style="color:var(--green)">${esc(x.filesystem)}</span>` : '<span class="faint">—</span>'}</td>
+        <td>${x.filesystem ? `<span style="color:var(--ok)">${esc(x.filesystem)}</span>` : '<span class="faint">—</span>'}</td>
         <td>${statusPill(x.fs_status)}</td>
         <td class="right">${fmtSize(x.size_bytes)}</td>
         <td class="faint mono">${fmtNum(x.start_lba)}</td>
@@ -457,7 +457,7 @@ function viewPartitions() {
       rows += `<tr class="dim" onclick="useRegion(${i})">
         <td class="faint">${rec ? '⟳' : '—'}</td>
         <td class="faint">${rec ? 'Recovered volume' : 'Free space'}</td>
-        <td>${x.filesystem ? `<span style="color:var(--amber)">${esc(x.filesystem)}</span>` : '<span class="faint">—</span>'}</td>
+        <td>${x.filesystem ? `<span style="color:var(--warn)">${esc(x.filesystem)}</span>` : '<span class="faint">—</span>'}</td>
         <td>${statusPill(rec ? 'recovered' : 'unallocated')}</td>
         <td class="right">${fmtSize(x.size_bytes)}</td>
         <td class="faint mono">${fmtNum(x.start_lba)}</td>
@@ -1335,7 +1335,7 @@ function modalAttach() {
     <div class="row" data-path="${esc(joinPath(S.browsePath, e.name))}"
          data-dir="${e.is_dir ? '1' : '0'}" onclick="browsePick(this)">
       <span>${e.is_dir ? '📁' : '📄'}</span>
-      <span class="grow nowrap" style="color:${e.is_dir ? 'var(--blue)' : 'var(--fg)'}">${esc(e.name)}</span>
+      <span class="grow nowrap" style="color:${e.is_dir ? 'var(--link)' : 'var(--fg)'}">${esc(e.name)}</span>
       ${e.is_dir ? '' : `<span class="faint">${fmtSize(e.size)}</span>`}
     </div>`).join('');
   return modalShell('Open a disk image', `
@@ -1679,7 +1679,7 @@ function modalElevate() {
     const spinner = el.phase === 'failed' ? '✕' : '⟳';
     return modalShell('Unlocking disk access', `
       <div style="text-align:center;padding:26px 10px">
-        <div style="font-size:34px;margin-bottom:14px;color:${el.phase === 'failed' ? 'var(--red)' : 'var(--amber)'}">${spinner}</div>
+        <div style="font-size:34px;margin-bottom:14px;color:${el.phase === 'failed' ? 'var(--danger)' : 'var(--warn)'}">${spinner}</div>
         <div style="font-size:14px;margin-bottom:10px">${esc(el.title || '')}</div>
         <div class="muted" style="line-height:1.7">${esc(el.message || '')}</div>
       </div>`,
