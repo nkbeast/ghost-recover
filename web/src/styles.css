@@ -1,0 +1,257 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * GHOST RECOVER — promo site design system.
+ * Obsidian forensic lab: near-black surfaces, cyan spectral glow,
+ * amber for danger/data, mono type for machine truth.
+ */
+
+@theme inline {
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-glow: var(--primary-glow);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-grid: var(--grid);
+
+  --animate-float: float 7s ease-in-out infinite;
+  --animate-pulse-glow: pulse-glow 3.5s ease-in-out infinite;
+  --animate-scan: scan 6s linear infinite;
+  --animate-drift: drift 9s ease-in-out infinite;
+  --animate-marquee: marquee 40s linear infinite;
+  --animate-blink: blink 1.05s step-end infinite;
+  --animate-spin-slow: spin 26s linear infinite;
+}
+
+:root {
+  --radius: 0.5rem;
+
+  --background: oklch(0.16 0.018 240);
+  --foreground: oklch(0.95 0.008 220);
+
+  --surface: oklch(0.2 0.02 240);
+  --surface-2: oklch(0.24 0.024 242);
+
+  --card: oklch(0.2 0.02 240);
+  --card-foreground: oklch(0.95 0.008 220);
+  --popover: oklch(0.2 0.02 240);
+  --popover-foreground: oklch(0.95 0.008 220);
+
+  --primary: oklch(0.82 0.15 195);
+  --primary-foreground: oklch(0.16 0.03 240);
+  --primary-glow: oklch(0.72 0.17 230);
+
+  --secondary: oklch(0.26 0.026 242);
+  --secondary-foreground: oklch(0.95 0.008 220);
+
+  --muted: oklch(0.24 0.022 242);
+  --muted-foreground: oklch(0.68 0.02 230);
+
+  --accent: oklch(0.85 0.15 92);
+  --accent-foreground: oklch(0.17 0.03 250);
+
+  --danger: oklch(0.68 0.2 24);
+  --destructive: oklch(0.62 0.22 25);
+  --destructive-foreground: oklch(0.97 0.01 240);
+
+  --border: oklch(0.32 0.028 240);
+  --input: oklch(0.3 0.028 240);
+  --ring: oklch(0.82 0.15 195);
+  --grid: oklch(0.28 0.03 240 / 45%);
+
+  --gradient-spectral: linear-gradient(135deg, var(--primary-glow), var(--primary));
+  --gradient-veil: radial-gradient(
+    120% 90% at 50% -10%,
+    color-mix(in oklab, var(--primary) 22%, transparent),
+    transparent 70%
+  );
+  --shadow-spectral: 0 24px 70px -30px color-mix(in oklab, var(--primary) 55%, transparent);
+  --shadow-panel: 0 30px 80px -40px oklch(0 0 0 / 80%);
+}
+
+.dark {
+  --background: oklch(0.16 0.018 240);
+  --foreground: oklch(0.95 0.008 220);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 35%, transparent);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+  }
+}
+
+@layer components {
+  .panel {
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--surface) 82%, transparent),
+        color-mix(in oklab, var(--background) 88%, transparent)
+      );
+    border: 1px solid var(--border);
+    backdrop-filter: blur(14px);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .glow-ring {
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--primary) 30%, transparent),
+      0 0 40px -8px color-mix(in oklab, var(--primary) 40%, transparent);
+  }
+
+  .text-spectral {
+    background: var(--gradient-spectral);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .grid-floor {
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 46px 46px;
+    mask-image: radial-gradient(80% 60% at 50% 40%, black, transparent 75%);
+  }
+
+  .veil {
+    background: var(--gradient-veil);
+  }
+
+  .screen-logo {
+    mix-blend-mode: screen;
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-18px) rotate(-1.5deg);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes scan {
+  0% {
+    transform: translateY(-10%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(1000%);
+    opacity: 0;
+  }
+}
+
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.25;
+  }
+  50% {
+    transform: translate3d(10px, -26px, 0);
+    opacity: 0.9;
+  }
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
