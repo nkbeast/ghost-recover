@@ -101,8 +101,6 @@ Recovered files go to `$GHOST_OUTPUT`, or `~/ghost-recover-output`.
 
 ## 🖥️ Web interface
 
-**Live site (v1.0.0): <https://nkbeast.github.io/ghost-recover/>** — source in [`web/`](web/).
-
 <p align="center">
   <img src="assets/ghostrecoverweb.png" width="100%" alt="GHOST RECOVER web interface — browse recovered files, preview photos and videos in the browser"/>
 </p>
