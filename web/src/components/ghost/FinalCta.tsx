@@ -1,6 +1,6 @@
 import { motion } from "motion/react";
 import { Github, Star, GitFork, Scale } from "lucide-react";
-import logo from "@/assets/ghost-recover-logo.png.asset.json";
+import logo from "@/assets/ghost-recover-logo.png";
 import { REPO_URL } from "@/lib/ghost-data";
 import { Reveal } from "./Reveal";
 
@@ -11,7 +11,7 @@ export function FinalCta() {
       <div className="grid-floor absolute inset-0 opacity-60" aria-hidden />
       <div className="relative mx-auto max-w-4xl px-5 text-center">
         <motion.img
-          src={logo.url}
+          src={logo}
           alt="GHOST RECOVER logo"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
 import { Github, Terminal, ShieldCheck, ArrowDown } from "lucide-react";
-import logo from "@/assets/ghost-recover-logo.png.asset.json";
+import logo from "@/assets/ghost-recover-logo.png";
 import { REPO_URL } from "@/lib/ghost-data";
 
 const lines = [
@@ -184,7 +184,7 @@ export function Hero() {
 
         <div className="relative">
           <motion.img
-            src={logo.url}
+            src={logo}
             alt="GHOST RECOVER ghost logo dissolving into data pixels"
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}

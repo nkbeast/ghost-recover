@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Github, Star, Menu, X } from "lucide-react";
-import logo from "@/assets/ghost-recover-logo.png.asset.json";
+import logo from "@/assets/ghost-recover-logo.png";
 import { REPO_URL } from "@/lib/ghost-data";
 
 const links = [
@@ -32,7 +32,7 @@ export function Nav() {
       <nav className="mx-auto flex max-w-7xl items-center justify-between px-5 py-3.5">
         <a href="#top" className="group flex items-center gap-2.5">
           <img
-            src={logo.url}
+            src={logo}
             alt="GHOST RECOVER logo"
             className="screen-logo h-9 w-9 transition-transform duration-500 group-hover:-translate-y-0.5"
           />

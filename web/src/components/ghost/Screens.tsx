@@ -2,27 +2,27 @@ import { useState } from "react";
 import { motion } from "motion/react";
 import { Reveal, SectionHeading } from "./Reveal";
 import { apiEndpoints } from "@/lib/ghost-data";
-import webShot from "@/assets/ghostrecoverweb.png.asset.json";
-import previewShot from "@/assets/preview.png.asset.json";
-import bannerShot from "@/assets/ghost-recover-banner.png.asset.json";
+import webShot from "@/assets/ghostrecoverweb.png";
+import previewShot from "@/assets/preview.png";
+import bannerShot from "@/assets/ghost-recover-banner.png";
 
 const shots = [
   {
     id: "web",
     label: "Web interface",
-    url: webShot.url,
+    url: webShot,
     caption: "Browse recovered files, filter by type, preview photos and video in the browser.",
   },
   {
     id: "preview",
     label: "Scan results",
-    url: previewShot.url,
+    url: previewShot,
     caption: "Honest progress: bytes scanned, candidates validated, files recovered — live.",
   },
   {
     id: "banner",
     label: "The engine",
-    url: bannerShot.url,
+    url: bannerShot,
     caption: "One binary: web UI, CLI and HTTP API over the same read-only-first engine.",
   },
 ];
