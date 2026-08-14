@@ -341,24 +341,162 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return -1;
 }
 
+// --- Access (MDB / ACCDB): 64-byte header; page size x page count + 64. -----
+i64 vMdb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 pageSize = s.le32(off + 0x14);
+    if (pageSize < 512 || pageSize > 65536 || (pageSize & (pageSize - 1)) != 0) return -1;
+    u32 nPages = s.le32(off + 0x3C);
+    if (nPages < 1 || nPages > 1000000) return -1;
+    i64 total = 64 + (i64)pageSize * nPages;
+    return (total <= max) ? total : -1;
+}
+
+// --- LevelDB: 8-byte magic then 32 KiB blocks of [crc + len + type + data].
+i64 vLevelDb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    const i64 kBlock = 32768;
+    i64 p = off + 8;
+    for (int blocks = 0; blocks < (1 << 20); blocks++) {
+        while (true) {
+            if (p + 7 > off + max) return -1;
+            u16 len = s.le16(p + 4);
+            u8 type = s.byte(p + 6);
+            if (type == 0 || len == 0) break;      // zero padding
+            if (len > 4096 || p + 7 + len > off + max) return -1;
+            p += 7 + len;
+        }
+        i64 next = off + 8 + ((p - off - 8 + kBlock - 1) / kBlock) * kBlock;
+        if (next + 7 > off + max) return next - off;
+        if (s.byte(next + 6) == 0) return next - off;
+        p = next;
+    }
+    return -1;
+}
+
+// --- SQLite WAL: header, nFrames frames of [page + commit + salts + checksum
+// + page data], then the 24-byte checksum index. ------------------------------
+i64 vWal(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 pageSize = s.be32(off + 8);
+    if (pageSize < 512 || pageSize > 65536 || (pageSize & (pageSize - 1)) != 0) return -1;
+    u32 nFrames = s.be32(off + 16);
+    if (nFrames < 1 || nFrames > 1000000) return -1;
+    u32 salt1 = s.be32(off + 20), salt2 = s.be32(off + 24);
+    i64 p = off + 32;
+    for (u32 i = 0; i < nFrames; i++) {
+        if (p + 24 + (i64)pageSize > off + max) return -1;
+        u32 pageNo = s.be32(p);
+        if (pageNo < 1) return -1;
+        if (s.be32(p + 8) != salt1 || s.be32(p + 12) != salt2) return -1;
+        p += 24 + (i64)pageSize;
+    }
+    if (p + 24 > off + max) return -1;
+    if (s.be32(p) != salt1 || s.be32(p + 4) != salt2) return -1;
+    i64 total = p + 24;
+    return (total <= off + max) ? total - off : -1;
+}
+
+// --- Feather: header magic + metadata + size + trailing magic. The trailing
+// ARROW1 footer (with a self-consistent size field) closes the file. ---------
+i64 vFeather(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = -1;
+    i64 p = off + 8;
+    while (p + 4 <= off + max) {
+        auto m = s.read(p, 6);
+        if (m.size() >= 6 && std::memcmp(m.data(), "ARROW1", 6) == 0) {
+            u32 size = s.le32(p - 4);
+            if ((i64)size == p - 4 - (off + 8) && p + 8 <= off + max)
+                total = p + 8 - off;
+        }
+        p++;
+    }
+    return (total > 0 && total <= max) ? total : -1;
+}
+
+// --- Parquet: trailing [PAR1] footer with the metadata size between them. ---
+i64 vParquet(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = -1;
+    i64 p = off + 4;
+    while (p + 4 <= off + max) {
+        auto m = s.read(p, 4);
+        if (m.size() >= 4 && std::memcmp(m.data(), "PAR1", 4) == 0) {
+            u32 size = s.le32(p - 4);
+            if ((i64)size >= 4 && (i64)size <= p - 4 - (off + 4))
+                total = p + 4 - off;
+        }
+        p++;
+    }
+    return (total > 0 && total <= max) ? total : -1;
+}
+
+// --- Avro: header (magic + sync) then data blocks until the last sync. ------
+i64 vAvro(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto sync0 = s.read(off + 4, 16);
+    if (sync0.size() < 16) return -1;
+    auto varint = [&](i64& at) -> i64 {
+        i64 v = 0, shift = 0;
+        for (int i = 0; i < 10; i++) {
+            if (at >= off + max) return -1;
+            u8 b = s.byte(at++);
+            v |= (i64)(b & 0x7F) << shift;
+            if (!(b & 0x80)) return v;
+            shift += 7;
+        }
+        return -1;
+    };
+    i64 p = off + 20, end = -1;
+    for (int blocks = 0; p < off + max && blocks < 1000000; blocks++) {
+        i64 q = p;
+        i64 count = varint(q);
+        i64 size = varint(q);
+        if (count < 0 || size < 0 || size > off + max - q) break;
+        q += size;
+        auto sync = s.read(q, 16);
+        if (sync.size() < 16 || std::memcmp(sync.data(), sync0.data(), 16) != 0) break;
+        q += 16;
+        end = q;
+        p = q;
+    }
+    return (end > off) ? end - off : -1;
+}
+
+// --- HDF5: v0 superblock; the root symbol-table node's address + entries
+// give the exact end of the file. --------------------------------------------
+i64 vHdf5(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.byte(off + 8) != 0) return -1;                     // superblock v0
+    u8 sizeOfOffsets = s.byte(off + 13);
+    u8 sizeOfLengths = s.byte(off + 14);
+    if (sizeOfOffsets != 4 && sizeOfOffsets != 8) return -1;
+    if (sizeOfLengths != 4 && sizeOfLengths != 8) return -1;
+    if (s.byte(off + 15) != 0) return -1;
+    u64 symtabAddr = (sizeOfOffsets == 8) ? s.le64(off + 40) : (u64)s.le32(off + 40);
+    if (symtabAddr < 56) return -1;
+    i64 node = off + (i64)symtabAddr;
+    if (node + 8 > off + max) return -1;
+    if (s.be32(node) != 0x534E4F44) return -1;               // SNOD
+    if (s.byte(node + 4) != 1) return -1;                    // version
+    u16 nentries = s.be16(node + 6);
+    if (nentries > 1024) return -1;
+    i64 total = (i64)symtabAddr + 8 + 24 * (i64)nentries;
+    return (total <= max) ? total : -1;
+}
+
 void registerDatabases(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
     { auto c = mk("SQLite", "sqlite", "database", S("SQLite format 3\0"), 8*GB,
                   SizeMode::Header, vSqlite); c.min_size = 512; add(c); }
-    add(mk("SQLite_WAL", "sqlite-wal", "database", B({0x37,0x7F,0x06,0x82}), 2*GB));
-    add(mk("MDB", "mdb", "database", B({0x00,0x01,0x00,0x00,'S','t','a','n','d','a','r','d',' ','J','e','t'}), 4*GB));
-    add(mk("ACCDB", "accdb", "database", B({0x00,0x01,0x00,0x00,'S','t','a','n','d','a','r','d',' ','A','C','E'}), 4*GB));
+    add(mk("SQLite_WAL", "sqlite-wal", "database", B({0x37,0x7F,0x06,0x82}), 2*GB, SizeMode::Header, vWal));
+    add(mk("MDB", "mdb", "database", B({0x00,0x01,0x00,0x00,'S','t','a','n','d','a','r','d',' ','J','e','t'}), 4*GB, SizeMode::Header, vMdb));
+    add(mk("ACCDB", "accdb", "database", B({0x00,0x01,0x00,0x00,'S','t','a','n','d','a','r','d',' ','A','C','E'}), 4*GB, SizeMode::Header, vMdb));
     add(mk("BerkeleyDB", "db", "database", B({0x00,0x05,0x31,0x62}), 2*GB));
-    add(mk("LevelDB", "ldb", "database", B({0x57,0xFB,0x80,0x8B,0x24,0x75,0x47,0xDB}), 2*GB));
+    add(mk("LevelDB", "ldb", "database", B({0x57,0xFB,0x80,0x8B,0x24,0x75,0x47,0xDB}), 2*GB, SizeMode::Header, vLevelDb));
     add(mk("Firebird", "fdb", "database", B({0x01,0x00,0x39,0x30}), 4*GB));
     add(mk("MSSQL_MDF", "mdf", "database", B({0x01,0x0F,0x00,0x00}), 16*GB));
-    add(mk("Parquet", "parquet", "database", S("PAR1"), 8*GB));
+    add(mk("Parquet", "parquet", "database", S("PAR1"), 8*GB, SizeMode::Header, vParquet));
     add(mk("ORC", "orc", "database", S("ORC"), 8*GB));
-    add(mk("Avro", "avro", "database", B({'O','b','j',0x01}), 8*GB));
-    add(mk("HDF5", "h5", "database", B({0x89,'H','D','F',0x0D,0x0A,0x1A,0x0A}), 8*GB));
+    add(mk("Avro", "avro", "database", B({'O','b','j',0x01}), 8*GB, SizeMode::Header, vAvro));
+    add(mk("HDF5", "h5", "database", B({0x89,'H','D','F',0x0D,0x0A,0x1A,0x0A}), 8*GB, SizeMode::Header, vHdf5));
     add(mk("NetCDF", "nc", "database", S("CDF"), 8*GB));
-    add(mk("Feather", "arrow", "database", S("ARROW1"), 8*GB));
+    add(mk("Feather", "arrow", "database", S("ARROW1"), 8*GB, SizeMode::Header, vFeather));
     add(mk("NPY", "npy", "database", B({0x93,'N','U','M','P','Y'}), 8*GB, SizeMode::Header, vNpy));
     add(mk("MAT", "mat", "database", S("MATLAB 5.0 MAT-file"), 8*GB, SizeMode::Header, vMat));
     { auto c = mk("PICKLE", "pkl", "database", B({0x80,0x04,0x95}), 512*MB, SizeMode::Header, vPickle);

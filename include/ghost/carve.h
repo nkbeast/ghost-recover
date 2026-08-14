@@ -75,7 +75,14 @@ public:
     u32 le32(i64 off);
     u16 be16(i64 off);
     u16 le16(i64 off);
+    u64 be64(i64 off);
+    u64 le64(i64 off);
     i64 limit() const { return limit_; }
+    // Formats whose length field lives behind the signature (DMG's koly
+    // trailer sits at the end of the file) report how many bytes of the file
+    // precede the signature. The engine then carves [off-backscan, off+size).
+    void setBackscan(i64 n) { backscan_ = n; }
+    i64 backscan() const { return backscan_; }
 private:
     bool fill(i64 off, i64 len);   // make [off, off+len) available in win_
     DiskReader& d_;
@@ -83,6 +90,7 @@ private:
     std::vector<u8> win_;
     i64 win_start_ = -1;           // device offset of win_[0]
     i64 win_len_   = 0;            // valid bytes in win_
+    i64 backscan_  = 0;
     static constexpr i64 kWin = 64 * 1024;
 };
 

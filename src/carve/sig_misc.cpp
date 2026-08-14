@@ -205,14 +205,74 @@ i64 vPlistBin(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return end;
 }
 
+// --- DWG: version then a section locator whose tables bound the file. -------
+i64 vDwg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    static const char* kVersions[] = {"AC1012", "AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027"};
+    auto v = s.read(off, 6);
+    bool known = false;
+    for (const char* k : kVersions)
+        if (v.size() >= 6 && std::memcmp(v.data(), k, 6) == 0) { known = true; break; }
+    if (!known) return -1;
+    if (s.byte(off + 6) != 0x1F) return -1;                    // end-of-header
+    u32 pageSize = s.le32(off + 0x30);
+    if (pageSize != 0x1000 && pageSize != 0x2000) return -1;
+    u32 count = s.le32(off + 0x38);
+    if (count < 2 || count > 128) return -1;
+    i64 total = 0;
+    for (u32 i = 0; i < count; i++) {
+        i64 e = off + 0x3C + 0x20 * (i64)i;
+        if (e + 0x20 > off + max) return -1;
+        u16 type = s.le16(e);
+        if (type > 0x18) return -1;
+        i64 aoff = (i64)s.le64(e + 0x10);
+        i64 size = (i64)s.le64(e + 0x18);
+        if (size > max || size < 2) return -1;
+        i64 end = aoff + size;
+        if (end > total) total = end;
+    }
+    return (total > 0 && total <= max) ? total : -1;
+}
+
+// --- Blender: block list terminated by the ENDB block. ----------------------
+i64 vBlend(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.le32(off + 18) != 4) return -1;                      // pointer size
+    u8 endian = s.byte(off + 22);
+    if (endian != 0x2C && endian != 0x3C) return -1;           // < or >
+    i64 p = off + 31;                                          // after the version
+    for (int guard = 0; guard < (1 << 20); guard++) {
+        if (p + 32 > off + max) return -1;
+        auto code = s.read(p, 4);
+        if (code.size() < 4) return -1;
+        u32 size;
+        if (endian == 0x2C) size = s.le32(p + 4);
+        else                size = s.be32(p + 4);
+        if (size > (u32)(max - (p - off))) return -1;
+        if (std::memcmp(code.data(), "ENDB", 4) == 0) return (p + 32) - off;
+        p += 32 + size;
+    }
+    return -1;
+}
+
+// --- FBX binary: the root node's endOffset is the whole file size. ----------
+i64 vFbx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.byte(off + 20) != 0x00 || s.byte(off + 21) != 0x1A || s.byte(off + 22) != 0x00)
+        return -1;
+    auto ver = s.read(off + 23, 5);
+    if (ver.size() < 5 || ver[0] < '7' || ver[0] > '8' || ver[1] != '.' || ver[2] < '0' || ver[2] > '9')
+        return -1;
+    i64 total = s.le32(off + 28);
+    if (total < 28 || total > max) return -1;
+    return total;
+}
+
 void registerMisc(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
-    add(mk("DWG", "dwg", "misc", S("AC10"), 512*MB));
+    add(mk("DWG", "dwg", "misc", S("AC10"), 512*MB, SizeMode::Header, vDwg));
     add(mk("DXF", "dxf", "misc", S("  0\r\nSECTION"), 512*MB));
     add(mk("STL_ASCII", "stl", "misc", S("solid "), 512*MB, SizeMode::Container, vStlAscii));
-    add(mk("BLEND", "blend", "misc", S("BLENDER"), 4*GB));
-    add(mk("FBX", "fbx", "misc", S("Kaydara FBX Binary"), 2*GB));
+    add(mk("BLEND", "blend", "misc", S("BLENDER"), 4*GB, SizeMode::Header, vBlend));
+    add(mk("FBX", "fbx", "misc", S("Kaydara FBX Binary"), 2*GB, SizeMode::Header, vFbx));
     add(mk("GLTF_BIN", "glb", "misc", S("glTF"), 2*GB, SizeMode::Header, vGlb));
     { auto c = mk("TORRENT", "torrent", "misc", S("d8:announce"), 16*MB); c.min_size = 64; add(c); }
     { auto c = mk("PLIST_XML", "plist", "misc", S("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist"),

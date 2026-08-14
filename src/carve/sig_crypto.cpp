@@ -77,6 +77,78 @@ i64 vGpg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return lastEnd - off;
 }
 
+// --- KeePass 1 (KDB): 116-byte header; LE32 payload length at 116. ----------
+i64 vKdb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.le32(off + 8) != 3) return -1;                       // version
+    u32 len = s.le32(off + 116);
+    if (len < 1 || len > (u32)max) return -1;
+    i64 total = 120 + (i64)len;
+    return (total <= max) ? total : -1;
+}
+
+// --- KeePass 2 (KDBX): magic + version + typed header fields until END,
+// then the payload length. ----------------------------------------------------
+i64 vKdbx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 ver = s.le32(off + 8);
+    if ((ver & 0xFFFF0000) != 0x00030000 && (ver & 0xFFFF0000) != 0x00040000) return -1;
+    i64 p = off + 12;
+    for (int guard = 0; guard < 256; guard++) {
+        if (p + 5 > off + max) return -1;
+        u8 type = s.byte(p);
+        if (type == 0) break;                                  // END
+        if (type > 7) return -1;
+        u32 size = s.le32(p + 1);
+        if (size > (1 << 20)) return -1;
+        p += 5 + size;
+    }
+    u32 len = s.le32(p);
+    if (len < 1 || len > (u32)max) return -1;
+    i64 total = p + 4 + (i64)len;
+    return (total <= off + max) ? total - off : -1;
+}
+
+// --- Java keystore (JKS): count entries, each alias + ts + key + certs. -----
+i64 vJks(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 ver = s.be32(off + 4);
+    u32 count = s.be32(off + 8);
+    if (ver != 1 && ver != 2) return -1;
+    if (count < 1 || count > 1024) return -1;
+    i64 p = off + 12;
+    for (u32 i = 0; i < count; i++) {
+        if (p + 2 > off + max) return -1;
+        u32 aliasLen = s.be16(p);
+        if (aliasLen > 65535 || p + 2 + aliasLen + 8 > off + max) return -1;
+        p += 2 + aliasLen + 8;                                 // alias + ts
+        if (p + 4 > off + max) return -1;
+        u32 keyLen = s.be32(p);
+        if (p + 4 + keyLen > off + max) return -1;
+        p += 4 + keyLen;
+        if (p + 4 > off + max) return -1;
+        u32 chain = s.be32(p);
+        if (chain > 1024) return -1;
+        p += 4;
+        for (u32 c = 0; c < chain; c++) {
+            if (p + 4 > off + max) return -1;
+            u32 certLen = s.be32(p);
+            if (p + 4 + certLen > off + max) return -1;
+            p += 4 + certLen;
+        }
+    }
+    return p - off;
+}
+
+// --- Berkeley DB / Bitcoin wallet.dat: meta page; file = pages x pageSize. -
+i64 vBdb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be32(off + 8) != 0x00053162) return -1;              // DB magic
+    u32 pageSize = s.le32(off + 16);
+    if (pageSize < 512 || pageSize > 65536 || (pageSize & (pageSize - 1)) != 0) return -1;
+    if (s.byte(off + 20) != 1) return -1;                      // meta page
+    u32 lastPgno = s.le32(off + 26);
+    if (lastPgno > 1000000) return -1;
+    i64 total = ((i64)lastPgno + 1) * pageSize;
+    return (total <= max) ? total : -1;
+}
+
 void registerCrypto(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -109,11 +181,11 @@ void registerCrypto(Registry& r) {
     { auto c = mk("SSH_ED25519_PUB", "pub", "crypto", S("ssh-ed25519 AAAA"), 64*KB,
                   SizeMode::Text, vText); c.min_size = 64; add(c); }
     add(mk("PKCS12", "p12", "crypto", B({0x30,0x82}), 4*MB, SizeMode::Header, vDer));
-    add(mk("JKS", "jks", "crypto", B({0xFE,0xED,0xFE,0xED}), 16*MB));
-    add(mk("KDBX", "kdbx", "crypto", B({0x03,0xD9,0xA2,0x9A,0x67,0xFB,0x4B,0xB5}), 256*MB));
-    add(mk("KDB", "kdb", "crypto", B({0x03,0xD9,0xA2,0x9A,0x65,0xFB,0x4B,0xB5}), 256*MB));
+    add(mk("JKS", "jks", "crypto", B({0xFE,0xED,0xFE,0xED}), 16*MB, SizeMode::Header, vJks));
+    add(mk("KDBX", "kdbx", "crypto", B({0x03,0xD9,0xA2,0x9A,0x67,0xFB,0x4B,0xB5}), 256*MB, SizeMode::Header, vKdbx));
+    add(mk("KDB", "kdb", "crypto", B({0x03,0xD9,0xA2,0x9A,0x65,0xFB,0x4B,0xB5}), 256*MB, SizeMode::Header, vKdb));
     add(mk("GPG_KEYRING", "gpg", "crypto", B({0x99,0x01}), 16*MB, SizeMode::FrameStream, vGpg));
-    add(mk("BITCOIN_WALLET", "dat", "crypto", B({0x00,0x05,0x31,0x62,0x00,0x09,0x00,0x00}), 512*MB));
+    add(mk("BITCOIN_WALLET", "dat", "crypto", B({0x00,0x05,0x31,0x62,0x00,0x09,0x00,0x00}), 512*MB, SizeMode::Header, vBdb));
 }
 
 }  // namespace ghost

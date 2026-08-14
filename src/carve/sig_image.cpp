@@ -8,6 +8,7 @@
 #include "sig_common.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 namespace ghost {
@@ -449,6 +450,207 @@ i64 vSvgXml(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     return size;
 }
 
+// --- BigTIFF (II 43 08 00): IFD walk to the end of the strip data. ----------
+i64 vBigTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.le16(off + 4) != 8) return -1;                       // offset size
+    i64 p = (i64)s.le64(off + 8);                              // first IFD
+    if (p < 16 || p > max - 8) return -1;
+    u64 n = s.le64(off + p);
+    if (n == 0 || n > 100000) return -1;
+    i64 stripOff = -1, stripBytes = 0;
+    i64 q = p + 8;
+    for (u64 i = 0; i < n; i++) {
+        if (q + 20 > max) return -1;
+        u16 tag = s.le16(off + q);
+        u16 type = s.le16(off + q + 2);
+        if (type == 4) {                                       // LONG
+            u32 v = s.le32(off + q + 12);
+            if (tag == 273) stripOff = v;
+            if (tag == 279) stripBytes = v;
+        } else if (type == 16) {                               // LONG8
+            i64 v = (i64)s.le64(off + q + 12);
+            if (tag == 273) stripOff = v;
+            if (tag == 279) stripBytes = v;
+        }
+        q += 20;
+    }
+    if (stripOff < 0) return -1;
+    i64 total = std::max(q + 8, stripOff + stripBytes);
+    return (total <= max) ? total : -1;
+}
+
+// --- ICNS: BE32 total length; walk the chunk table exactly to it. -----------
+i64 vIcns(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = s.be32(off + 4);
+    if (total < 16 || total > max) return -1;
+    i64 p = off + 8;
+    while (p + 8 <= off + total) {
+        u32 sz = s.be32(p + 4);
+        if (sz < 8 || p + sz > off + total) return -1;
+        p += sz;
+    }
+    return (p == off + total) ? total : -1;
+}
+
+// --- EMF: 88-byte header then records [type (4) + size (4 LE) + data];
+// the EMR_EOF record (type 14) closes the file; nBytes at 48 must agree. -----
+i64 vEmf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = s.le32(off + 48);
+    if (total < 88 || total > max) return -1;
+    i64 p = off + 88;
+    for (int guard = 0; guard < (1 << 20); guard++) {
+        if (p + 8 > off + total) return -1;
+        u32 type = s.le32(p);
+        u32 size = s.le32(p + 4);
+        if (size < 8 || p + size > off + total) return -1;
+        p += size;
+        if (type == 14) break;                                 // EMR_EOF
+    }
+    return (p == off + total) ? total : -1;
+}
+
+// --- XCF: 14-byte magic + "v00x"; BE32 file size at offset 22. --------------
+i64 vXcf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto v = s.read(off + 9, 5);
+    if (v.size() < 5 || v[0] != 'v' || v[1] < '0' || v[1] > '1' ||
+        v[2] < '0' || v[2] > '9' || v[3] < '0' || v[3] > '9' || v[4] < '0' || v[4] > '9')
+        return -1;
+    i64 total = s.be32(off + 22);
+    if (total < 26 || total > max) return -1;
+    return total;
+}
+
+// --- JPEG2000 codestream: marker walk; the SOT Psot skips the tile data and
+// the EOC marker closes the codestream. --------------------------------------
+i64 vJ2k(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 p = off + 2;                                           // after SOC
+    for (int guard = 0; guard < (1 << 16); guard++) {
+        if (p + 2 > off + max) return -1;
+        u16 m = s.be16(p);
+        if (m == 0xFFD9) return (p + 2) - off;                 // EOC
+        if (m == 0xFF90) {                                     // SOT
+            i64 psot = s.be32(p + 6);
+            if (psot < 14) return -1;
+            p += psot;                                         // skip to tile end
+            continue;
+        }
+        if ((m >> 8) != 0xFF) return -1;
+        switch (m) {
+            case 0xFF51: case 0xFF52: case 0xFF53: case 0xFF5C:
+            case 0xFF5D: case 0xFF5E: case 0xFF5F: case 0xFF60:
+            case 0xFF61: case 0xFF62: case 0xFF63: {           // length-carrying
+                u16 len = s.be16(p + 2);
+                if (len < 2) return -1;
+                p += 2 + len;
+                break;
+            }
+            case 0xFF4F: case 0xFF91: case 0xFF92:             // SOC/SOP/EPH
+                p += 2;
+                break;
+            default:
+                return -1;
+        }
+    }
+    return -1;
+}
+
+// --- ISO-BMFF box family for codestream carriers (JP2, JXL_ISO): walk the
+// top-level boxes; the codestream box (jp2c / jxlp / brob) ends the file. ----
+i64 vJp2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 p = off;
+    while (p + 8 <= off + max) {
+        u64 size = s.be32(p);
+        if (size == 0) return -1;
+        auto type = s.read(p + 4, 4);
+        if (type.size() < 4) return -1;
+        bool stream = std::memcmp(type.data(), "jp2c", 4) == 0 ||
+                      std::memcmp(type.data(), "jxlp", 4) == 0 ||
+                      std::memcmp(type.data(), "brob", 4) == 0;
+        if (size == 1) {                                       // XLBox
+            u64 xl = s.be64(p + 8);
+            if (xl < 16 || p + (i64)xl > off + max) return -1;
+            p += (i64)xl;
+        } else {
+            if (size < 8 || p + (i64)size > off + max) return -1;
+            p += (i64)size;
+        }
+        if (stream) return p - off;
+    }
+    return -1;
+}
+
+// --- OpenEXR: attribute list, then scanline blocks up to the last row. ------
+i64 vExr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 ver = s.le32(off + 4);
+    if ((ver & 0xFF) != 2) return -1;                          // file version 2
+    i64 p = off + 8;
+    i64 yMax = -1;
+    for (int guard = 0; guard < (1 << 16); guard++) {
+        if (p + 2 > off + max) return -1;
+        i64 nLen = 0;
+        while (s.byte(p + nLen) != 0) { if (++nLen > 256) return -1; }
+        if (nLen == 0) break;                                  // end of attrs
+        i64 tLen = 0;
+        while (s.byte(p + nLen + 1 + tLen) != 0) { if (++tLen > 64) return -1; }
+        u32 sz = s.le32(p + nLen + 1 + tLen + 1);
+        if (sz > 16 * 1024 * 1024) return -1;
+        auto name = s.read(p, nLen);
+        if (name.size() == (size_t)nLen && nLen == 10 &&
+            std::memcmp(name.data(), "dataWindow", 10) == 0) {
+            auto v = s.read(p + nLen + 1 + tLen + 1 + 4, 16);
+            if (v.size() >= 16)                                // box2i: x y x y
+                yMax = (i64)((u32)v[12] | (u32)v[13] << 8 | (u32)v[14] << 16 | (u32)v[15] << 24);
+        }
+        p += nLen + 1 + tLen + 1 + 4 + sz;
+    }
+    if (yMax < 0 || yMax > (1 << 20)) return -1;
+    for (int rows = 0; rows < (1 << 24); rows++) {
+        i64 y = (i64)s.le32(p);
+        u32 size = s.le32(p + 4);
+        if (y < 0 || y > yMax || size == 0 || p + 8 + (i64)size > off + max) return -1;
+        p += 8 + size;
+        if (y == yMax) return p - off;
+    }
+    return -1;
+}
+
+// --- HDR (Radiance): header + resolution line, then new-RLE scanlines. ------
+i64 vHdr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto head = s.read(off, std::min<i64>(max, 4096));
+    if (head.size() < 32) return -1;
+    std::string text((const char*)head.data(), head.size());
+    size_t pos = text.find("-Y ");
+    size_t xp = (pos == std::string::npos) ? std::string::npos : text.find("+X ", pos);
+    if (xp == std::string::npos) return -1;
+    int h = (int)std::strtol(text.c_str() + pos + 3, nullptr, 10);
+    int w = (int)std::strtol(text.c_str() + xp + 3, nullptr, 10);
+    if (h < 1 || h > 16384 || w < 1 || w > 16384) return -1;
+    size_t nl = text.find('\n', xp);
+    if (nl == std::string::npos) return -1;
+    i64 p = off + (i64)nl + 1;
+    for (int r = 0; r < h; r++) {
+        if (p + 5 > off + max) return -1;
+        if (s.byte(p) != 0x02 || s.byte(p + 1) != 0x02 || s.be16(p + 2) != 1) return -1;
+        if ((int)s.byte(p + 4) != w) return -1;
+        p += 5 + 4 * (i64)w;
+    }
+    return p - off;
+}
+
+// --- Fuji RAF: the TIFF (offset, length) pair at 0x62/0x66 bounds the file. -
+i64 vRaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = s.be32(off + 0x62) + s.be32(off + 0x66);
+    if (total < 0x70 || total > max) return -1;
+    return total;
+}
+
+// --- Sigma X3F: image (offset, length) pair at 0x14/0x18 bounds the file. ---
+i64 vX3f(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = s.be32(off + 0x14) + s.be32(off + 0x18);
+    if (total < 28 || total > max) return -1;
+    return total;
+}
+
 void registerImages(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -474,13 +676,13 @@ void registerImages(Registry& r) {
     { auto c = mk("RW2", "rw2", "image", B({'I','I','U',0x00}), 256*MB, SizeMode::Header, vTiff); add(c); }
     { auto c = mk("PEF", "pef", "image", B({'M','M',0x00,0x2A}), 256*MB, SizeMode::Header, vTiff);
       withConfirm(c, S("PENTAX"), -1, 65536); c.priority = 18; add(c); }
-    add(mk("RAF", "raf", "image", S("FUJIFILMCCD-RAW "), 256*MB));
-    add(mk("X3F", "x3f", "image", S("FOVb"), 256*MB));
+    add(mk("RAF", "raf", "image", S("FUJIFILMCCD-RAW "), 256*MB, SizeMode::Header, vRaf));
+    add(mk("X3F", "x3f", "image", S("FOVb"), 256*MB, SizeMode::Header, vX3f));
     { auto c = mk("TIFF_LE", "tif", "image", B({'I','I',0x2A,0x00}), 512*MB, SizeMode::Header, vTiff);
       c.min_size = 16; add(c); }
     { auto c = mk("TIFF_BE", "tif", "image", B({'M','M',0x00,0x2A}), 512*MB, SizeMode::Header, vTiff);
       c.min_size = 16; add(c); }
-    { auto c = mk("BigTIFF", "tif", "image", B({'I','I',0x2B,0x00}), 2*GB); add(c); }
+    add(mk("BigTIFF", "tif", "image", B({'I','I',0x2B,0x00}), 2*GB, SizeMode::Header, vBigTiff));
     { auto c = mk("WEBP", "webp", "image", S("RIFF"), 256*MB, SizeMode::Header, vRiff);
       withConfirm(c, S("WEBP"), 8); c.priority = 20; add(c); }
     { auto c = mk("HEIC", "heic", "image", S("ftyp"), 256*MB, SizeMode::Container, vMp4);
@@ -495,18 +697,19 @@ void registerImages(Registry& r) {
       c.min_size = 64; add(c); }
     { auto c = mk("PSD", "psd", "image", S("8BPS"), 2*GB, SizeMode::Header, vPsd);
       c.min_size = 128; add(c); }
-    add(mk("XCF", "xcf", "image", S("gimp xcf "), 512*MB));
-    add(mk("JP2", "jp2", "image", B({0x00,0x00,0x00,0x0C,'j','P',0x20,0x20}), 256*MB));
-    add(mk("J2K", "j2k", "image", B({0xFF,0x4F,0xFF,0x51}), 256*MB));
+    add(mk("XCF", "xcf", "image", S("gimp xcf "), 512*MB, SizeMode::Header, vXcf));
+    add(mk("JP2", "jp2", "image", B({0x00,0x00,0x00,0x0C,'j','P',0x20,0x20}), 256*MB, SizeMode::Header, vJp2));
+    add(mk("J2K", "j2k", "image", B({0xFF,0x4F,0xFF,0x51}), 256*MB, SizeMode::Header, vJ2k));
     add(mk("JXL", "jxl", "image", B({0xFF,0x0A}), 256*MB, SizeMode::Header, vJxl));
-    add(mk("JXL_ISO", "jxl", "image", B({0x00,0x00,0x00,0x0C,'J','X','L',0x20}), 256*MB));
+    add(mk("JXL_ISO", "jxl", "image", B({0x00,0x00,0x00,0x0C,'J','X','L',0x20}), 256*MB, SizeMode::Header, vJp2));
     add(mk("QOI", "qoi", "image", S("qoif"), 256*MB, SizeMode::Heuristic, vQoi));
     add(mk("DDS", "dds", "image", S("DDS "), 512*MB));
-    add(mk("EXR", "exr", "image", B({0x76,0x2F,0x31,0x01}), 512*MB));
-    add(mk("HDR", "hdr", "image", S("#?RADIANCE"), 256*MB));
-    add(mk("PCX", "pcx", "image", B({0x0A,0x05,0x01,0x08}), 64*MB, SizeMode::Container, vPcx));
-    add(mk("ICNS", "icns", "image", S("icns"), 64*MB));
-    add(mk("EMF", "emf", "image", B({0x01,0x00,0x00,0x00,0x58,0x00,0x00,0x00}), 64*MB));
+    add(mk("EXR", "exr", "image", B({0x76,0x2F,0x31,0x01}), 512*MB, SizeMode::Header, vExr));
+    add(mk("HDR", "hdr", "image", S("#?RADIANCE"), 256*MB, SizeMode::Header, vHdr));
+    { auto c = mk("PCX", "pcx", "image", B({0x0A,0x05,0x01,0x08}), 64*MB, SizeMode::Container, vPcx);
+      add(c); }
+    add(mk("ICNS", "icns", "image", S("icns"), 64*MB, SizeMode::Header, vIcns));
+    add(mk("EMF", "emf", "image", B({0x01,0x00,0x00,0x00,0x58,0x00,0x00,0x00}), 64*MB, SizeMode::Header, vEmf));
     add(mk("WMF", "wmf", "image", B({0xD7,0xCD,0xC6,0x9A}), 64*MB));
     { auto c = mk("SVG", "svg", "image", S("<svg"), 32*MB, SizeMode::Text, vText);
       c.min_size = 64; add(c); }

@@ -288,12 +288,31 @@ i64 vVdi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return (i64)end;
 }
 
+// --- VMDK sparse: 512-byte header + descriptor sectors + grain tables. ------
+i64 vVmdk(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 version = s.le32(off + 4);
+    u32 flags = s.le32(off + 8);
+    if (version != 1 && version != 2) return -1;
+    u64 grainSize = s.le64(off + 20);
+    u64 descSize = s.le64(off + 36);
+    u32 numGT = s.le32(off + 44);
+    u32 numGTE = s.le32(off + 48);
+    if (grainSize > (1 << 20)) return -1;
+    if (numGTE > 0 && grainSize == 0) return -1;
+    if (descSize == 0 || descSize > 1024 * 1024) return -1;
+    if (numGT > 1024 * 1024 || numGTE > 1024 * 1024) return -1;
+    i64 total = 512 + (i64)descSize * 512 + (i64)numGT * 4 + (i64)numGTE * 4 +
+                (i64)numGTE * (i64)grainSize * 512;
+    if (flags & 0x10000) total += 512;                        // embedded backup
+    return (total <= max) ? total : -1;
+}
+
 void registerVm(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
     { auto c = mk("QCOW2", "qcow2", "vm", B({'Q','F','I',0xFB}), 64*GB,
                   SizeMode::Heuristic, vQcow); c.min_size = 72; add(c); }
-    add(mk("VMDK_SPARSE", "vmdk", "vm", B({'K','D','M','V'}), 64*GB));
+    add(mk("VMDK_SPARSE", "vmdk", "vm", B({'K','D','M','V'}), 64*GB, SizeMode::Header, vVmdk));
     add(mk("VMDK_DESC", "vmdk", "vm", S("# Disk DescriptorFile"), 1*MB));
     { auto c = mk("VDI", "vdi", "vm", S("<<< Oracle VM VirtualBox Disk Image >>>"), 64*GB,
                   SizeMode::Header, vVdi); c.min_size = 512; add(c); }

@@ -321,6 +321,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     // expensive minority.
     struct Validated {
         i64 size = 0;
+        i64 backscan = 0;          // bytes of the file before the signature
         double entropy = 0;
         bool valid = false;
         bool guessed = false;
@@ -359,7 +360,9 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         // Determine the length.
         i64 size = -1;
         if (opt.validate && spec.validator) {
+            src.setBackscan(0);
             size = spec.validator(src, off, cap, spec);
+            v.backscan = src.backscan();
             if (size < 0) {
                 if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=validator\n",
                                  spec.name.c_str(), (long long)off);
@@ -516,7 +519,10 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             }
         }
 
-        // Stream the file out, hashing as we go.
+        // Stream the file out, hashing as we go. A backscanned format's bytes
+        // run from (off - backscan) to (off + size).
+        const i64 carveStart = off - v.backscan;
+        const i64 outLen = v.backscan + size;
         MD5 md5;
         SHA1 sha1;
         std::string outPath;
@@ -541,11 +547,11 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         bool writeError = false;
         {
             const i64 kChunk = 4 * 1024 * 1024;
-            while (written < size) {
-                i64 want = std::min(kChunk, size - written);
-                auto chunk = disk.readBlock((u64)(off + written), want);
+            while (written < outLen) {
+                i64 want = std::min(kChunk, outLen - written);
+                auto chunk = disk.readBlock((u64)(carveStart + written), want);
                 if (chunk.empty()) { readError = true; break; }
-                disk.adviseDrop((u64)(off + written), (i64)chunk.size());
+                disk.adviseDrop((u64)(carveStart + written), (i64)chunk.size());
                 if (opt.compute_hashes) {
                     md5.update(chunk.data(), chunk.size());
                     sha1.update(chunk.data(), chunk.size());
@@ -570,7 +576,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         if (opt.compute_hashes) digest = md5.hex();
         else {
             // Cheap content key when hashing is disabled.
-            auto head = disk.readBlock((u64)off, std::min<i64>(written, 8192));
+            auto head = disk.readBlock((u64)carveStart, std::min<i64>(written, 8192));
             u64 h = 1469598103934665603ull;
             for (u8 b : head) { h ^= b; h *= 1099511628211ull; }
             digest = std::to_string(h);
@@ -582,8 +588,8 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             if (!outPath.empty()) ::remove(outPath.c_str());
             result.duplicates++;
             // Still mark the range consumed so overlapping candidates are skipped.
-            acceptedStart = off;
-            acceptedEnd = off + written;
+            acceptedStart = carveStart;
+            acceptedEnd = carveStart + written;
             acceptedValidated = true;
             continue;
         }
@@ -601,15 +607,15 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         cf.truncated = readError || writeError || written < size || v.sizeClamped;
         cf.confidence = cf.validated ? (cf.truncated ? 0.6 : 1.0) : 0.5;
         if (opt.compute_hashes) { cf.md5 = digest; cf.sha1 = sha1.hex(); }
-        cf.extents.push_back(Extent(off, written));
+        cf.extents.push_back(Extent(carveStart, written));
 
         result.by_format[spec.name]++;
         result.by_category[spec.category]++;
         result.files.push_back(std::move(cf));
         prog.setFound((i64)result.files.size());
 
-        acceptedStart = off;
-        acceptedEnd = off + written;
+        acceptedStart = carveStart;
+        acceptedEnd = carveStart + written;
         acceptedValidated = !v.guessed && !cf.truncated;
     }
 

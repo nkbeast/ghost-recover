@@ -428,6 +428,97 @@ i64 vIso(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return (i64)size;
 }
 
+// --- LZIP: scan for the member trailer (BE64 member size at +12). ----------
+i64 vLzip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.byte(off + 4) < 1 || s.byte(off + 4) > 3) return -1;  // version
+    i64 p = off + 20;
+    while (p + 20 <= off + max) {
+        i64 msize = (i64)s.be64(p + 12);
+        if (msize >= 20 && msize == p + 20 - off) return p + 20 - off;
+        p++;
+    }
+    return -1;
+}
+
+// --- RPM: lead + signature header + main header; the SIG_SIZE tag (1002)
+// of the signature header gives the payload length that closes the file. ----
+i64 vRpm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be32(off + 96) != 0x8EADE801 && s.be32(off + 96) != 0x8EADE802) return -1;
+    i64 p = off + 96;
+    auto walkHeader = [&](i64 h, i64& next, i64* sizeTag) -> bool {
+        u32 nindex = s.be32(h + 8);
+        u32 hsize = s.be32(h + 12);
+        if (nindex > 100000) return false;
+        i64 entries = h + 16, dataStart = entries + 16 * (i64)nindex;
+        if (dataStart + hsize > off + max) return false;
+        for (u32 i = 0; i < nindex; i++) {
+            u32 tag = s.be32(entries + 16 * (i64)i);
+            u32 type = s.be32(entries + 16 * (i64)i + 4);
+            u32 offs = s.be32(entries + 16 * (i64)i + 8);
+            if (type == 4 && tag == 1002 && sizeTag) {
+                *sizeTag = s.le32(dataStart + offs);
+            }
+        }
+        next = dataStart + hsize;
+        return true;
+    };
+    i64 sigNext = 0, payloadSize = -1;
+    if (!walkHeader(p, sigNext, &payloadSize)) return -1;
+    i64 mainNext = 0;
+    if (!walkHeader(sigNext, mainNext, nullptr)) return -1;
+    if (payloadSize < 0) return -1;
+    i64 total = mainNext + payloadSize;
+    return (total <= off + max) ? total - off : -1;
+}
+
+// --- StuffIt: entry chain [nameLen (1) + name + len (4 LE) + data]. ---------
+i64 vSit(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.byte(off + 82) != 0x05) return -1;                   // version byte
+    i64 p = off + 91;
+    for (int guard = 0; guard < (1 << 20); guard++) {
+        if (p + 5 > off + max) return -1;
+        u8 n = s.byte(p);
+        if (n == 0) return p - off;                            // end of archive
+        if (p + 1 + n + 4 > off + max) return -1;
+        u32 len = s.le32(p + 1 + n);
+        if (p + 1 + n + 4 + len > off + max) return -1;
+        p += 1 + n + 4 + len;
+    }
+    return -1;
+}
+
+// --- CramFS: LE32 size at offset 4. -----------------------------------------
+i64 vCramfs(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    i64 total = s.le32(off + 4);
+    if (total < 64 || total > max) return -1;
+    return total;
+}
+
+// --- SquashFS: LE64 bytes_used at offset 40. --------------------------------
+i64 vSquashfs(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 major = s.be16(off + 28), minor = s.be16(off + 30);
+    if (major != 4 && major != 5) return -1;
+    if (major == 4 && minor > 0) return -1;
+    i64 total = (i64)s.le64(off + 40);
+    if (total < 96 || total > max) return -1;
+    return total;
+}
+
+// --- DMG: the koly trailer sits at the END of the file; the data fork
+// precedes it (setBackscan), so carving [off-backscan, off+512) recovers the
+// whole image. ----------------------------------------------------------------
+i64 vDmg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be32(off) != 0x6B6F6C79) return -1;                  // koly
+    if (s.be32(off + 4) != 4) return -1;                       // version
+    if (s.be32(off + 8) != 512) return -1;                     // header size
+    if (s.be32(off + 12) != 1) return -1;                      // flags
+    i64 dataLen = (i64)s.be64(off + 40);                       // data fork length
+    if (dataLen <= 0 || dataLen >= off) return -1;
+    if (dataLen + 512 > max) return -1;
+    s.setBackscan(dataLen);
+    return 512;
+}
+
 void registerArchives(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -459,23 +550,23 @@ void registerArchives(Registry& r) {
       c.min_size = 36; add(c); }
     add(mk("ZSTD", "zst", "archive", B({0x28,0xB5,0x2F,0xFD}), 8*GB));
     add(mk("LZ4", "lz4", "archive", B({0x04,0x22,0x4D,0x18}), 8*GB));
-    add(mk("LZIP", "lz", "archive", S("LZIP"), 8*GB));
+    add(mk("LZIP", "lz", "archive", S("LZIP"), 8*GB, SizeMode::Header, vLzip));
     { auto c = mk("LZMA_ALONE", "lzma", "archive", B({0x5D,0x00,0x00}), 8*GB, SizeMode::Heuristic, vLzmaAlone);
       c.min_size = 29; add(c); }
-    add(mk("RPM", "rpm", "archive", B({0xED,0xAB,0xEE,0xDB}), 2*GB));
+    add(mk("RPM", "rpm", "archive", B({0xED,0xAB,0xEE,0xDB}), 2*GB, SizeMode::Header, vRpm));
     add(mk("CPIO_ASCII", "cpio", "archive", S("070701"), 2*GB, SizeMode::Container, vCpio));
     add(mk("CPIO_ODC", "cpio", "archive", S("070707"), 2*GB, SizeMode::Container, vCpio));
     add(mk("CPIO_BIN", "cpio", "archive", B({0xC7,0x71}), 2*GB, SizeMode::Container, vCpio));
     add(mk("LZH", "lzh", "archive", S("-lh"), 512*MB));
     add(mk("ACE", "ace", "archive", S("**ACE**"), 512*MB));
-    add(mk("SIT", "sit", "archive", S("StuffIt"), 512*MB));
+    add(mk("SIT", "sit", "archive", S("StuffIt"), 512*MB, SizeMode::Header, vSit));
     add(mk("WIM", "wim", "archive", S("MSWIM"), 8*GB));
-    add(mk("DMG_KOLY", "dmg", "archive", S("koly"), 16*GB));
+    add(mk("DMG_KOLY", "dmg", "archive", S("koly"), 16*GB, SizeMode::Header, vDmg));
     { auto c = mk("ISO9660", "iso", "archive", S("CD001"), 16*GB,
                   SizeMode::Header, vIso);
       c.magic_offset = 32769; add(c); }
-    add(mk("SQUASHFS", "squashfs", "archive", S("hsqs"), 8*GB));
-    add(mk("CRAMFS", "cramfs", "archive", B({0x45,0x3D,0xCD,0x28}), 2*GB));
+    add(mk("SQUASHFS", "squashfs", "archive", S("hsqs"), 8*GB, SizeMode::Header, vSquashfs));
+    add(mk("CRAMFS", "cramfs", "archive", B({0x45,0x3D,0xCD,0x28}), 2*GB, SizeMode::Header, vCramfs));
 }
 
 }  // namespace ghost

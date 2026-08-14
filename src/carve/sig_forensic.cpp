@@ -74,6 +74,47 @@ i64 vRegf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return 4096 + (i64)hbinsSize;
 }
 
+// --- Legacy Windows event log: 0x30 header + record chain ending with a
+// zero-length record. ---------------------------------------------------------
+i64 vEvt(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.le32(off + 0x10) != 0x30) return -1;                 // end-of-header
+    i64 p = off + 0x30;
+    for (int guard = 0; guard < (1 << 20); guard++) {
+        if (p + 8 > off + max) return -1;
+        u32 len = s.le32(p);
+        if (len == 0) return (p + 4) - off;                    // terminator
+        if (len < 0x18 || p + len > off + max) return -1;
+        if (s.be32(p + 4) != 0x4C664C65) return -1;            // LfLe
+        p += len;
+    }
+    return -1;
+}
+
+// --- Scheduled task (JOB): 0x3C header + NUL-terminated strings, ended by
+// four zero bytes. -------------------------------------------------------------
+i64 vJob(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u16 product = s.le16(off + 4);
+    u16 version = s.le16(off + 6);
+    if (product < 1 || product > 2 || version < 1 || version > 4) return -1;
+    i64 p = off + 0x3C;
+    while (p + 4 <= off + max) {
+        u32 z = s.le32(p);
+        if (z == 0) return p + 4 - off;
+        if (p - off > max) return -1;
+        p++;
+    }
+    return -1;
+}
+
+// --- Prefetch: LE32 file size at 0x0C. ---------------------------------------
+i64 vPrefetch(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 ver = s.le32(off + 4);
+    if (ver != 0x11 && ver != 0x1A && ver != 0x1E && ver != 0x30) return -1;
+    i64 total = s.le32(off + 0x0C);
+    if (total < 0x50 || total > max) return -1;
+    return total;
+}
+
 void registerForensic(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -89,13 +130,13 @@ void registerForensic(Registry& r) {
                   SizeMode::Container, vPcapng); c.min_size = 28; add(c); }
     { auto c = mk("EVTX", "evtx", "forensic", S("ElfFile\0"), 4*GB, SizeMode::Header, vEvtx);
       c.min_size = 4096; add(c); }
-    add(mk("EVT", "evt", "forensic", B({0x30,0x00,0x00,0x00,'L','f','L','e'}), 512*MB));
+    add(mk("EVT", "evt", "forensic", B({0x30,0x00,0x00,0x00,'L','f','L','e'}), 512*MB, SizeMode::Header, vEvt));
     { auto c = mk("REGF", "hiv", "forensic", S("regf"), 4*GB, SizeMode::Header, vRegf);
       c.min_size = 4096; add(c); }
     add(mk("LNK", "lnk", "forensic", B({0x4C,0x00,0x00,0x00,0x01,0x14,0x02,0x00}), 16*MB));
-    add(mk("PREFETCH", "pf", "forensic", S("SCCA"), 16*MB));
+    add(mk("PREFETCH", "pf", "forensic", S("SCCA"), 16*MB, SizeMode::Header, vPrefetch));
     add(mk("PREFETCH_C", "pf", "forensic", B({0x4D,0x41,0x4D,0x04}), 16*MB));
-    add(mk("JOB", "job", "forensic", B({0x01,0x05,0x01,0x00}), 4*MB));
+    add(mk("JOB", "job", "forensic", B({0x01,0x05,0x01,0x00}), 4*MB, SizeMode::Header, vJob));
 }
 
 }  // namespace ghost

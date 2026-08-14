@@ -338,6 +338,21 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     }
 }
 
+// --- Mach-O fat binary: nfat arch entries; the file ends with the last one.
+i64 vMachOFat(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    u32 nfat = s.be32(off + 4);
+    if (nfat < 1 || nfat > 128) return -1;
+    i64 total = 0;
+    for (u32 i = 0; i < nfat; i++) {
+        i64 e = off + 8 + 20 * (i64)i;
+        if (e + 20 > off + max) return -1;
+        u32 aoff = s.be32(e + 8);
+        u32 size = s.be32(e + 12);
+        if (size == 0 || (i64)aoff + size > total) total = (i64)aoff + size;
+    }
+    return (total > 8 && total <= max) ? total : -1;
+}
+
 void registerExecutables(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -349,7 +364,7 @@ void registerExecutables(Registry& r) {
                   SizeMode::Header, vMachO); c.min_size = 32; add(c); }
     { auto c = mk("MachO32", "macho", "executable", B({0xCE,0xFA,0xED,0xFE}), 2*GB,
                   SizeMode::Header, vMachO); c.min_size = 28; add(c); }
-    add(mk("MachO_FAT", "macho", "executable", B({0xCA,0xFE,0xBA,0xBF}), 2*GB));
+    add(mk("MachO_FAT", "macho", "executable", B({0xCA,0xFE,0xBA,0xBF}), 2*GB, SizeMode::Header, vMachOFat));
     { auto c = mk("JavaClass", "class", "executable", B({0xCA,0xFE,0xBA,0xBE}), 64*MB,
                   SizeMode::Heuristic, vClass); c.min_size = 32; add(c); }
     { auto c = mk("DEX", "dex", "executable", S("dex\n"), 512*MB, SizeMode::Header, vDex);

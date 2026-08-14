@@ -149,5 +149,19 @@ u16 ByteSource::le16(i64 off) {
     if (v.size() < 2) return 0;
     return (u16)((u16)v[1] << 8 | v[0]);
 }
+u64 ByteSource::be64(i64 off) {
+    auto v = read(off, 8);
+    if (v.size() < 8) return 0;
+    u64 r = 0;
+    for (int i = 0; i < 8; i++) r = r << 8 | v[i];
+    return r;
+}
+u64 ByteSource::le64(i64 off) {
+    auto v = read(off, 8);
+    if (v.size() < 8) return 0;
+    u64 r = 0;
+    for (int i = 7; i >= 0; i--) r = r << 8 | v[i];
+    return r;
+}
 
 }  // namespace ghost

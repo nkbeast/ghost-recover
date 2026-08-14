@@ -528,6 +528,85 @@ i64 vBik(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return size;
 }
 
+// --- RealMedia (RM): .RMF header then chunk chain; the walk stops when the
+// chunk type is no longer a known stream chunk (after the DATA chunk). ------
+i64 vRm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    if (s.be16(off + 4) != 0) return -1;                       // version 0
+    if (s.be16(off + 6) < 1) return -1;                        // headers present
+    i64 p = off + 12;
+    for (int guard = 0; guard < (1 << 20); guard++) {
+        if (p + 8 > off + max) return -1;
+        auto type = s.read(p, 4);
+        if (type.size() < 4) return -1;
+        bool known = std::memcmp(type.data(), "PROP", 4) == 0 ||
+                     std::memcmp(type.data(), "MDPR", 4) == 0 ||
+                     std::memcmp(type.data(), "CONT", 4) == 0 ||
+                     std::memcmp(type.data(), "DATA", 4) == 0 ||
+                     std::memcmp(type.data(), "INDX", 4) == 0;
+        if (!known) return p - off;                            // file ended
+        u32 size = s.be32(p + 4);
+        if (size < 8 || p + 8 + size > off + max) return -1;
+        p += 8 + size;
+    }
+    return -1;
+}
+
+// --- YUV4MPEG2: header params then FRAME\n + W x H x bpp per frame. --------
+i64 vY4m(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    auto head = s.read(off, 4096);
+    if (head.size() < 16) return -1;
+    if (std::memcmp(head.data(), "YUV4MPEG2", 9) != 0) return -1;
+    i64 w = 0, h = 0, bpp = 0;
+    bool sawW = false, sawH = false, sawC = false;
+    size_t i = 9;
+    for (; i < head.size(); i++) {
+        u8 c = head[i];
+        if (c == '\n') break;
+        if (c == ' ') continue;
+        size_t j = i + 1;
+        if (c == 'W' || c == 'H') {
+            i64 v = 0;
+            bool digits = false;
+            while (j < head.size() && head[j] >= '0' && head[j] <= '9') {
+                v = v * 10 + (head[j] - '0');
+                if (v > 100000) return -1;
+                j++; digits = true;
+            }
+            if (!digits) return -1;
+            if (c == 'W') { w = v; sawW = true; }
+            else { h = v; sawH = true; }
+        } else if (c == 'C') {
+            sawC = true;
+            if (j + 3 <= head.size() && std::memcmp(head.data() + j, "420", 3) == 0) bpp = 15;
+            else if (j + 3 <= head.size() && std::memcmp(head.data() + j, "422", 3) == 0) bpp = 20;
+            else if (j + 3 <= head.size() && std::memcmp(head.data() + j, "444", 3) == 0) bpp = 30;
+            else if (j + 4 <= head.size() && std::memcmp(head.data() + j, "mono", 4) == 0) bpp = 10;
+            else if (j + 3 <= head.size() && std::memcmp(head.data() + j, "400", 3) == 0) bpp = 10;
+            else return -1;
+            while (j < head.size() && head[j] != ' ' && head[j] != '\n') j++;
+        } else {
+            return -1;
+        }
+        i = j - 1;
+    }
+    if (i >= head.size()) return -1;
+    if (!sawW || !sawH || !sawC) return -1;
+    i64 p = off + (i64)i + 1;
+    i64 frameBytes = w * h * bpp / 10;
+    for (int guard = 0; guard < (1 << 24); guard++) {
+        if (p + 6 > off + max) break;
+        auto f = s.read(p, 6);
+        if (f.size() < 6 || std::memcmp(f.data(), "FRAME", 5) != 0) break;
+        i64 q = p + 5;
+        while (q < off + max && s.byte(q) != '\n') q++;
+        if (q >= off + max) return -1;
+        q++;
+        if (q + frameBytes > off + max) return -1;
+        p = q + frameBytes;
+    }
+    return (p > off) ? p - off : -1;
+}
+
 void registerVideo(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
@@ -567,11 +646,11 @@ void registerVideo(Registry& r) {
                   SizeMode::FrameStream, vMpegPs); c.min_size = 2048; add(c); }
     { auto c = mk("MPEG_VES", "mpv", "video", B({0x00,0x00,0x01,0xB3}), 4*GB,
                   SizeMode::FrameStream, vMpegVes); c.min_size = 2048; add(c); }
-    add(mk("RM", "rm", "video", S(".RMF"), 4*GB));
+    add(mk("RM", "rm", "video", S(".RMF"), 4*GB, SizeMode::Header, vRm));
     add(mk("MXF", "mxf", "video", B({0x06,0x0E,0x2B,0x34,0x02,0x05,0x01,0x01}), 32*GB,
            SizeMode::Container, vMxf));
     add(mk("IVF", "ivf", "video", S("DKIF"), 4*GB, SizeMode::Container, vIvf));
-    add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB));
+    add(mk("Y4M", "y4m", "video", S("YUV4MPEG2"), 32*GB, SizeMode::Header, vY4m));
     { auto c = mk("BIK", "bik", "video", S("BIK"), 4*GB, SizeMode::Container, vBik);
       c.min_size = 64; add(c); }
     add(mk("SWF", "swf", "video", S("FWS"), 256*MB, SizeMode::Header, vSwf));
