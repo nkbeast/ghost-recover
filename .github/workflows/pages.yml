@@ -31,7 +31,7 @@ jobs:
         run: npm ci
       - name: Build site
         working-directory: web
-        run: npm run build
+        run: GH_PAGES=1 npm run build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

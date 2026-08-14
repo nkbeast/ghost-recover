@@ -6,6 +6,10 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// GitHub Pages serves the site from a subpath (/ghost-recover/); the engine's
+// local web server serves it at the root. GH_PAGES=1 switches the base URL.
+const base = process.env.GH_PAGES === "1" ? "/ghost-recover/" : "/";
+
 export default defineConfig({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
@@ -18,7 +22,7 @@ export default defineConfig({
   // nitro is disabled: TanStack Start's own vite-based prerenderer emits the
   // static files (the index route opts in via `prerender` in src/routes/index.tsx).
   vite: {
-    base: "/ghost-recover/",
+    base,
   },
   nitro: false,
 });

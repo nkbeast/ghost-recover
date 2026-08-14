@@ -2243,6 +2243,46 @@ int startServer(const ServerConfig& cfg) {
         serveStatic("favicon.png", "image/png", res);
     });
 
+    // ---- generic static assets (the UI bundles its styles/scripts/images
+    // under assets/ with hashed names; also serve the favicon/robots files) --
+    auto staticMime = [](const std::string& file) -> const char* {
+        size_t dot = file.find_last_of('.');
+        std::string ext = dot == std::string::npos ? "" : file.substr(dot);
+        if (ext == ".css") return "text/css; charset=utf-8";
+        if (ext == ".js" || ext == ".mjs") return "text/javascript; charset=utf-8";
+        if (ext == ".png") return "image/png";
+        if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+        if (ext == ".gif") return "image/gif";
+        if (ext == ".svg") return "image/svg+xml";
+        if (ext == ".ico") return "image/x-icon";
+        if (ext == ".webp") return "image/webp";
+        if (ext == ".woff") return "font/woff";
+        if (ext == ".woff2") return "font/woff2";
+        if (ext == ".ttf") return "font/ttf";
+        if (ext == ".json") return "application/json";
+        if (ext == ".map") return "application/json";
+        if (ext == ".txt") return "text/plain; charset=utf-8";
+        if (ext == ".html") return "text/html; charset=utf-8";
+        return "application/octet-stream";
+    };
+    auto serveWebFile = [&](const std::string& file, httplib::Response& res) {
+        if (file.find("..") != std::string::npos || file.find('/') == 0) {
+            res.status = 400;
+            res.set_content("bad path", "text/plain");
+            return;
+        }
+        serveStatic(file, staticMime(file), res);
+    };
+    svr.Get(R"(/assets/(.*))", [&](const httplib::Request& req, httplib::Response& res) {
+        serveWebFile("assets/" + req.matches[1].str(), res);
+    });
+    svr.Get("/favicon.ico", [&](const httplib::Request&, httplib::Response& res) {
+        serveWebFile("favicon.ico", res);
+    });
+    svr.Get("/robots.txt", [&](const httplib::Request&, httplib::Response& res) {
+        serveWebFile("robots.txt", res);
+    });
+
     g_server = &svr;
 
     // Idle watchdog: when no browser is talking to the engine, shut down
