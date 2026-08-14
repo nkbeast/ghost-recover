@@ -1,6 +1,6 @@
 import { Reveal, SectionHeading } from "./Reveal";
 import { projectLayout } from "@/lib/ghost-data";
-import arch from "@/assets/ghost-recover-architecture.png";
+import { ArchitectureDiagram } from "./ArchitectureDiagram";
 
 const passes = [
   {
@@ -46,14 +46,7 @@ export function Architecture() {
         </div>
 
         <Reveal delay={0.1} className="mt-8">
-          <div className="panel overflow-hidden rounded-xl p-2 sm:p-3">
-            <img
-              src={arch}
-              alt="GHOST RECOVER engine architecture: filesystem scanning, data carving, RAID, imaging and repair"
-              loading="lazy"
-              className="w-full rounded-lg border border-border"
-            />
-          </div>
+          <ArchitectureDiagram />
         </Reveal>
 
         <Reveal delay={0.14} className="mt-8">

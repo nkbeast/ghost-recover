@@ -1,6 +1,5 @@
 {
   "name": "tanstack_start_ts",
-  "version": "1.0.0",
   "private": true,
   "sideEffects": false,
   "type": "module",
@@ -85,5 +84,6 @@
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.56.1",
     "vite": "^8.2.0"
-  }
+  },
+  "version": "1.0.0"
 }
