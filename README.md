@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/Platform-Linux-green" alt="Linux"/>
   <img src="https://img.shields.io/badge/RAM-1%20GiB%20min-orange" alt="Runs on 1 GiB RAM"/>
   <a href="https://github.com/nkbeast/ghost-recover/actions/workflows/ci.yml"><img src="https://github.com/nkbeast/ghost-recover/actions/workflows/ci.yml/badge.svg" alt="Build status"/></a>
-  <a href="https://github.com/nkbeast/ghost-recover/releases"><img src="https://img.shields.io/github/downloads/nkbeast/ghost-recover/total" alt="Downloads"/></a>
+  <a href="https://github.com/nkbeast/ghost-recover/releases"><img src="https://img.shields.io/github/downloads/nkbeast/ghost-recover/total?cacheSeconds=300" alt="Downloads"/></a>
   <a href="https://github.com/nkbeast/ghost-recover/stargazers"><img src="https://img.shields.io/github/stars/nkbeast/ghost-recover" alt="Stars"/></a>
 </p>
 
