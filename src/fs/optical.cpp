@@ -634,7 +634,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             Tag t = readTag(b, p);
             if (!t.valid) continue;
             u8 chars = b.u8at(p + 18);
-            u8 idLen = b.u8at(p + 19);
+            int idLen = b.u8at(p + 19);
             if (idLen < 2 || idLen > 255) continue;
             u32 childLb = b.le32(p + 24);
             u16 lenImpl = b.le16(p + 36);
