@@ -27,6 +27,10 @@ i64 vIff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
       withConfirm(c, S("AIFF"), 8); c.priority = 20; c.min_size = 64; add(c); }
     { auto c = mk("AIFC", "aifc", "audio", S("FORM"), 2*GB, SizeMode::Header, vIff);
       withConfirm(c, S("AIFC"), 8); c.priority = 20; c.min_size = 64; add(c); }
+    { auto c = mk("ILBM", "lbm", "image", S("FORM"), 2*GB, SizeMode::Header, vIff);
+      withConfirm(c, S("ILBM"), 8); c.priority = 20; c.min_size = 64; add(c); }
+    { auto c = mk("LWO2", "lwo", "image", S("FORM"), 2*GB, SizeMode::Header, vIff);
+      withConfirm(c, S("LWO2"), 8); c.priority = 20; c.min_size = 64; add(c); }
 }
 
 }  // namespace ghost

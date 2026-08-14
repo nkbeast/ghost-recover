@@ -25,6 +25,13 @@ class  ByteSource;
 //   -1  reject the candidate
 using SizeFn = i64 (*)(ByteSource&, i64 offset, i64 maxSize, const CarveSpec& spec);
 
+// Cheap scan-time admission test for weak signatures (single-byte magics
+// such as the dBase family, which otherwise hit in every binary and flood
+// the candidate list). `p` points at the hit; `n` is how many bytes follow
+// it inside the scan buffer. Return true to admit, false to discard. May
+// admit when n is too small to decide; the validator re-checks everything.
+using ScanFilter = bool (*)(const u8* p, i64 n);
+
 struct CarveSpec {
     std::string name;             // "JPEG"
     std::string ext;              // "jpg"
@@ -60,6 +67,7 @@ struct CarveSpec {
     double min_entropy = -1.0;    // reject below this (unset = no check)
     double max_entropy = -1.0;    // reject above this (rejects random noise)
     int    priority = 0;          // higher wins when two specs match at one offset
+    ScanFilter scan_filter = nullptr;  // scan-time admission test (weak magics)
 };
 
 // Reads that a validator performs. Backed by the DiskReader but with its own

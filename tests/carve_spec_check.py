@@ -1505,6 +1505,141 @@ def make_y4m(_):
     return out
 
 
+# ---------------- phase-2 formats (arj/arc/pak/wad/... plus 52 new specs) -----
+def make_arj(_):
+    hdr = b'\x60\xEA' + u16le(30) + bytes([1, 0, 1, 0])          # magic, hdrSize, ver, flags, method, ftype
+    hdr += u16le(0) + u16le(0) + u32le(0)                        # time, date, crc
+    hdr += u32le(64) + u32le(64)                                 # comp, orig
+    hdr += bytes([1, 0]) + u16le(0) + b'a.txt\x00'               # filever, host, reserved, name
+    return hdr + junk(64) + b'\x60\xEA' + u16le(0)               # entry + end marker
+
+
+def make_arc(_):
+    hdr = b'\x1A\x08' + bytes([1, 0]) + u16le(0) + u16le(0)      # magic, method, ftype, time, date
+    hdr += u32le(0) + u32le(64) + u32le(64)                      # crc, comp, orig
+    return hdr + junk(64) + b'\x1A\x00'                          # entry + 1A 00 end marker
+
+
+def make_pak(_):
+    dir_off = 12 + 64
+    entry = b'\x00' * 56 + u32le(12) + u32le(64)
+    return b'PACK' + u32le(dir_off) + u32le(64) + junk(64) + entry
+
+
+def make_wad(_):
+    lumps, dir_off = 2, 28
+    out = b'IWAD' + u32le(lumps) + u32le(dir_off) + junk(16)
+    for i in range(lumps):
+        out += u32le(12) + u32le(8) + b'lump%d' % i + b'\x00' * 3
+    return out
+
+
+def make_wad_pwad(_):
+    out = bytearray(make_wad(None))
+    out[0:4] = b'PWAD'
+    return bytes(out)
+
+
+def make_qed(_):
+    return b'QED\x00' + u32le(4096) + u32le(4096) + u32le(64) + junk(8192 - 16)
+
+
+def make_android_boot(_):
+    out = bytearray(2048 + 3 * 4096)
+    out[0:8] = b'ANDROID!'
+    out[8:12] = u32le(16)          # kernel size
+    out[16:20] = u32le(16)         # ramdisk size
+    out[24:28] = u32le(16)         # second size
+    out[36:40] = u32le(4096)       # page size
+    out[2048:2064] = junk(16)
+    out[6144:6160] = junk(16)
+    out[10240:10256] = junk(16)
+    return bytes(out)
+
+
+def make_ewf(version):
+    magic = b'EVF' if version == 'E01' else b'LVF'
+    out = magic + b'\x09\x0D\x0A\xFF\x00' + u32le(2) + u32le(16)
+    out += u32le(0x10000000) + u32le(64) + u64le(32) + junk(32)      # section 1
+    out += u32le(0x20000001) + u32le(0) + u64le(16) + junk(16)       # section 2
+    return out
+
+
+def make_dmp(_):
+    out = b'MDMP' + u32le(0x0000A793) + u32le(2) + u32le(136) + junk(20)
+    out += junk(40) + junk(60)                                       # stream 0, 1
+    out += u32le(0x1000) + u32le(40) + u32le(36)                     # dir entry 0
+    out += u32le(0x1000) + u32le(60) + u32le(76)                     # dir entry 1
+    return out
+
+
+def make_pnm_text(name):
+    if name == 'PNM_P1':
+        return ('P1\n8 8\n' + '1 0 1 0 1 0 1 0\n' * 8).encode()
+    if name == 'PNM_P2':
+        return ('P2\n8 8\n255\n' + ' '.join(str((i * 7) % 256) for i in range(64)) + '\n').encode()
+    rows = [' '.join(str(i % 256) for i in range(24)) for _ in range(8)]
+    return ('P3\n8 8\n255\n' + '\n'.join(rows) + '\n').encode()
+
+
+def make_pnm_binary(name):
+    if name == 'PNM_P4':
+        return b'P4\n8 8\n' + junk(8)
+    if name == 'PNM_P5':
+        return b'P5\n8 8\n255\n' + junk(8 * 8)
+    return b'P6\n8 8\n255\n' + junk(8 * 8 * 3)
+
+
+def make_sgi(_):
+    out = bytearray(512)
+    out[0:2] = b'\x01\xDA'
+    out[2] = 0                    # storage: uncompressed
+    out[3] = 1                    # bpc
+    out[4:6] = u16be(2)           # dim
+    out[6:8] = u16be(16)          # x
+    out[8:10] = u16be(16)         # y
+    out[10:12] = u16be(1)         # z
+    out[18:22] = u32be(255)       # pixmax
+    return bytes(out) + junk(16 * 16)
+
+
+def make_xpm(_):
+    return b'/* XPM */\nstatic char *x[] = {\n"1 1 1 1",\n"a c #000000",\n"a"\n};\n'
+
+
+def make_crw(_):
+    out = b'II\x1A\x00\x00\x00' + b'\x00\x00' + b'HEAPCCDR' + u32le(92) + u32le(2) + u32le(0)
+    out += junk(64)
+    for _ in range(2):
+        out += u16le(0) + u16le(0) + u32le(0) + u32le(0)
+    return out
+
+
+def make_form(name):
+    form = {'ILBM': b'ILBM', 'LWO2': b'LWO2'}[name]
+    return b'FORM' + u32be(200) + form + junk(196)
+
+
+def make_nsv(_):
+    return b'NSVf' + u32le(16) + junk(16) + b'NSVs' + u32le(8) + junk(8) + b'NSVf' + u32le(0)
+
+
+def make_wtv(_):
+    return b'\xB7\xD8\x00\x20\x37\x49\xDA\x11\xA6\x4E\x00\x07\xE9\x5E\xAD\x8D' \
+           + u64le(1024) + junk(1000)
+
+
+def make_nes(_):
+    return b'NES\x1A' + bytes([1, 1, 0, 0]) + junk(8) + junk(16384) + junk(8192)
+
+
+def make_dbf(version):
+    ver = {'DBF': 0x03, 'DBF_DBASE4': 0x04, 'DBF_DBASE3_MEMO': 0x83, 'DBF_DBASE4_MEMO': 0x8B}[version]
+    out = bytes([ver]) + b'\x24\x08\x14' + u32le(1) + u16le(65) + u16le(8) + junk(20)
+    out += b'NAME' + b'\x00' * 7 + b'C' + u32le(0) + bytes([8, 0]) + junk(14)
+    return out + b'\x0D' + junk(8)
+
+
 # name -> (builder, category).  Builders take the spec name.
 BUILDERS = {}
 
@@ -1772,6 +1907,64 @@ reg('PLIST_BIN', make_plist_bin, 'misc')
 reg('DER', make_der, 'misc')
 reg('DER_SMALL', make_der_small, 'misc')
 reg('OPENVPN', make_stub(b'client\ndev tun'), 'misc')
+
+# ---------------- phase-2 formats (52 new specs) ----------------
+for n in ('ARJ', 'ARC', 'ZOO', 'SQX', 'KGB', 'ZPAQ', 'RZIP', 'UHARC', 'ALZ',
+          'XAR', 'PAK', 'WAD', 'WAD_PWAD'):
+    if n == 'ARJ':
+        b = make_arj
+    elif n == 'ARC':
+        b = make_arc
+    elif n == 'PAK':
+        b = make_pak
+    elif n == 'WAD':
+        b = make_wad
+    elif n == 'WAD_PWAD':
+        b = make_wad_pwad
+    else:
+        b = make_stub({'ZOO': b'ZOO ', 'SQX': b'SQX ', 'KGB': b'KGB', 'ZPAQ': b'7kBa',
+                       'RZIP': b'RZIP', 'UHARC': b'UHARC', 'ALZ': b'ALZ\x01\x01',
+                       'XAR': b'xar!'}[n])
+    reg(n, b, 'archive')
+reg('QED', make_qed, 'vm')
+reg('ANDROID_BOOT', make_android_boot, 'vm')
+reg('E01', lambda n: make_ewf('E01'), 'forensic')
+reg('L01', lambda n: make_ewf('L01'), 'forensic')
+reg('AFF', make_stub(b'AFF1'), 'forensic')
+reg('DMP', make_dmp, 'forensic')
+reg('FLIF', make_stub(b'FLIF'), 'image')
+reg('BPG', make_stub(bytes([0x42, 0x50, 0x47, 0xFB])), 'image')
+reg('PNM_P1', make_pnm_text, 'image')
+reg('PNM_P2', make_pnm_text, 'image')
+reg('PNM_P3', make_pnm_text, 'image')
+reg('PNM_P4', make_pnm_binary, 'image')
+reg('PNM_P5', make_pnm_binary, 'image')
+reg('PNM_P6', make_pnm_binary, 'image')
+reg('SGI', make_sgi, 'image')
+reg('XPM', make_xpm, 'image')
+reg('PICT', make_stub(bytes([0x00, 0x11, 0x02, 0xFF, 0x0C, 0x00, 0x00, 0x00])), 'image')
+reg('MRW', make_stub(bytes([0x00, 0x4D, 0x52, 0x4D])), 'image')
+reg('CRW', make_crw, 'image')
+reg('ILBM', make_form, 'image')
+reg('LWO2', make_form, 'image')
+reg('TTA', make_stub(b'TTA1'), 'audio')
+reg('OFR', make_stub(b'OFR '), 'audio')
+reg('VQF', make_stub(b'TWIN'), 'audio')
+reg('RA', make_stub(bytes([0x2E, 0x72, 0x61, 0xFD])), 'audio')
+reg('NSV', make_nsv, 'video')
+reg('WTV', make_wtv, 'video')
+reg('QXP', make_stub(b'MXXN'), 'document')
+reg('DVI', make_stub(bytes([0xF7, 0x02])), 'document')
+reg('FDF', lambda n: text_file(b'%FDF-1.2\n', 128), 'document')
+reg('REG', lambda n: text_file(b'Windows Registry Editor Version 5.00\n', 128), 'code')
+reg('PLY', lambda n: text_file(b'ply\n', 128), 'misc')
+reg('NES', make_nes, 'misc')
+reg('DBF', lambda n: make_dbf('DBF'), 'database')
+reg('DBF_DBASE4', lambda n: make_dbf('DBF_DBASE4'), 'database')
+reg('DBF_DBASE3_MEMO', lambda n: make_dbf('DBF_DBASE3_MEMO'), 'database')
+reg('DBF_DBASE4_MEMO', lambda n: make_dbf('DBF_DBASE4_MEMO'), 'database')
+reg('ESEDB', make_stub(b'EFile'), 'database')
+reg('PCF', make_stub(bytes([0x01, 0x66, 0x63, 0x70])), 'font')
 
 # ---------------- code ----------------
 for n in ('JSON', 'SHEBANG_SH', 'SHEBANG_BASH', 'SHEBANG_ENV', 'PYTHON',

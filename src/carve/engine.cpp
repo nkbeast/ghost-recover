@@ -243,6 +243,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                                  const CarveSpec* sp = specs[(size_t)specId];
                                  i64 fileOff = hitOff - sp->magic_offset;
                                  if (fileOff < 0) return;
+                                 if (sp->scan_filter) {
+                                     i64 rel = hitOff - pos;
+                                     if (rel >= 0 &&
+                                         !sp->scan_filter(buf.data() + rel,
+                                                          (i64)buf.size() - rel))
+                                         return;
+                                 }
                                  local.push_back({fileOff, specId, sp->priority});
                              });
                 pos += (i64)buf.size();
