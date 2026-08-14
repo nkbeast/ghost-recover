@@ -19,7 +19,7 @@ i64 vNes(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (off + 16 > off + max) return -1;
     auto h = s.read(off, 16);
     if (h.size() < 16) return -1;
-    u8 prg = h[4], chr = h[5];
+    int prg = h[4], chr = h[5];
     if (prg == 0 || prg > 0x400) return -1;
     i64 total = 16 + (i64)prg * 16384 + (i64)chr * 8192;
     if (h[6] & 0x04) total += 512;                       // trainer
