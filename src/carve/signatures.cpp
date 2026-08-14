@@ -1,12 +1,13 @@
 // GHOST RECOVER — carver signature registry aggregator.
 //
-// The per-format specs live in sig_<category>.cpp (one file per category);
+// The per-format specs live in fmt/<format>.cpp (one file per format family);
 // this file only assembles them into the program-wide registry and owns the
 // debug probe harness. Specs are registered with stable ids ordered by
 // priority so the engine prefers the most specific spec when several match
 // at the same offset.
 #include "ghost/carve.h"
 #include "sig_common.h"
+#include "fmt/all.h"
 
 #include <algorithm>
 #include <cstring>
@@ -19,20 +20,7 @@ namespace {
 
 std::vector<CarveSpec> buildRegistry() {
     std::vector<CarveSpec> r;
-    registerImages(r);
-    registerVideo(r);
-    registerAudio(r);
-    registerDocuments(r);
-    registerEmail(r);
-    registerArchives(r);
-    registerDatabases(r);
-    registerCrypto(r);
-    registerExecutables(r);
-    registerForensic(r);
-    registerVm(r);
-    registerFonts(r);
-    registerMisc(r);
-    registerCode(r);
+    registerAllFormats(r);
     // Assign a stable id order: higher priority first so the engine prefers the
     // most specific spec when several match at the same offset.
     std::stable_sort(r.begin(), r.end(),

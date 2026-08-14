@@ -41,67 +41,9 @@ i64 vRiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return total;
 }
 
-i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    i64 p = off, lastEnd = off;
-    int atoms = 0;
-    bool sawFtyp = false, sawMdatOrMoov = false;
-    while (p + 8 <= off + max && atoms < 100000) {
-        u32 sz32 = s.be32(p);
-        auto type = s.read(p + 4, 4);
-        if (type.size() < 4) break;
-        for (u8 c : type)
-            if (!(c == ' ' || c == '-' || (c >= '0' && c <= '9') ||
-                  (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0xA9)) {
-                return atoms ? lastEnd - off : -1;
-            }
-        i64 size = sz32;
-        if (sz32 == 1) {
-            auto ext = s.read(p + 8, 8);
-            if (ext.size() < 8) break;
-            // Accumulate in u64: an 8-byte extended size can reach 2^64-1 and
-            // shifting it into a signed i64 is undefined behaviour.
-            u64 esz = 0;
-            for (int i = 0; i < 8; i++) esz = (esz << 8) | ext[i];
-            if (esz > 0x7FFFFFFFFFFFFFFFull) break;
-            size = (i64)esz;
-        } else if (sz32 == 0) {
-            // "extends to end of file" — in a carving context we cannot know
-            // where that is, so stop at the last complete atom.
-            break;
-        }
-        if (size < 8 || p + size > off + max) break;
-        if (std::memcmp(type.data(), "ftyp", 4) == 0) sawFtyp = true;
-        if (std::memcmp(type.data(), "mdat", 4) == 0 ||
-            std::memcmp(type.data(), "moov", 4) == 0) sawMdatOrMoov = true;
-        lastEnd = p + size;
-        p = lastEnd;
-        atoms++;
-    }
-    if (atoms < 2 || !(sawFtyp || sawMdatOrMoov)) return -1;
-    return lastEnd - off;
-}
 
-i64 vOgg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    i64 p = off, lastEnd = off;
-    int pages = 0;
-    while (p + 27 <= off + max && pages < 4000000) {
-        auto h = s.read(p, 27);
-        if (h.size() < 27) break;
-        if (h[0] != 'O' || h[1] != 'g' || h[2] != 'g' || h[3] != 'S' || h[4] != 0) break;
-        u8 segs = h[26];
-        auto seg = s.read(p + 27, segs);
-        if ((int)seg.size() < segs) break;
-        i64 dataSize = 0;
-        for (u8 x : seg) dataSize += x;
-        i64 pageSize = 27 + segs + dataSize;
-        if (p + pageSize > off + max) break;
-        lastEnd = p + pageSize;
-        p = lastEnd;
-        pages++;
-    }
-    if (pages < 1) return -1;
-    return lastEnd - off;
-}
+
+
 
 i64 vZip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     // Accept only the End Of Central Directory whose central-directory pointer
@@ -219,68 +161,7 @@ i64 vText(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     return p >= spec.min_size ? p : -1;
 }
 
-i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
-    struct El { i64 pos; i64 contentEnd; };
-    std::vector<El> stack;
-    i64 pos = off;
-    i64 lastEnd = -1;
-    i64 total = 0;
-    const i64 kLimit = (i64)1 << 28;
-    while (pos < off + max && total < kLimit) {
-        u8 tag = s.byte(pos);
-        // Top-level element: tag byte must be 0x30/0x31 (SEQUENCE/SET) for the
-        // common .der/.p12 containers; a raw OCTET STRING wrapper is rare
-        // (PKCS#12 is a sequence, so accept 0x30/0x31).
-        if (tag != 0x30 && tag != 0x31) break;
-        bool constructed = (tag & 0x20) != 0;
-        i64 p = pos + 1;
-        i64 len = 0;
-        u8 lb = s.byte(p++);
-        if (lb & 0x80) {
-            int n = lb & 0x7F;
-            if (n < 1 || n > 4 || p + n > off + max) return -1;
-            for (int k = 0; k < n; k++) len = (len << 8) | s.byte(p++);
-        } else len = lb;
-        i64 contentEnd = p + len;
-        if (contentEnd > off + max) return -1;
-        if (!constructed) return -1;   // must be a constructed container
-        // Walk down the constructed chain.
-        stack.push_back({p, contentEnd});
-        while (!stack.empty()) {
-            El& top = stack.back();
-            if (top.pos >= top.contentEnd) {
-                lastEnd = top.contentEnd;
-                stack.pop_back();
-                continue;
-            }
-            u8 t = s.byte(top.pos);
-            i64 q = top.pos + 1;
-            i64 l = 0;
-            u8 lbb = s.byte(q++);
-            if (lbb & 0x80) {
-                int n = lbb & 0x7F;
-                if (n < 1 || n > 4 || q + n > top.contentEnd) return -1;
-                for (int k = 0; k < n; k++) l = (l << 8) | s.byte(q++);
-            } else l = lbb;
-            if (q + l > top.contentEnd) return -1;
-            bool c = (t & 0x20) != 0;
-            if (c) {
-                top.pos = q + l;                 // consume after descent
-                stack.push_back({q, q + l});
-                if (stack.size() > 64) return -1;
-            } else {
-                top.pos = q + l;
-                lastEnd = q + l;
-            }
-        }
-        if (lastEnd > pos) pos = lastEnd;
-        else break;
-    }
-    if (lastEnd < 0) return -1;
-    if (lastEnd - off > max) return -1;
-    if (spec.min_size > 0 && lastEnd - off < spec.min_size) return -1;
-    return lastEnd - off;
-}
+
 
 bool walksWholeFile(SizeFn fn) {
     static const SizeFn kWhole[] = {

@@ -41,6 +41,10 @@ find_path(ZSTD_INCLUDE_DIR zstd.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# One translation unit per format family; new formats are added by dropping a
+# new <family>.cpp into src/carve/fmt/ and listing it in fmt/all.h.
+file(GLOB CARVE_FMT_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/carve/fmt/*.cpp)
+
 set(SOURCES
     src/main.cpp
     src/server.cpp
@@ -67,21 +71,9 @@ set(SOURCES
     src/carve/matcher.cpp
     src/carve/signatures.cpp
     src/carve/sig_common.cpp
-    src/carve/sig_image.cpp
-    src/carve/sig_video.cpp
-    src/carve/sig_audio.cpp
-    src/carve/sig_document.cpp
-    src/carve/sig_archive.cpp
-    src/carve/sig_database.cpp
-    src/carve/sig_email.cpp
-    src/carve/sig_crypto.cpp
-    src/carve/sig_executable.cpp
-    src/carve/sig_forensic.cpp
-    src/carve/sig_vm.cpp
-    src/carve/sig_font.cpp
-    src/carve/sig_misc.cpp
-    src/carve/sig_code.cpp
     src/carve/engine.cpp
+
+    ${CARVE_FMT_SOURCES}
 
     src/disk/devices.cpp
     src/disk/partitions.cpp
