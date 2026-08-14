@@ -25,6 +25,10 @@
   smoothly on low-end hardware (1 GiB RAM) &nbsp;·&nbsp; every technique verified byte-for-byte
 </p>
 
+<p align="center">
+  <img src="assets/preview.png" width="100%" alt="GHOST RECOVER preview — scan results, recovered files and the web interface"/>
+</p>
+
 ---
 
 ## What is GHOST RECOVER?
@@ -36,7 +40,7 @@ miss. It combines every professional technique in one engine:
   (ext2/3/4, XFS, Btrfs, NTFS, FAT32, exFAT, APFS, HFS+, ISO 9660, UDF and more) to reconstruct
   full directory paths and find deleted files — from the journal, orphan inodes, directory slack,
   MFT slack and FAT1/FAT2 differencing, not just "scan free space".
-* **🔍 RAW disk carving (data carving)** — recovers **262 file formats across 14 categories**
+* **🔍 RAW disk carving (data carving)** — recovers **315 file formats across 14 categories**
   (JPEG, PNG, RAW photos, videos, documents, archives, email, databases and more) with a single
   Aho-Corasick pass, structural length validation and content-hash deduplication.
 * **🔀 RAID recovery** — reassembles RAID 0, RAID 1, RAID 5, RAID 6, RAID 10 and linear arrays
@@ -92,6 +96,40 @@ sudo ghost_recover image   /dev/sdb  --out ~/sdb.img     # clone a failing drive
 ```
 
 Recovered files go to `$GHOST_OUTPUT`, or `~/ghost-recover-output`.
+
+---
+
+## 🖥️ Web interface
+
+<p align="center">
+  <img src="assets/ghostrecoverweb.png" width="100%" alt="GHOST RECOVER web interface — browse recovered files, preview photos and videos in the browser"/>
+</p>
+
+The interface is a thin client over an HTTP API on `127.0.0.1:3030`. Long operations return a job
+id and are polled — with a **live, honest progress bar** (bytes scanned, candidates validated,
+files recovered):
+
+```
+GET  /api/health /api/disks /api/filesystems /api/carvers /api/browse
+GET  /api/privileges  POST /api/elevate  GET /api/elevate/status
+POST /api/handover (privilege hand-off)     POST /api/shutdown
+POST /api/detect /api/partitions
+POST /api/scan /api/carve /api/deep /api/extract /api/image        -> { job }
+GET  /api/job?id= /api/jobs        POST /api/job/cancel
+GET  /api/results?job=&offset=&limit=&q=&ext=&only=&sort=
+GET  /api/content?job=&index=[&max=]   /api/hex   /api/fileinfo   /api/file
+POST /api/raid/detect /api/raid/assemble /api/repair /api/save
+```
+
+Files preview in place: images, audio and video play directly in the page, PDFs render in an
+iframe, and unknown formats fall back to a hex viewer — all served from `/api/content`. Plain
+files stream window-by-window and answer HTTP Range requests natively, so players can seek
+through multi-gigabyte files without loading them; an optional `max=` bounds a preview's byte
+budget (the response carries `X-Content-Truncated: 1` when a cap applies), while downloads
+always receive the complete file.
+
+`/api/file` only serves paths under the output root; the engine will not read arbitrary files off
+the host.
 
 ---
 
@@ -153,9 +191,9 @@ Each filesystem gets the techniques that actually apply to it:
 | JFFS2 | dinode signature scan of dead blocks |
 | ReiserFS | unlinked inodes swept from released leaf nodes |
 
-## 🪓 RAW file carving (262 formats)
+## 🪓 RAW file carving (315 formats)
 
-**262 signatures across 14 categories**, matched with a **single Aho-Corasick pass** over the
+**315 signatures across 14 categories**, matched with a **single Aho-Corasick pass** over the
 device rather than one search per signature.
 
 Formats that describe their own length (JPEG, PNG, GIF, TIFF, RIFF, MP4/ISO-BMFF, EBML, Ogg,
@@ -205,40 +243,6 @@ you pass `apply`, and the original sectors are saved first.
 
 ---
 
-## 🖥️ Web interface
-
-<p align="center">
-  <img src="assets/webui.svg" width="100%" alt="GHOST RECOVER web interface — browse recovered files, preview photos and videos in the browser"/>
-</p>
-
-The interface is a thin client over an HTTP API on `127.0.0.1:3030`. Long operations return a job
-id and are polled — with a **live, honest progress bar** (bytes scanned, candidates validated,
-files recovered):
-
-```
-GET  /api/health /api/disks /api/filesystems /api/carvers /api/browse
-GET  /api/privileges  POST /api/elevate  GET /api/elevate/status
-POST /api/handover (privilege hand-off)     POST /api/shutdown
-POST /api/detect /api/partitions
-POST /api/scan /api/carve /api/deep /api/extract /api/image        -> { job }
-GET  /api/job?id= /api/jobs        POST /api/job/cancel
-GET  /api/results?job=&offset=&limit=&q=&ext=&only=&sort=
-GET  /api/content?job=&index=[&max=]   /api/hex   /api/fileinfo   /api/file
-POST /api/raid/detect /api/raid/assemble /api/repair /api/save
-```
-
-Files preview in place: images, audio and video play directly in the page, PDFs render in an
-iframe, and unknown formats fall back to a hex viewer — all served from `/api/content`. Plain
-files stream window-by-window and answer HTTP Range requests natively, so players can seek
-through multi-gigabyte files without loading them; an optional `max=` bounds a preview's byte
-budget (the response carries `X-Content-Truncated: 1` when a cap applies), while downloads
-always receive the complete file.
-
-`/api/file` only serves paths under the output root; the engine will not read arbitrary files off
-the host.
-
----
-
 ## 🛡️ Working safely
 
 * **Never write recovered files back to the disk you are recovering from.** Doing so overwrites
@@ -248,21 +252,6 @@ the host.
   and recover from the clone.
 * Repairs modify the device. Every repair is a dry run unless you pass `apply`, and the original
   sectors are saved first, but **image the disk anyway**.
-
----
-
-## 📊 How does it compare?
-
-| | GHOST RECOVER | TestDisk | PhotoRec | ddrescue |
-|---|---|---|---|---|
-| Deleted-file recovery | ✅ journal + slack + orphan scans | ✅ partition/entry-level | partial (carve only) | — |
-| RAW signature carving | ✅ 262 formats, structural validation | — | ✅ (~500 formats) | — |
-| Recovered file integrity | ✅ **byte-for-byte verified**, content-hash dedup | raw entries | raw bytes | raw bytes |
-| RAID reassembly | ✅ 0/1/5/6/10 + parity rebuild | ✅ (basic) | — | — |
-| Failing-drive imaging | ✅ resumable map | — | — | ✅ |
-| Filesystem repair | ✅ dry-run + backup sectors | ✅ | — | — |
-| Interface | ✅ web UI + CLI + API | CLI | CLI | CLI |
-| Low-RAM operation | ✅ 1 GiB RAM | ✅ | ✅ | ✅ |
 
 ---
 
