@@ -387,8 +387,23 @@ int cmdRepair(const Args& a) {
     return r.ok ? 0 : 1;
 }
 
-int cmdCarvers(const Args&) {
+int cmdCarvers(const Args& a) {
     const auto& reg = carverRegistry();
+    if (a.has("--json")) {
+        printf("[");
+        bool first = true;
+        for (const auto& c : reg) {
+            if (!first) printf(",\n");
+            first = false;
+            printf("  {\"name\":\"%s\",\"ext\":\"%s\",\"cat\":\"%s\",\"magic\":\"",
+                   c.name.c_str(), c.ext.c_str(), c.category.c_str());
+            for (u8 b : c.magic) printf("%02X", b);
+            printf("\",\"moff\":%lld,\"validated\":%s}", (long long)c.magic_offset,
+                   c.validator ? "true" : "false");
+        }
+        printf("\n]\n");
+        return 0;
+    }
     printf("%zu carver signatures across %zu categories\n\n", reg.size(),
            carverCategories().size());
     printf("%-18s %-12s %-12s %-10s %s\n", "FORMAT", "EXT", "CATEGORY", "MAXSIZE", "VALIDATED");

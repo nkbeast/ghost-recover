@@ -336,18 +336,35 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         v.valid = false;
 
         i64 avail = result.image_size - off;
-        if (avail < spec.min_size) return;
+        static const bool dbg2 = getenv("GHOST_DEBUG_CARVE") != nullptr;
+        if (avail < spec.min_size) {
+            if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=avail%lld<min%lld\n",
+                             spec.name.c_str(), (long long)off, (long long)avail, (long long)spec.min_size);
+            return;
+        }
         i64 cap = std::min(spec.max_size, avail);
         cap = std::min(cap, opt.max_file_size);
-        if (cap < spec.min_size) return;
+        if (cap < spec.min_size) {
+            if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=cap%lld<min%lld\n",
+                             spec.name.c_str(), (long long)off, (long long)cap, (long long)spec.min_size);
+            return;
+        }
 
-        if (opt.validate && !confirmMatches(rd, spec, off, cap)) return;
+        if (opt.validate && !confirmMatches(rd, spec, off, cap)) {
+            if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=confirm\n",
+                             spec.name.c_str(), (long long)off);
+            return;
+        }
 
         // Determine the length.
         i64 size = -1;
         if (opt.validate && spec.validator) {
             size = spec.validator(src, off, cap, spec);
-            if (size < 0) return;
+            if (size < 0) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=validator\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
         }
         if (size > 0) {
             // Chain walkers without an end marker must not read into the next
@@ -476,11 +493,17 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         // Skip anything that starts inside a file we already recovered —
         // but only when that file's structure was actually verified. A
         // guessed extent must never suppress a real file.
+        static const bool dbg = getenv("GHOST_DEBUG_CARVE") != nullptr;
         if (acceptedValidated && off >= acceptedStart && off < acceptedEnd) {
+            if (dbg) fprintf(stderr, "[carve] masked %s off=%lld size=%lld by span [%lld,%lld)\n",
+                             spec.name.c_str(), (long long)off, (long long)v.size,
+                             (long long)acceptedStart, (long long)acceptedEnd);
             result.rejected++;
             continue;
         }
         if (!v.valid) { result.rejected++; continue; }
+        if (dbg) fprintf(stderr, "[carve] accept %s off=%lld size=%lld\n",
+                         spec.name.c_str(), (long long)off, (long long)v.size);
         i64 size = v.size;
         if (size > 0 && spec.bound_to_next) {
             // Chain walkers without an end marker (MAT, pickles, DER, binary

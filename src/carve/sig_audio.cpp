@@ -98,17 +98,44 @@ i64 vFlac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         for (size_t i = 0; i < (size_t)(at - q); i++) crc8 = flacCrc8Step(crc8, fr[i]);
         (void)crc8;                              // header CRC is advisory only
         // Incremental CRC-16: after byte i, checking the next two bytes tells
-        // whether the frame ends at i+3.
+        // whether the frame ends at i+3. Random payload data can fake a match
+        // a couple percent of the time, and false matches in the data that
+        // follows a deleted file would otherwise swallow the next region. So
+        // of all matching positions take the LAST one that is followed by a
+        // valid frame sync (the next frame's CRC boundary is always followed
+        // by one); the final frame's own CRC sits at the very end and wins the
+        // fallback. Matches beyond the encoder-stated max frame size are
+        // rejected outright.
+        i64 frameCap = maxFramesize > 0 ? (i64)maxFramesize : 8192;
+        i64 limit = frameCap + 2;
         i64 L = -1;
+        i64 fallback = -1;
+        i64 runStart = -1;                       // first pos of a contiguous match run
+        i64 prevMatch = -2;
         u16 crc16 = 0;
         const u8* d = fr.data();
         size_t n = fr.size();
         for (size_t i = 0; i + 3 <= n; i++) {
             crc16 = flacCrc16Step(crc16, d[i]);
             if (i + 1 >= (size_t)(at - q) && crc16 == ((u16)d[i + 1] << 8 | d[i + 2])) {
-                L = (i64)i + 3;
-                break;
+                i64 pos = (i64)i + 3;
+                if (pos > limit) break;          // past the plausible frame end
+                if (pos == prevMatch + 1) {
+                    if (runStart < 0) runStart = prevMatch;
+                } else {
+                    runStart = -1;
+                }
+                prevMatch = pos;
+                fallback = pos;
+                if (pos + 4 <= (i64)n && d[pos] == 0xFF && (d[pos + 1] & 0xFC) == 0xF8)
+                    L = pos;
             }
+        }
+        if (L < 0) {
+            // No synced successor: final frame. A zero tail makes the CRC
+            // match at every position, so prefer the start of a contiguous
+            // run of matches — the genuine frame CRC — over the last match.
+            L = (runStart >= 0) ? runStart : fallback;
         }
         if (L < 0) break;                        // no valid boundary: foreign data
         q += L;
@@ -269,7 +296,7 @@ i64 vMp3(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 // --- AAC (ADTS) ------------------------------------------------------------
 i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off, lastEnd = off;
-    int frames = 0, sr0 = -1, prof0 = -1;
+    int frames = 0, sr0 = -1, prof0 = -1, h1_0 = -1;
     int consecResync = 0;
     const i64 kResync = 32 * 1024;
     while (p + 7 <= off + max && frames < 4000000) {
@@ -280,8 +307,8 @@ i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         int sr = (h[2] >> 2) & 0xF;
         int prof = (h[2] >> 6) & 3;
         if (sr > 12) break;
-        if (frames == 0) { sr0 = sr; prof0 = prof; }
-        else if (sr != sr0 || prof != prof0) break;
+        if (frames == 0) { sr0 = sr; prof0 = prof; h1_0 = h[1]; }
+        else if (sr != sr0 || prof != prof0 || h[1] != h1_0) break;
         if (p + (i64)len > off + max) break;
         lastEnd = p + len;
         p = lastEnd;
@@ -299,15 +326,16 @@ i64 vAac(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                        ((u32)(nxt[5] >> 5) & 7);
             int sr2 = (nxt[2] >> 2) & 0xF;
             int prof2 = (nxt[2] >> 6) & 3;
-            gap = nxt[0] != 0xFF || (nxt[1] & 0xF0) != 0xF0 || len2 < 7 ||
-                  len2 > 8192 || sr2 != sr0 || prof2 != prof0;
+            gap = nxt[0] != 0xFF || (nxt[1] & 0xF0) != 0xF0 || nxt[1] != h1_0 ||
+                  len2 < 7 || len2 > 8192 || sr2 != sr0 || prof2 != prof0;
         }
         if (gap) {
             const i64 scanEnd = std::min<i64>(off + max, p + kResync);
             auto win = s.read(p, scanEnd - p);
             bool found = false;
             for (i64 i = 0; i + 7 <= (i64)win.size(); i++) {
-                if (win[(size_t)i] != 0xFF || (win[(size_t)(i + 1)] & 0xF0) != 0xF0) continue;
+                if (win[(size_t)i] != 0xFF || (win[(size_t)(i + 1)] & 0xF0) != 0xF0 ||
+                    win[(size_t)(i + 1)] != h1_0) continue;
                 u32 l2 = ((u32)(win[(size_t)(i + 3)] & 0x03) << 11) |
                          ((u32)win[(size_t)(i + 4)] << 3) | ((u32)(win[(size_t)(i + 5)] >> 5) & 7);
                 if (l2 < 7 || l2 > 8192) continue;
@@ -453,7 +481,8 @@ i64 vAu(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 i64 vCaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (s.be16(off + 4) != 1) return -1;
     i64 p = off + 8;
-    while (p + 12 <= off + max) {
+    int chunks = 0;
+    while (p + 12 <= off + max && chunks < 100000) {
         auto t = s.read(p, 4);
         if (t.size() < 4) return -1;
         auto szb = s.read(p + 4, 8);
@@ -461,10 +490,16 @@ i64 vCaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u64 sz = 0;
         for (int k = 0; k < 8; k++) sz = sz << 8 | szb[k];
         if (sz > (u64)max) return -1;
-        bool dataChunk = (t[0] == 'd' && t[1] == 'a' && (t[2] == 't' || t[2] == 'a'));
+        // Chunk types are four printable ASCII letters; a run of zeroes (the
+        // gap after a deleted file) or foreign data stops the chain here.
+        bool printable = true;
+        for (u8 c : t)
+            if (c < 0x20 || c > 0x7E) { printable = false; break; }
+        if (!printable) break;
         p += 12 + (i64)sz;
-        if (dataChunk) break;
+        chunks++;
     }
+    if (chunks == 0) return -1;
     if (p > off + max) return -1;
     return p - off;
 }
@@ -509,8 +544,9 @@ i64 vVoc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 z = terminator;
     int taken = 0;
     while (taken < 16 && z < off + max) {
+        if (s.byte(z) == 0) break;
         taken++;
-        if (s.byte(z++) == 0) break;
+        z++;
     }
     if (taken > 0 && taken <= 16) return z - off;
     return terminator - off;
@@ -552,6 +588,34 @@ i64 vMpc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 size = (i64)s.be32(off + 4);
     if (size < 16 || size > max) return -1;
     return size;
+}
+
+i64 vWv(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+    // WavPack: a chain of wvpk blocks; each block's ckSize spans everything
+    // after its own 8-byte header, so p += 8 + ckSize lands exactly on the
+    // next block. The final block sets flag 0x0002; without it (some encoders
+    // omit the flag), the chain runs to the region boundary, where the byte
+    // right after the last block is not another wvpk header.
+    i64 p = off;
+    int blocks = 0;
+    while (p + 32 <= off + max && blocks < 1000000) {
+        auto h = s.read(p, 32);
+        if (h.size() < 32) return -1;
+        if (h[0] != 'w' || h[1] != 'v' || h[2] != 'p' || h[3] != 'k') return -1;
+        u32 ckSize = s.le32(p + 4);
+        if (ckSize < 24) return -1;
+        if (p + 8 + (i64)ckSize > off + max) return -1;
+        u32 flags = s.le32(p + 23);
+        p += 8 + (i64)ckSize;
+        blocks++;
+        if (flags & 0x0002) break;
+        if (p + 4 <= off + max) {
+            auto nx = s.read(p, 4);
+            if (nx.size() < 4 || memcmp(nx.data(), "wvpk", 4) != 0) break;
+        }
+    }
+    if (blocks == 0) return -1;
+    return p - off;
 }
 
 void registerAudio(Registry& r) {
@@ -602,7 +666,7 @@ void registerAudio(Registry& r) {
       c.min_size = 22; add(c); }
     add(mk("DTS", "dts", "audio", B({0x7F,0xFE,0x80,0x01}), 1*GB, SizeMode::Container, vDts));
     add(mk("APE", "ape", "audio", S("MAC "), 1*GB));
-    add(mk("WV", "wv", "audio", S("wvpk"), 1*GB));
+    add(mk("WV", "wv", "audio", S("wvpk"), 1*GB, SizeMode::Container, vWv));
     { auto c = mk("MPC", "mpc", "audio", S("MPCK"), 512*MB, SizeMode::Header, vMpc);
       c.min_size = 32; add(c); }
     { auto c = mk("MPC_SV7", "mpc", "audio", S("MP+"), 512*MB, SizeMode::Header, vMpc);

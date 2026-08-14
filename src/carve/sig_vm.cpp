@@ -153,8 +153,8 @@ i64 vVhdx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     for (u32 i = 0; i < count; i++) {
         const u8* e = rt.data() + 16 + i * 32;
         u64 fo = 0;
-        for (int k = 0; k < 8; k++) fo = fo << 8 | e[16 + k];
-        u32 len = (u32)e[27] | (u32)e[26] << 8 | (u32)e[25] << 16 | (u32)e[24] << 24;
+        for (int k = 0; k < 8; k++) fo |= (u64)e[16 + k] << (8 * k);   // VHDX is little-endian
+        u32 len = (u32)e[24] | (u32)e[25] << 8 | (u32)e[26] << 16 | (u32)e[27] << 24;
         if (fo == 0 || len == 0) continue;
         // Known region GUIDs: BAT and Metadata Region (MS GUID byte order).
         static const u8 kBATGuid[16]   = {0x66,0x77,0xc2,0x2d,0x23,0xf6,0x00,0x42,
@@ -207,7 +207,7 @@ i64 vVhdx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             if (blk.size() < (size_t)std::min<i64>(16384, n - i)) break;
             for (size_t j = 0; j + 8 <= blk.size(); j += 8) {
                 u64 e = 0;
-                for (int k = 7; k >= 0; k--) e = e << 8 | blk[j + k];
+                for (int k = 0; k < 8; k++) e |= (u64)blk[j + k] << (8 * k);   // LE entries
                 if ((e & 7) != 6) continue;      // FULLY_PRESENT only
                 u64 cl = e & 0xFFFFFFFFFFF00000ULL;
                 if (cl == 0 || cl >= (u64)max) continue;

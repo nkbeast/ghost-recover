@@ -15,6 +15,29 @@ i64 vRiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u32 sz = s.le32(off + 4);
     i64 total = (i64)sz + 8;
     if (total < 12 || total > max) return -1;
+    i64 end = off + total;
+    bool wave = memcmp(h.data() + 8, "WAVE", 4) == 0;
+    // Walk the chunk chain so a stray "RIFF"+"WAVE" inside foreign data (a
+    // WavPack file embeds its source WAV header, for one) cannot swallow
+    // everything after it; the declared size still bounds the walk.
+    i64 p = off + 12;
+    bool sawData = false;
+    int chunks = 0;
+    while (p + 8 <= end && chunks < 100000) {
+        auto ch = s.read(p, 8);
+        if (ch.size() < 8) break;
+        bool printable = true;
+        for (int i = 0; i < 4; i++)
+            if (ch[i] < 0x20 || ch[i] > 0x7E) { printable = false; break; }
+        if (!printable) break;
+        u32 clen = (u32)ch[4] | (u32)ch[5] << 8 | (u32)ch[6] << 16 | (u32)ch[7] << 24;
+        if ((i64)clen > end - p - 8) return -1;
+        if (memcmp(ch.data(), "data", 4) == 0) sawData = true;
+        p += 8 + (i64)clen;
+        if (clen & 1) p += 1;                    // word-align pad byte
+        chunks++;
+    }
+    if (wave && !sawData) return -1;             // a WAV must carry a data chunk
     return total;
 }
 

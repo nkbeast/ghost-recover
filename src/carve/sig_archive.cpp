@@ -84,8 +84,8 @@ i64 vCpio(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 fs = oct(p + 54, 6);
             }
         } else {
-            ns = s.le16(p + 20);
-            fs = (i64)s.le16(p + 22) | ((i64)s.le16(p + 24) << 16);
+            ns = s.be16(p + 20);
+            fs = ((i64)s.be16(p + 22) << 16) | s.be16(p + 24);
         }
         if (ns < 1 || ns > 65536 || fs < 0 || fs > 4LL * GB) return -1;
         size_t want = (size_t)std::min<i64>(ns, 32);

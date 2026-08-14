@@ -276,10 +276,11 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (f.kind != K_DICT) f.left--;
         switch (base) {
             case 0x30: case 0x4E: case 0x46: case 0x54: case 0x53:
-            case 0x45: case 0x3F: break;                       // atomics
-            case 0x69: pos += 4; break;                        // INT
-            case 0x49: pos += 8; break;                        // INT64
-            case 0x67: pos += 8; break;                        // BINFLOAT
+            case 0x45: case 0x2E: case 0x3F: break;                // atomics
+            case 0x69: pos += 4; break;                            // INT
+            case 0x49: pos += 8; break;                            // INT64
+            case 0x66: pos += 4; break;                            // FLOAT
+            case 0x67: pos += 8; break;                            // BINFLOAT
             case 0x78: case 0x79: pos += 16; break;           // BINCOMPLEX
             case 0x6C: {                                       // LONG (n digits)
                 auto v = s.read(pos, 4);
@@ -289,7 +290,7 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 pos += 4 + (i64)std::abs(n) * 4;
                 break;
             }
-            case 0x73: case 0x75: case 0x58: case 0x41: case 0x7A: case 0x42: {
+            case 0x73: case 0x75: case 0x61: case 0x41: {
                 auto v = s.read(pos, 4);                       // 4-byte len strings
                 if (v.size() < 4) return -1;
                 i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
@@ -297,7 +298,7 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 pos += 4 + n;
                 break;
             }
-            case 0x74: case 0x61: case 0x5A: case 0x43: case 0x66: {
+            case 0x74: case 0x7A: case 0x5A: {
                 u8 n = s.byte(pos);                            // 1-byte len strings
                 pos += 1 + n;
                 break;

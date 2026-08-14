@@ -404,8 +404,8 @@ i64 vIvf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 // --- SWF: the header's u32 length field, verified by inflating CWS bodies --
 i64 vSwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    auto b = s.read(off, 8);
-    if (b.size() < 8) return -1;
+    auto b = s.read(off, 9);
+    if (b.size() < 9) return -1;
     bool fws = b[0] == 'F' && b[1] == 'W' && b[2] == 'S';
     bool cws = b[0] == 'C' && b[1] == 'W' && b[2] == 'S';
     if (!fws && !cws) return -1;
@@ -453,7 +453,34 @@ i64 vSwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 #else
     if (cws) return -1;
 #endif
-    return (i64)len;
+    if (!fws) return -1;
+    // FWS: the length field is only a hint — random data can forge it and
+    // mask every file that follows. Walk the RECT field and the tag stream
+    // to the End tag; the chain end must agree with the declared length.
+    i64 nbits = b[8] >> 3;
+    if (nbits > 31) return -1;
+    i64 p = off + 8 + 1 + ((nbits * 4 + 7) / 8);
+    if (p + 2 > off + max) return -1;
+    i64 chainEnd = -1;
+    int guard = 0;
+    while (p + 2 <= off + max && guard++ < 100000) {
+        u16 t = s.le16(p);
+        int code = (t >> 6) & 0x3FF;
+        i64 tl = t & 0x3F;
+        i64 hdr = 2;
+        if (tl == 0x3F) {
+            if (p + 6 > off + max) return -1;
+            tl = s.le32(p + 2);
+            hdr = 6;
+        }
+        if (code == 0 && tl == 0) { chainEnd = p + hdr - off; break; }
+        if (tl < 0 || p + hdr + tl > off + max) return -1;
+        p += hdr + tl;
+    }
+    if (chainEnd < 0) return -1;
+    i64 diff = chainEnd > (i64)len ? chainEnd - (i64)len : (i64)len - chainEnd;
+    if (diff > 64) return -1;
+    return chainEnd;
 }
 
 // --- ZWS (SWF in LZMA): the header self-describes the compressed payload

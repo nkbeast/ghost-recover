@@ -32,6 +32,7 @@ import pickle
 import plistlib
 import shutil
 import sqlite3
+import zlib
 import struct
 import subprocess
 import sys
@@ -331,7 +332,7 @@ def make_voc(_):
     return (b'Creative Voice File\x1a' + u16le(0x010A) + u16le(0) + b'\x00\x00'
             + bytes([1]) + u16le(4) + junk(4)
             + bytes([0]) + u16le(0) + u16le(0)
-            + junk(1) + b'\x00')
+            + b'\x41')
 
 
 def make_ivf(_):
@@ -435,10 +436,15 @@ def make_mxf(_):
 
 def make_swf(name):
     if name == 'SWF':
-        return b'FWS' + bytes([1]) + u32le(48) + junk(40)
+        rect = bytes([0x08, 0x00])
+        tags = b''.join(struct.pack('<H', 1 << 6) for _ in range(8))
+        tags += struct.pack('<H', (9 << 6) | 3) + bytes([0, 0, 0])
+        tags += struct.pack('<H', 0)
+        body = rect + tags
+        return b'FWS' + bytes([1]) + u32le(len(body) + 8) + body
     # SWF_ZLIB
     body = junk(56)
-    return b'CWS' + bytes([1]) + u32le(len(body) + 8) + bytes(gzip.zlib.compress(body, 9))
+    return b'CWS' + bytes([1]) + u32le(len(body) + 8) + zlib.compress(body, 9)
 
 
 def make_zip_oo(name):
@@ -569,8 +575,8 @@ def make_cpio_bin(_):
         h = bytearray(26)
         h[0] = 0xC7
         h[1] = 0x71
-        h[20:22] = u16le(ns)
-        h[22:26] = u16le(fs & 0xFFFF) + u16le(fs >> 16)
+        h[20:22] = u16be(ns)
+        h[22:26] = u16be(fs >> 16) + u16be(fs & 0xFFFF)
         return bytes(h)
     e1 = bin_hdr(2, 4) + b'x\x00' + junk(4)
     t = bin_hdr(11, 0) + b'TRAILER!!!\x00'
@@ -836,7 +842,7 @@ def make_vhdx(_):
     rt += b'regi' + junk(4) + u32le(1) + junk(4)
     bat_guid = bytes([0x66, 0x77, 0xC2, 0x2D, 0x23, 0xF6, 0x00, 0x42,
                       0x9D, 0x64, 0x11, 0x5E, 0x9B, 0xFD, 0x4A, 0x08])
-    rt += bat_guid + u64be(0x60000) + u32be(0x20000) + junk(8)
+    rt += bat_guid + u64le(0x60000) + u32le(0x20000) + junk(8)
     e[0x30000:0x30000 + len(rt)] = bytes(rt)
     return bytes(e)
 
@@ -985,6 +991,12 @@ def make_lzma_alone(_):
     return bytes([0x5D]) + u32le(0x10000) + b'\xFF' * 8 + junk(16)
 
 
+def make_wv(_):
+    # single wvpk block: 'wvpk' + u32 LE ckSize (everything after the 8-byte
+    # header) + 24 bytes of block metadata; total file = 8 + 24 = 32.
+    return b'wvpk' + u32le(24) + b'\x00' * 24
+
+
 def make_dxf(_):
     return nonzero(b'  0\r\nSECTION' + junk(64))
 
@@ -1050,7 +1062,7 @@ reg('MOV_MDAT', make_mov_mdat, 'video')
 reg('MKV', lambda n: make_ebml(b'matroska'), 'video')
 reg('WEBM', lambda n: make_ebml(b'webm'), 'video')
 reg('EBML', lambda n: make_ebml(b'ghost__'), 'video')
-reg('AVI', lambda n: b'RIFF' + u32le(1024) + b'AVI ' + b'LIST' + u32le(1016) + b'hdrl' + junk(1008), 'video')
+reg('AVI', lambda n: b'RIFF' + u32le(1024) + b'AVI ' + b'LIST' + u32le(1012) + b'hdrl' + junk(1008), 'video')
 reg('WAV', lambda n: b'RIFF' + u32le(44) + b'WAVE' + b'fmt ' + u32le(16) + junk(16) + b'data' + u32le(8) + junk(8), 'audio')
 reg('FLV', make_flv, 'video')
 reg('WMV', make_asf, 'video')
@@ -1088,7 +1100,7 @@ reg('AMR_WB', lambda n: make_amr(True), 'audio')
 reg('MIDI', make_midi, 'audio')
 reg('DTS', make_dts, 'audio')
 reg('APE', make_stub(b'MAC '), 'audio')
-reg('WV', make_stub(b'wvpk'), 'audio')
+reg('WV', make_wv, 'audio')
 reg('MPC', make_mpc, 'audio')
 reg('MPC_SV7', make_mpc, 'audio')
 reg('AU', make_au, 'audio')
