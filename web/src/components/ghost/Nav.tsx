@@ -6,6 +6,7 @@ import { REPO_URL } from "@/lib/ghost-data";
 const links = [
   { href: "#capabilities", label: "Capabilities" },
   { href: "#interface", label: "Interface" },
+  { href: "#console", label: "Console" },
   { href: "#filesystems", label: "Filesystems" },
   { href: "#carving", label: "Carving" },
   { href: "#proof", label: "Proof" },
