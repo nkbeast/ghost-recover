@@ -4,7 +4,6 @@ import { Hero } from "@/components/ghost/Hero";
 import { Stats } from "@/components/ghost/Stats";
 import { Capabilities } from "@/components/ghost/Capabilities";
 import { Screens } from "@/components/ghost/Screens";
-import { Console } from "@/components/ghost/Console";
 import { Filesystems } from "@/components/ghost/Filesystems";
 import { Carving } from "@/components/ghost/Carving";
 import { HiddenGems } from "@/components/ghost/HiddenGems";
@@ -49,7 +48,6 @@ function Index() {
         <Stats />
         <Capabilities />
         <Screens />
-        <Console />
         <Filesystems />
         <Carving />
         <HiddenGems />
