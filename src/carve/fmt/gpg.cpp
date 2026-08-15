@@ -25,6 +25,7 @@ i64 vGpg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u8 b0 = h[0];
         if (b0 < 0x80 || b0 == 0xFF) break;      // not a packet header
         int tag = (b0 & 0x40) ? (b0 & 0x3F) : ((b0 >> 2) & 0x0F);
+        if (packets == 0 && tag != 6 && tag != 7) break;
         // keyring structure: the first packet is a key (tag 6 pub / 7
         // secret); uids (13) and sigs (2) follow anything; a key may follow
         // a key of the same type (multi-key exports); subkeys (14 pub /
@@ -70,6 +71,21 @@ i64 vGpg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             }
         }
         if (len < 0 || p + hdrLen + len > off + max) break;
+        // The first packet of a keyring is the primary key; its payload must
+        // start with a plausible version and public-key algorithm or the
+        // magic hit is just junk (PE overlays, QED tables, ...).
+        if (packets == 0) {
+            if (len < 128) break;
+            auto pay = s.read(p + hdrLen, 8);
+            if (pay.size() < 8) break;
+            u8 ver = pay[0];
+            u8 algo = pay[5];
+            if (ver < 2 || ver > 4) break;
+            static const u8 kGood[] = {1, 2, 3, 16, 17, 18, 19, 20, 21, 22, 23};
+            bool goodAlgo = false;
+            for (u8 a : kGood) if (algo == a) { goodAlgo = true; break; }
+            if (!goodAlgo) break;
+        }
         lastEnd = p + hdrLen + len;
         p = lastEnd;
         packets++;

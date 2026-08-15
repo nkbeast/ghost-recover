@@ -63,7 +63,7 @@ int mpegFrameSize(u8 b1, u8 b2, u8 b3, int* layerOut, int* verOut, int* srOut) {
     i64 lastEnd = p;
     int frames = 0, layer0 = -1, ver0 = -1, sr0 = -1;
     int consecResync = 0;   // random data must not chain through resyncs
-    const i64 kResync = 32 * 1024;   // bridge small overwritten regions
+    const i64 kResync = 4 * 1024;   // bridge small overwritten regions
     while (p + 4 <= off + max && frames < 4000000) {
         auto f = s.read(p, 4);
         if (f.size() < 4) break;
@@ -88,12 +88,18 @@ int mpegFrameSize(u8 b1, u8 b2, u8 b3, int* layerOut, int* verOut, int* srOut) {
                                         win[(size_t)(i + 3)], &l2, &v2, &s2);
                 if (!sz2 || l2 != layer0 || v2 != ver0 || s2 != sr0) continue;
                 i64 nxt = i + sz2;
-                if (nxt + 4 > (i64)win.size()) break;
+                if (nxt + 8 > (i64)win.size()) break;
                 if (win[(size_t)nxt] != 0xFF) continue;
                 int l3 = 0, v3 = 0, s3 = 0;
                 int sz3 = mpegFrameSize(win[(size_t)(nxt + 1)], win[(size_t)(nxt + 2)],
                                         win[(size_t)(nxt + 3)], &l3, &v3, &s3);
                 if (!sz3 || l3 != layer0 || v3 != ver0 || s3 != sr0) continue;
+                i64 nxt2 = nxt + sz3;
+                if (nxt2 + 4 > (i64)win.size() || win[(size_t)nxt2] != 0xFF) continue;
+                int l4 = 0, v4 = 0, s4 = 0;
+                int sz4 = mpegFrameSize(win[(size_t)(nxt2 + 1)], win[(size_t)(nxt2 + 2)],
+                                        win[(size_t)(nxt2 + 3)], &l4, &v4, &s4);
+                if (!sz4 || l4 != layer0 || v4 != ver0 || s4 != sr0) continue;
                 p += i;
                 found = true;
                 break;
@@ -119,13 +125,13 @@ int mpegFrameSize(u8 b1, u8 b2, u8 b3, int* layerOut, int* verOut, int* srOut) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
     { auto c = mk("MP3_ID3", "mp3", "audio", S("ID3"), 1*GB, SizeMode::FrameStream, vMp3);
-      c.min_size = 512; c.priority = 15; add(c); }
+      c.min_size = 512; c.priority = 15; c.bound_to_next = true; add(c); }
     { auto c = mk("MP3_FRAME", "mp3", "audio", B({0xFF,0xFB}), 1*GB, SizeMode::FrameStream, vMp3);
-      c.min_size = 2048; add(c); }
+      c.min_size = 2048; c.bound_to_next = true; add(c); }
     { auto c = mk("MP3_FRAME_V2", "mp3", "audio", B({0xFF,0xF3}), 1*GB, SizeMode::FrameStream, vMp3);
-      c.min_size = 2048; add(c); }
+      c.min_size = 2048; c.bound_to_next = true; add(c); }
     { auto c = mk("MP3_FRAME_V25", "mp3", "audio", B({0xFF,0xE3}), 1*GB, SizeMode::FrameStream, vMp3);
-      c.min_size = 2048; add(c); }
+      c.min_size = 2048; c.bound_to_next = true; add(c); }
 }
 
 }  // namespace ghost

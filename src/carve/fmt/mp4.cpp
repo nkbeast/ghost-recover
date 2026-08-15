@@ -57,7 +57,7 @@ i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
     { auto c = mk("M4A", "m4a", "audio", S("ftyp"), 4*GB, SizeMode::Container, vMp4);
-      c.magic_offset = 4; withConfirm(c, S("M4A "), 8); c.priority = 20; add(c); }
+      c.magic_offset = 4; c.priority = 20; add(c); }
     { auto c = mk("HEIC", "heic", "image", S("ftyp"), 256*MB, SizeMode::Container, vMp4);
       c.magic_offset = 4; withConfirm(c, S("heic"), 8); c.priority = 20; add(c); }
     { auto c = mk("HEIF", "heif", "image", S("ftyp"), 256*MB, SizeMode::Container, vMp4);
@@ -69,7 +69,7 @@ i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     { auto c = mk("MOV", "mov", "video", S("ftyp"), 16*GB, SizeMode::Container, vMp4);
       c.magic_offset = 4; withConfirm(c, S("qt  "), 8); c.priority = 20; add(c); }
     { auto c = mk("M4V", "m4v", "video", S("ftyp"), 16*GB, SizeMode::Container, vMp4);
-      c.magic_offset = 4; withConfirm(c, S("M4V "), 8); c.priority = 20; add(c); }
+      c.magic_offset = 4; c.priority = 20; add(c); }
     { auto c = mk("3GP", "3gp", "video", S("ftyp"), 4*GB, SizeMode::Container, vMp4);
       c.magic_offset = 4; withConfirm(c, S("3gp"), 8); c.priority = 20; add(c); }
     { auto c = mk("MOV_MDAT", "mov", "video", S("moov"), 16*GB, SizeMode::Container, vMp4);

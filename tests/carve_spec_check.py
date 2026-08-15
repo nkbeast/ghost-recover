@@ -449,8 +449,10 @@ def make_swf(name):
         tags += struct.pack('<H', 0)
         body = rect + tags
         return b'FWS' + bytes([1]) + u32le(len(body) + 8) + body
-    # SWF_ZLIB
-    body = junk(56)
+    # SWF_ZLIB: the header length is the uncompressed size; a 56-byte body
+    # compresses to a 20-byte file, below the 32-byte minimum, so use an
+    # incompressible body large enough that the stored frame is valid.
+    body = bytes((i * 2654435761 + 7) & 0xFF for i in range(256))
     return b'CWS' + bytes([1]) + u32le(len(body) + 8) + zlib.compress(body, 9)
 
 
@@ -970,6 +972,37 @@ def make_sshpub(name):
 
 def make_pdf(_):
     return b'%PDF-1.4\n% ' + junk(120) + b'\ntrailer\nstartxref\n%%EOF\n'
+
+
+def make_netcdf(_):
+    # netCDF classic: magic, numrecs, 1 dim, 1 var, no attrs, then data.
+    h = b'CDF\x01' + u32be(0) + u32be(1)
+    h += u32be(1) + b'x' + u32be(8)
+    h += u32be(1) + u32be(1) + b'v' + u32be(1) + u32be(0) + u32be(0) + u32be(0)
+    h += u32be(0)
+    return h + junk(16, 0x58)
+
+
+def make_gpg_keyring(_):
+    # old-format pubkey packet: tag 6, 2-byte length 285, payload with
+    # version 2 and public-key algorithm 1 at the offsets vGpg checks.
+    payload = bytes([2]) + b'\x00' * 4 + bytes([1]) + b'\x00' * 279
+    assert len(payload) == 285
+    return b'\x99\x01\x1d' + payload
+
+
+def make_zstd(_):
+    # single-segment frame: magic, FHD (single-segment, no checksum, no
+    # dict), 1-byte FCS = size - 1, one raw last block of 8 bytes.
+    return b'\x28\xb5\x2f\xfd' + b'\x20' + b'\x07' + b'\x41\x00\x00' + b'abcdefgh'
+
+
+def make_rtf(_):
+    return b'{\\rtf1\\ansi' + b' ' * 53 + b'}'
+
+
+def make_json(_):
+    return b'{"key": "012345678901234567890123"}'
 
 
 def make_stub(magic, n=64):
@@ -1544,7 +1577,19 @@ def make_wad_pwad(_):
 
 
 def make_qed(_):
-    return b'QED\x00' + u32le(4096) + u32le(4096) + u32le(64) + junk(8192 - 16)
+    # qemu qed image: cluster 4096, table size 4 clusters, header size 1
+    # cluster, L1 at cluster 1 (ends cluster 5), L2 at cluster 5 (ends
+    # cluster 9), data at cluster 9.
+    b = bytearray(40960)
+    b[0:4] = b'QED\x00'
+    b[4:8] = u32le(4096)
+    b[8:12] = u32le(4)
+    b[12:16] = u32le(1)
+    b[40:48] = u64le(4096)
+    b[48:56] = u64le(4096 * 4 * 4 * 4096)
+    b[4096:4104] = u64le(20480)     # L1[0] -> L2
+    b[20480:20488] = u64le(36864)   # L2[0] -> data cluster
+    return bytes(b)
 
 
 def make_android_boot(_):
@@ -1726,8 +1771,8 @@ reg('SWF_LZMA', make_zws, 'video')
 # ---------------- audio ----------------
 reg('MP3_ID3', make_mp3_id3, 'audio')
 reg('MP3_FRAME', lambda n: make_mp3_frames(b'\xFF\xFB', 417, 5), 'audio')
-reg('MP3_FRAME_V2', lambda n: make_mp3_frames(b'\xFF\xF3', 261, 3), 'audio')
-reg('MP3_FRAME_V25', lambda n: make_mp3_frames(b'\xFF\xE3', 522, 3), 'audio')
+reg('MP3_FRAME_V2', lambda n: make_mp3_frames(b'\xFF\xF3', 261, 9), 'audio')
+reg('MP3_FRAME_V25', lambda n: make_mp3_frames(b'\xFF\xE3', 522, 4), 'audio')
 reg('FLAC', make_flac, 'audio')
 reg('OPUS', lambda n: make_ogg(b'OpusHead'), 'audio')
 reg('OGA', lambda n: make_ogg(b'vorbis'), 'audio')
@@ -1767,7 +1812,7 @@ reg('EPUB', make_zip_oo, 'document')
 reg('XLS', make_ole_doc, 'document')
 reg('PPT', make_ole_doc, 'document')
 reg('DOC', lambda n: make_ole2(None), 'document')
-reg('RTF', make_text, 'document')
+reg('RTF', make_rtf, 'document')
 reg('MOBI', make_mobi, 'document')
 reg('DJVU', make_djvu, 'document')
 reg('CHM', make_chm, 'document')
@@ -1792,7 +1837,7 @@ reg('TAR', make_tar, 'archive')
 reg('DEB', make_deb, 'archive')
 reg('AR', make_ar, 'archive')
 reg('CAB', make_cab, 'archive')
-reg('ZSTD', make_stub(bytes([0x28, 0xB5, 0x2F, 0xFD])), 'archive')
+reg('ZSTD', make_zstd, 'archive')
 reg('LZ4', make_stub(bytes([0x04, 0x22, 0x4D, 0x18])), 'archive')
 reg('LZIP', make_lzip, 'archive')
 reg('LZMA_ALONE', make_lzma_alone, 'archive')
@@ -1822,7 +1867,7 @@ reg('Parquet', make_parquet, 'database')
 reg('ORC', make_stub(b'ORC'), 'database')
 reg('Avro', make_avro, 'database')
 reg('HDF5', make_hdf5, 'database')
-reg('NetCDF', make_stub(b'CDF'), 'database')
+reg('NetCDF', make_netcdf, 'database')
 reg('Feather', make_feather, 'database')
 reg('NPY', make_npy, 'database')
 reg('MAT', make_mat, 'database')
@@ -1851,7 +1896,7 @@ reg('PKCS12', make_der, 'crypto')
 reg('JKS', make_jks, 'crypto')
 reg('KDBX', make_kdbx, 'crypto')
 reg('KDB', make_kdb, 'crypto')
-reg('GPG_KEYRING', lambda _n: bytes([0x99, 0x01, 0x1D, 0x01]) + b'\x00' * 284, 'crypto')  # self-consistent 288-byte key: len 0x011D=288-3, v1 body
+reg('GPG_KEYRING', make_gpg_keyring, 'crypto')
 reg('BITCOIN_WALLET', make_wallet, 'crypto')
 
 # ---------------- executables ----------------
@@ -1970,7 +2015,8 @@ reg('ESEDB', make_stub(b'EFile'), 'database')
 reg('PCF', make_stub(bytes([0x01, 0x66, 0x63, 0x70])), 'font')
 
 # ---------------- code ----------------
-for n in ('JSON', 'SHEBANG_SH', 'SHEBANG_BASH', 'SHEBANG_ENV', 'PYTHON',
+reg('JSON', make_json, 'code')
+for n in ('SHEBANG_SH', 'SHEBANG_BASH', 'SHEBANG_ENV', 'PYTHON',
           'PYTHON_DEF', 'C_INCLUDE', 'C_IFNDEF', 'GO', 'JAVA', 'PHP', 'RUST',
           'SQL', 'SQL_DUMP', 'DOCKERFILE', 'YAML_DOC', 'TOML', 'INI_UNIT',
           'GIT_CONFIG', 'CMAKE', 'CSV_HEADER', 'VCARD', 'ICAL', 'GPX', 'KML'):

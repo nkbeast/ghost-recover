@@ -29,9 +29,15 @@ i64 vMpegTs(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 }void registerFmt_mpegts(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
-    { auto c = mk("MPEG_TS", "ts", "video", B({0x47,0x40,0x00}), 16*GB, SizeMode::FrameStream, vMpegTs);
+    // Real muxers set the payload/start flags on the first packet (ffmpeg
+    // writes 47 40 11 for the PAT), so a 3-byte signature starting 47 40 00
+    // misses packet one and every real TS carves 188 bytes short. Match the
+    // PID pair only; the 16-packet walk + entropy screen reject junk hits.
+    { auto c = mk("MPEG_TS", "ts", "video", B({0x47,0x40}), 16*GB, SizeMode::FrameStream, vMpegTs);
       c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
-    { auto c = mk("MPEG_TS1", "ts", "video", B({0x47,0x41,0x01}), 16*GB, SizeMode::FrameStream, vMpegTs);
+    { auto c = mk("MPEG_TS1", "ts", "video", B({0x47,0x41}), 16*GB, SizeMode::FrameStream, vMpegTs);
+      c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
+    { auto c = mk("MPEG_TS_NULL", "ts", "video", B({0x47,0x1F}), 16*GB, SizeMode::FrameStream, vMpegTs);
       c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
 }
 

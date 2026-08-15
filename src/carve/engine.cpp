@@ -474,15 +474,36 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     std::vector<i64> bounds;
     bounds.reserve(candidates.size());
     i64 coverEnd = -1;
+    int coverPriority = 0;   // priority of the candidate that set coverEnd
     for (size_t ci = 0; ci < candidates.size(); ci++) {
         const Validated& v = validated[ci];
         if (!v.valid || v.size <= 0) continue;
         const i64 off = candidates[ci].offset;
+        // A candidate that validates all the way to the disk end is a junk
+        // signature hit (a header that computed a giant length and walked
+        // through everything). Its span covers the whole rest of the disk, so
+        // it must neither mask the real files behind it nor act as a boundary.
+        if (off + v.size >= result.image_size) continue;
         if (bounds.empty() || bounds.back() != off) {
-            if (off >= coverEnd) bounds.push_back(off);
             const CarveSpec& sp = *specs[(size_t)candidates[ci].spec];
-            if (sp.validator)
-                coverEnd = std::max(coverEnd, off + v.size);
+            if (off >= coverEnd) {
+                bounds.push_back(off);
+            } else if (off + v.size >= coverEnd && sp.priority > coverPriority) {
+                // A start inside another validated span whose spec is stronger
+                // than the walk covering it (MP3_ID3 inside a junk MP3_FRAME
+                // walk that read through it) is a separate file and a genuine
+                // boundary. Frame-sync noise of the same weak signature inside
+                // a strong file ends at the same cover and stays excluded.
+                bounds.push_back(off);
+            }
+            if (sp.validator) {
+                if (off + v.size > coverEnd) {
+                    coverEnd = off + v.size;
+                    coverPriority = sp.priority;
+                } else if (off + v.size == coverEnd && sp.priority > coverPriority) {
+                    coverPriority = sp.priority;
+                }
+            }
         }
     }
 
@@ -523,6 +544,15 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             if (bit != bounds.end()) {
                 i64 bound_ = *bit - off;
                 if (size > bound_) size = bound_;
+            }
+            // The bound can shrink a walker to a junk stub; below the format
+            // minimum it is a false positive, not a short file.
+            if (size < spec.min_size) {
+                if (dbg) fprintf(stderr, "[carve] reject %s off=%lld reason=bound%lld<min%lld\n",
+                                 spec.name.c_str(), (long long)off, (long long)size,
+                                 (long long)spec.min_size);
+                result.rejected++;
+                continue;
             }
         }
 

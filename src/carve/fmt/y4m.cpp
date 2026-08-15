@@ -47,6 +47,11 @@ i64 vY4m(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             else if (j + 3 <= head.size() && std::memcmp(head.data() + j, "400", 3) == 0) bpp = 10;
             else return -1;
             while (j < head.size() && head[j] != ' ' && head[j] != '\n') j++;
+        } else if (c == 'F' || c == 'I' || c == 'A' || c == 'X' || c == 'N' ||
+                   c == 'M' || c == 'S') {
+            // Frame rate / interlacing / aspect / colour range / n/a params
+            // vary by producer; skip the value token.
+            while (j < head.size() && head[j] != ' ' && head[j] != '\n') j++;
         } else {
             return -1;
         }
