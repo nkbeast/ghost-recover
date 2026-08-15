@@ -508,8 +508,12 @@ std::string webRootPath(const std::string& configured) {
         candidates.push_back(joinPath(home, ".local/share/ghost-recover/web"));
         candidates.push_back(joinPath(home, "ghost-recover/web"));
     }
-    for (const auto& c : candidates)
+    for (const auto& c : candidates) {
         if (fileExists(joinPath(c, "index.html"))) return c;
+        // The repo keeps the console under web/console/ (the rest of web/ is
+        // the landing-site source) — accept that layout too.
+        if (fileExists(joinPath(c, "console/index.html"))) return joinPath(c, "console");
+    }
     return {};
 }
 
