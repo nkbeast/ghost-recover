@@ -72,7 +72,7 @@ i64 vBzip2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return consumed;                             // EOS + CRC included
 #else
     (void)s; (void)off; (void)max;
-    return 0;
+    return -2;                       // bzip2 library not compiled in
 #endif
 }void registerFmt_bzip2(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };

@@ -75,7 +75,7 @@ i64 vGzip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     return pos - off;
 #else
     (void)s; (void)off; (void)max;
-    return 0;
+    return -2;                       // zlib not compiled in
 #endif
 }void registerFmt_gzip(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };

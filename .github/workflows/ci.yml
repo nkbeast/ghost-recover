@@ -25,6 +25,8 @@ jobs:
           sudo apt-get install -y -qq \
             ccache \
             zlib1g-dev \
+            libbz2-dev \
+            libzstd-dev \
             e2fsprogs \
             dosfstools \
             exfatprogs \
