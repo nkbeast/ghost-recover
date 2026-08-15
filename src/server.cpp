@@ -70,7 +70,6 @@ std::atomic<bool> g_handedOver{false};
 // safely above the 45 s heartbeat gap (and above the ~60 s worst case when
 // Chrome throttles background-tab timers to one per minute).
 std::atomic<i64> g_lastActivityMs{0};
-std::atomic<i64> g_lastBeaconMs{0};
 constexpr i64 kIdleShutdownMs = 90 * 1000;   // 90 seconds of silence
 
 // Live-GUI presence. The page keeps one WebSocket (/api/presence) open for
@@ -1288,10 +1287,15 @@ int startServer(const ServerConfig& cfg) {
         json::Writer w;
         w.beginObject().kv("ok", true).kv("message", "shutting down").endObject();
         res.set_content(w.str(), "application/json");
-        g_lastBeaconMs = nowMs();
         std::thread([]() {
+            // A pagehide beacon fires before the browser finishes tearing the
+            // page down, and on a reload the new page opens its presence
+            // socket within a second — long before this grace expires. So a
+            // live presence socket after 3 s means the page came back: abort.
+            // Anything else (API user, curl, SIGTERM-from-UI) has no socket
+            // and shuts the engine down.
             std::this_thread::sleep_for(std::chrono::seconds(3));
-            if (g_lastActivityMs.load() > g_lastBeaconMs.load()) return;   // page came back
+            if (g_presenceCount.load() > 0) return;   // page (re)connected
             requestEngineShutdown();
         }).detach();
     };
