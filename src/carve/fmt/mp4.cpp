@@ -15,7 +15,44 @@
 
 namespace ghost {
 
-i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
+// True when any moov child track carries a video ('vide') handler — such a
+// container is a movie, not an audio-only M4A. Boxes are read strictly on
+// their declared sizes so a damaged file cannot walk past the moov extent.
+static bool moovHasVideoTrack(ByteSource& s, i64 moov, i64 end) {
+    i64 p = moov + 8;
+    while (p + 8 <= end) {
+        u32 sz = s.be32(p);
+        auto type = s.read(p + 4, 4);
+        if (sz < 8 || p + (i64)sz > end) break;
+        if (type.size() == 4 && std::memcmp(type.data(), "trak", 4) == 0) {
+            i64 q = p + 8;
+            while (q + 8 <= p + sz) {
+                u32 tsz = s.be32(q);
+                auto ttype = s.read(q + 4, 4);
+                if (tsz < 8 || q + (i64)tsz > p + sz) break;
+                if (ttype.size() == 4 && std::memcmp(ttype.data(), "mdia", 4) == 0) {
+                    i64 r = q + 8;
+                    while (r + 8 <= q + tsz) {
+                        u32 msz = s.be32(r);
+                        auto mtype = s.read(r + 4, 4);
+                        if (msz < 8 || r + (i64)msz > q + tsz) break;
+                        if (mtype.size() == 4 && std::memcmp(mtype.data(), "hdlr", 4) == 0) {
+                            auto h = s.read(r + 16, 4);   // version/flags+pre_defined
+                            if (h.size() == 4 && std::memcmp(h.data(), "vide", 4) == 0)
+                                return true;
+                        }
+                        r += msz;
+                    }
+                }
+                q += tsz;
+            }
+        }
+        p += sz;
+    }
+    return false;
+}
+
+i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     i64 p = off, lastEnd = off;
     int atoms = 0;
     bool sawFtyp = false, sawMdatOrMoov = false;
@@ -47,6 +84,9 @@ i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (std::memcmp(type.data(), "ftyp", 4) == 0) sawFtyp = true;
         if (std::memcmp(type.data(), "mdat", 4) == 0 ||
             std::memcmp(type.data(), "moov", 4) == 0) sawMdatOrMoov = true;
+        if (spec.name == "M4A" && std::memcmp(type.data(), "moov", 4) == 0 &&
+            moovHasVideoTrack(s, p, p + size))
+            return -1;                           // a movie, not audio-only
         lastEnd = p + size;
         p = lastEnd;
         atoms++;
@@ -69,7 +109,9 @@ i64 vMp4(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     { auto c = mk("MOV", "mov", "video", S("ftyp"), 16*GB, SizeMode::Container, vMp4);
       c.magic_offset = 4; withConfirm(c, S("qt  "), 8); c.priority = 20; add(c); }
     { auto c = mk("M4V", "m4v", "video", S("ftyp"), 16*GB, SizeMode::Container, vMp4);
-      c.magic_offset = 4; c.priority = 20; add(c); }
+      c.magic_offset = 4; withConfirm(c, S("M4VH"), 8); c.priority = 20; add(c); }
+    { auto c = mk("M4V", "m4v", "video", S("ftyp"), 16*GB, SizeMode::Container, vMp4);
+      c.magic_offset = 4; withConfirm(c, S("M4VP"), 8); c.priority = 20; add(c); }
     { auto c = mk("3GP", "3gp", "video", S("ftyp"), 4*GB, SizeMode::Container, vMp4);
       c.magic_offset = 4; withConfirm(c, S("3gp"), 8); c.priority = 20; add(c); }
     { auto c = mk("MOV_MDAT", "mov", "video", S("moov"), 16*GB, SizeMode::Container, vMp4);

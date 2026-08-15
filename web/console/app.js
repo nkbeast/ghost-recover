@@ -915,6 +915,10 @@ function renderDetails(f) {
 const IMG = ['jpg','jpeg','png','gif','bmp','webp','tif','tiff','ico','svg','heic','heif','avif'];
 const VID = ['mp4','m4v','mkv','webm','avi','mov','flv','3gp','ts','mpg','mpeg','wmv'];
 const AUD = ['mp3','wav','flac','ogg','oga','opus','m4a','aac','aiff','ac3','amr','mid','wma','au'];
+// Containers/codecs the browser cannot decode natively (Chrome/Firefox/Safari
+// all fail on these). They are transcoded server-side to fragmented MP4 via
+// /api/preview; everything else streams the raw bytes.
+const TRANSCODE = ['mkv','avi','flv','ts','mpg','mpeg','wmv','asf','au','aiff','aifc','amr','mid','wma','ac3','spx'];
 const TXT = ['txt','md','log','json','xml','html','htm','csv','yaml','yml','ini','conf','toml',
              'py','sh','js','ts','c','cpp','h','hpp','rs','go','java','rb','php','sql','pem',
              'service','gitconfig','tex','dockerfile','cmake','env','eml','mbox'];
@@ -925,6 +929,13 @@ function contentUrl(index, max) {
   // it on /api/content only.
   return `${API}/content?job=${encodeURIComponent(S.resultJob)}&index=${index}` +
          (max ? `&max=${max}` : '') +
+         (sessionToken() ? `&tok=${sessionToken()}` : '');
+}
+
+// Transcode endpoint: same auth shape as /api/content, but the server pipes
+// the source through ffmpeg into a browser-playable fragmented MP4 stream.
+function previewUrl(index) {
+  return `${API}/preview?job=${encodeURIComponent(S.resultJob)}&index=${index}` +
          (sessionToken() ? `&tok=${sessionToken()}` : '');
 }
 
@@ -1091,14 +1102,19 @@ async function loadPreview(f, host) {
     // the <video> element can balloon the renderer's memory and crash the
     // tab. The engine holds its result memory meanwhile, so the GUI appears
     // wedged. Cap the preview stream (the server clamps at 256 MB) and serve
-    // the complete file through Download instead.
+    // the complete file through Download instead. Formats the browser cannot
+    // decode at all (mkv, avi, flv, mpeg-ts, wmv...) go through ffmpeg.
+    const src = TRANSCODE.includes(ext) ? previewUrl(f.index) : contentUrl(f.index, 256 * 1024 * 1024);
     const video = document.createElement('video');
-    video.src = contentUrl(f.index, 256 * 1024 * 1024);
+    video.src = src;
     video.controls = true;
     video.preload = 'none';
     video.onerror = bail;
     host.innerHTML = partialWarn(f) +
-      (f.size > 256 * 1024 * 1024
+      (TRANSCODE.includes(ext)
+        ? '<div class="empty" style="margin-bottom:10px">Transcoding to MP4 — playback starts when ready.</div>'
+        : '') +
+      (f.size > 256 * 1024 * 1024 && !TRANSCODE.includes(ext)
         ? '<div class="empty" style="margin-bottom:10px">Previewing the first 256 MB. Use Download for the complete file.</div>'
         : '');
     host.appendChild(video);
@@ -1115,14 +1131,17 @@ async function loadPreview(f, host) {
     muted.style.cssText = 'margin-bottom:12px;word-break:break-all';
     muted.textContent = f.name;
     const audio = document.createElement('audio');
-    audio.src = unlimited;
+    audio.src = TRANSCODE.includes(ext) ? previewUrl(f.index) : unlimited;
     audio.controls = true;
     audio.preload = 'metadata';
     audio.onerror = bail;
     wrap.appendChild(note);
     wrap.appendChild(muted);
     wrap.appendChild(audio);
-    host.innerHTML = partialWarn(f);
+    host.innerHTML = partialWarn(f) +
+      (TRANSCODE.includes(ext)
+        ? '<div class="empty" style="margin-bottom:10px">Transcoding to MP4 — playback starts when ready.</div>'
+        : '');
     host.appendChild(wrap);
     return;
   }

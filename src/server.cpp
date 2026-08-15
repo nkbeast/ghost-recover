@@ -23,8 +23,11 @@
 #include <httplib.h>
 
 #include <algorithm>
+#include <csignal>
 #include <fstream>
 #include <mutex>
+#include <poll.h>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -1898,6 +1901,154 @@ int startServer(const ServerConfig& cfg) {
         std::string body(reinterpret_cast<const char*>(data.data()), data.size());
         std::vector<u8>().swap(data);
         res.set_content(std::move(body), mime.c_str());
+    });
+
+    // Transcodes a recovered media file to a browser-playable fragmented MP4
+    // on the fly. Many carved formats (mkv, avi, flv, mpeg-ts, wmv, au, aiff,
+    // amr, mid, wma, ac3...) have no native <video>/<audio> support, so the
+    // raw bytes render as a dead player. ffmpeg is optional: when it is
+    // missing the endpoint answers 501 and the UI shows a clear message.
+    svr.Get("/api/preview", [&](const httplib::Request& req, httplib::Response& res) {
+        auto stored = ResultStore::instance().get(req.get_param_value("job"));
+        if (!stored) {
+            res.status = 404;
+            res.set_content(errorJson("no results for that job"), "application/json");
+            return;
+        }
+        i64 index = paramInt(req, "index", -1);
+        if (index < 0 || index >= (i64)stored->files.size()) {
+            res.status = 404;
+            res.set_content(errorJson("index out of range"), "application/json");
+            return;
+        }
+        const RecoveredFile& f = stored->files[(size_t)index];
+        i64 fileLen = f.size > 0 ? f.size : 0;
+        if (fileLen <= 0)
+            for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
+        if (fileLen <= 0) {
+            res.status = 404;
+            res.set_content(errorJson("file has no readable data"), "application/json");
+            return;
+        }
+        constexpr i64 kPreviewFeedCap = 256LL * 1024 * 1024;
+        const i64 feedLen = std::min<i64>(fileLen, kPreviewFeedCap);
+
+        static const std::string kFfmpegCandidates[] = {
+            "/usr/bin/ffmpeg", "/bin/ffmpeg", "/usr/local/bin/ffmpeg"};
+        bool have = false;
+        for (const auto& c : kFfmpegCandidates)
+            if (::access(c.c_str(), X_OK) == 0) have = true;
+        if (!have) {
+            res.status = 501;
+            res.set_content(errorJson("ffmpeg is not installed — this format "
+                                      "cannot be previewed"), "application/json");
+            return;
+        }
+
+        std::string err;
+        auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
+        if (!disk) {
+            res.status = 500;
+            res.set_content(errorJson(err), "application/json");
+            return;
+        }
+
+        int inPipe[2] = {-1, -1}, outPipe[2] = {-1, -1};
+        if (::pipe(inPipe) != 0 || ::pipe(outPipe) != 0) {
+            res.status = 500;
+            res.set_content(errorJson("could not create pipes"), "application/json");
+            return;
+        }
+        pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(inPipe[0]); ::close(inPipe[1]);
+            ::close(outPipe[0]); ::close(outPipe[1]);
+            res.status = 500;
+            res.set_content(errorJson("could not start ffmpeg"), "application/json");
+            return;
+        }
+        if (pid == 0) {
+            ::dup2(inPipe[0], 0);
+            ::dup2(outPipe[1], 1);
+            ::close(inPipe[0]); ::close(inPipe[1]);
+            ::close(outPipe[0]); ::close(outPipe[1]);
+            ::execlp("ffmpeg", "ffmpeg", "-v", "error", "-nostdin",
+                     "-i", "pipe:0",
+                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                     "-c:a", "aac", "-b:a", "96k",
+                     "-movflags", "frag_keyframe+empty_moov",
+                     "-f", "mp4", "pipe:1", (char*)nullptr);
+            _exit(127);
+        }
+        ::close(inPipe[0]);
+        ::close(outPipe[1]);
+        const int inW = inPipe[1];
+        const int rfd = outPipe[0];
+
+        auto owned = std::shared_ptr<DiskReader>(std::move(disk));
+        // httplib runs the chunked provider and the done callback after this
+        // handler has returned, so everything they touch (the feeder thread,
+        // the pipes, the child pid) must outlive the handler: heap state.
+        struct TranscodeState {
+            pid_t pid = -1;
+            int rfd = -1;
+            std::thread feeder;
+            bool joined = false;
+            ~TranscodeState() {
+                if (pid > 0) { ::kill(pid, SIGKILL); ::waitpid(pid, nullptr, 0); }
+                if (rfd >= 0) ::close(rfd);
+                if (!joined && feeder.joinable()) feeder.join();
+            }
+        };
+        auto st = std::make_shared<TranscodeState>();
+        st->pid = pid;
+        st->rfd = rfd;
+        st->feeder = std::thread([owned, f, inW, feedLen]() {
+            i64 off = 0;
+            while (off < feedLen) {
+                auto w = readFileWindow(*owned, f, off,
+                                        std::min<i64>(8LL * 1024 * 1024, feedLen - off));
+                if (w.empty()) break;
+                size_t done = 0;
+                while (done < w.size()) {
+                    ssize_t n = ::write(inW, w.data() + done, w.size() - done);
+                    if (n <= 0) { ::close(inW); return; }
+                    done += (size_t)n;
+                }
+                off += (i64)w.size();
+            }
+            ::close(inW);
+        });
+
+        res.set_header("Cache-Control", "no-store");
+        res.set_chunked_content_provider(
+            "video/mp4",
+            [st](size_t, httplib::DataSink& sink) -> bool {
+                const size_t kBuf = 64 * 1024;
+                std::vector<char> buf(kBuf);
+                for (;;) {
+                    struct pollfd pfd = {st->rfd, POLLIN, 0};
+                    int pr = ::poll(&pfd, 1, 15000);   // stall guard: kill a stuck transcode
+                    if (pr <= 0) {
+                        ::kill(st->pid, SIGKILL);
+                        return false;
+                    }
+                    ssize_t n = ::read(st->rfd, buf.data(), kBuf);
+                    if (n <= 0) return false;          // ffmpeg finished or died
+                    if (!sink.write(buf.data(), (size_t)n)) {
+                        ::kill(st->pid, SIGKILL);
+                        return false;
+                    }
+                }
+            },
+            [st](bool) {
+                if (st->pid > 0) { ::kill(st->pid, SIGKILL); ::waitpid(st->pid, nullptr, 0); }
+                if (st->rfd >= 0) { ::close(st->rfd); st->rfd = -1; }
+                if (!st->joined && st->feeder.joinable()) {
+                    st->joined = true;
+                    st->feeder.join();
+                }
+            });
     });
 
     // Hex view of a range, either of a stored file or of the raw device.
