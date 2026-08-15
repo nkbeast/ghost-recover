@@ -110,6 +110,11 @@ async function apiGet(path) {
   if (r.status === 403 && !sessionToken()) {
     throw new Error('engine-locked');
   }
+  if (r.status === 404) {
+    const e404 = new Error('not-found');
+    e404.status = 404;
+    throw e404;
+  }
   try { return JSON.parse(t2); } catch (e) { throw new Error('bad response: ' + t2.slice(0, 200)); }
 }
 
@@ -1304,7 +1309,18 @@ async function loadResults() {
       S.page = Math.floor((r.matched - 1) / S.pageSize);
       return loadResults();
     }
-  } catch (e) { log('could not load results: ' + e.message, 'err'); }
+  } catch (e) {
+    if (e.status === 404) {
+      // The engine released this result's memory (every new job frees the
+      // previous scan's result; see ResultStore::dropAll in server.cpp).
+      S.results = null;
+      S.summary = null;
+      S.resultJob = null;
+      log('that result was released from memory when a newer job ran', 'warn');
+    } else {
+      log('could not load results: ' + e.message, 'err');
+    }
+  }
   render();
 }
 

@@ -26,6 +26,7 @@
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 #if defined(__GLIBC__)
 #include <malloc.h>
@@ -225,11 +226,7 @@ public:
             order_.erase(order_.begin());
         }
 #if defined(__GLIBC__)
-        // A scan/carve's transient allocations live in glibc arenas that are
-        // not returned to the kernel when freed — RSS would stay at the scan
-        // peak even after the result is evicted or the job ends. Hand trimmed
-        // arenas back so finished scans free their RAM immediately.
-        malloc_trim(0);
+        trimArenas();
 #endif
     }
     std::shared_ptr<StoredResult> get(const std::string& jobId) const {
@@ -241,13 +238,46 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         results_.erase(jobId);
         order_.erase(std::remove(order_.begin(), order_.end(), jobId), order_.end());
+        trimArenas();
+    }
+    // Releases every held result. Called when a new job is submitted so the
+    // previous scan's result is freed BEFORE the new job starts allocating —
+    // otherwise scan-then-carve pins two full results (and on a small box a
+    // second job doubles peak RAM). The UI handles missing results (it
+    // refetches them by job id and shows "released" for evicted ones).
+    void dropAll() {
+        std::lock_guard<std::mutex> lk(mu_);
+        results_.clear();
+        order_.clear();
+        trimArenas();
     }
 
 private:
+    static void trimArenas() {
+#if defined(__GLIBC__)
+        // A scan/carve's transient allocations live in glibc arenas that are
+        // not returned to the kernel when freed — RSS would stay at the scan
+        // peak even after the result is evicted or the job ends. Hand trimmed
+        // arenas back so finished scans free their RAM immediately.
+        malloc_trim(0);
+#endif
+    }
+
     mutable std::mutex mu_;
     std::unordered_map<std::string, std::shared_ptr<StoredResult>> results_;
     std::vector<std::string> order_;
 };
+
+// Submit a job, first releasing every held result. Without this, scan-then-
+// carve pins the scan's result (which can be hundreds of megabytes) while the
+// carve builds its own, doubling peak RAM — the exact failure that breaks
+// 1 GiB boxes. The UI refetches results by job id and shows "released" for
+// evicted ones, so dropping here is invisible in normal use.
+template <typename Fn>
+std::string submitJob(const std::string& kind, const std::string& target, Fn&& fn) {
+    ResultStore::instance().dropAll();
+    return JobManager::instance().submit(kind, target, std::forward<Fn>(fn));
+}
 
 // ---------------------------------------------------------------------------
 std::string mimeForExtension(const std::string& extRaw) {
@@ -1505,7 +1535,7 @@ int startServer(const ServerConfig& cfg) {
         bool unallocOnly = copt.skip_allocated;
 
         std::string kind = withScan && withCarve ? "deep" : (withCarve ? "carve" : "scan");
-        std::string id = JobManager::instance().submit(kind, t.path,
+        std::string id = submitJob(kind, t.path,
             [t, sopt, copt, withCarve, withScan, unallocOnly](Job& job) -> std::string {
                 auto stored = std::make_shared<StoredResult>();
                 stored->kind = job.kind;
@@ -2030,7 +2060,7 @@ int startServer(const ServerConfig& cfg) {
                 if (i >= 0 && i < (i64)stored->files.size()) indices.push_back((size_t)i);
             }
 
-        std::string id = JobManager::instance().submit("extract", stored->target,
+        std::string id = submitJob("extract", stored->target,
             [stored, opt, indices](Job& job) -> std::string {
                 std::string err;
                 auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
@@ -2090,7 +2120,7 @@ int startServer(const ServerConfig& cfg) {
             res.set_content(errorJson(err), "application/json");
             return; } }
 
-        std::string id = JobManager::instance().submit("image", t.path,
+        std::string id = submitJob("image", t.path,
             [t, opt](Job& job) -> std::string {
                 std::string err2;
                 auto disk = openTarget(t.path, 0, 0, &err2);
@@ -2186,7 +2216,7 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
 
-        std::string id = JobManager::instance().submit("raid", outPath,
+        std::string id = submitJob("raid", outPath,
             [layout, outPath, maxBytes](Job& job) -> std::string {
                 RaidBuildResult r = assembleRaid(layout, outPath, maxBytes, job.progress);
                 json::Writer w;
