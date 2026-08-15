@@ -46,7 +46,7 @@ i64 vTga(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 18 + idLen;
     if (cmapType == 1) p += (i64)cmapLen * ((cmapBpp + 7) / 8);
     const i64 pixels = (i64)w * hgt;
-    const i64 indexBytes = (cmapBpp >= 16) ? 2 : 1;   // palette index width
+    const i64 indexBytes = (depth + 7) / 8;   // index width from image depth
     if (imgType == 1 || imgType == 2 || imgType == 3) {
         if (imgType == 1) p += pixels * indexBytes;
         else if (imgType == 3) {
