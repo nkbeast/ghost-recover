@@ -471,7 +471,10 @@ fi
 if command -v curl >/dev/null; then
   head2 "Web API"
   PORT=$((31000 + ($$ % 200)))
-  "$BIN" --port "$PORT" > "$WORK/server.log" 2>&1 &
+  # --no-browser is required: without it the engine opens a real browser tab,
+  # whose presence websocket then aborts /api/shutdown (the GUI-close safety)
+  # and the engine survives — hanging this suite forever.
+  "$BIN" --port "$PORT" --no-browser > "$WORK/server.log" 2>&1 &
   SRV=$!
   sleep 0.7
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/health" || true)
@@ -538,6 +541,9 @@ if command -v curl >/dev/null; then
   done
   [ "$exited" = yes ] && ok "engine process exited" \
                        || bad "engine process survived shutdown"
+  # Never wait unboundedly on a survivor: kill it and keep the suite moving
+  # (a surviving engine would otherwise hang this script forever).
+  kill -9 "$SRV" 2>/dev/null
   wait "$SRV" 2>/dev/null
   # Restarting while another engine already owns the port must not fail: the
   # second instance recognises the running engine and reconnects to it.

@@ -37,7 +37,9 @@ import struct
 import subprocess
 import sys
 import tarfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 PASS = FAIL = 0
 SKIP = []
@@ -46,6 +48,7 @@ SKIP = []
 # real disk instead (test/scripts/verify_carve.py).
 SKIP.append('DMG_KOLY')
 failures = []
+_plock = threading.Lock()
 
 
 def u16le(x): return struct.pack('<H', x)
@@ -2011,24 +2014,27 @@ def check_one(bin_path, work, name):
                 p = os.path.join(root, f)
                 if got_path is None or os.path.getsize(p) > os.path.getsize(got_path):
                     got_path = p
-    if got_path is None:
-        FAIL += 1
-        failures.append((name, 'no output carved'))
-        print(f'FAIL {name:16s} no output carved (cat={cat})')
-        if 'Recovered' in log:
-            print('     ' + log.splitlines()[-2])
-        return
-    got_data = open(got_path, 'rb').read()
-    got_md5 = hashlib.md5(got_data).hexdigest()
-    if got_md5 == want_md5 and len(got_data) == want_size:
-        PASS += 1
-        print(f'pass {name:16s} {want_size:>7d} B  {os.path.basename(got_path)}')
-    else:
-        FAIL += 1
-        failures.append((name, f'md5/size mismatch: want {want_md5}/{want_size} '
-                               f'got {got_md5}/{len(got_data)} in {got_path}'))
-        print(f'FAIL {name:16s} want {want_md5} {want_size}B got {got_md5} {len(got_data)}B '
-              f'({os.path.basename(got_path)})')
+    with _plock:
+        # check_one runs on worker threads; only these shared mutations need
+        # the lock — the carve itself (subprocess) runs in parallel.
+        if got_path is None:
+            FAIL += 1
+            failures.append((name, 'no output carved'))
+            print(f'FAIL {name:16s} no output carved (cat={cat})')
+            if 'Recovered' in log:
+                print('     ' + log.splitlines()[-2])
+            return
+        got_data = open(got_path, 'rb').read()
+        got_md5 = hashlib.md5(got_data).hexdigest()
+        if got_md5 == want_md5 and len(got_data) == want_size:
+            PASS += 1
+            print(f'pass {name:16s} {want_size:>7d} B  {os.path.basename(got_path)}')
+        else:
+            FAIL += 1
+            failures.append((name, f'md5/size mismatch: want {want_md5}/{want_size} '
+                                   f'got {got_md5}/{len(got_data)} in {got_path}'))
+            print(f'FAIL {name:16s} want {want_md5} {want_size}B got {got_md5} {len(got_data)}B '
+                  f'({os.path.basename(got_path)})')
 
 
 def main():
@@ -2048,13 +2054,22 @@ def main():
         cat = BUILDERS[n][1]
         by_cat.setdefault(cat, []).append(n)
     print(f'# verifying {len(names)} signatures (fixtures in {args.work})')
-    for cat, ns in by_cat.items():
-        print(f'## category {cat} ({len(ns)} formats)')
-        for n in ns:
+    # One carve invocation per signature, each a separate engine subprocess:
+    # run them in parallel instead of one after another (threads, since the
+    # work happens in subprocesses; the GIL is released while they run).
+    workers = min(6, max(1, (os.cpu_count() or 2) - 1))
+    futures = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for n in names:
             if n in SKIP:
-                print(f'skip {n:16s} (see SKIP comment)')
+                with _plock:
+                    print(f'skip {n:16s} (see SKIP comment)')
                 continue
-            check_one(args.bin, args.work, n)
+            futures.append(pool.submit(check_one, args.bin, args.work, n))
+        # Re-raise any worker exception instead of silently dropping that
+        # signature (ThreadPoolExecutor swallows exceptions in futures).
+        for fut in futures:
+            fut.result()
     print(f'\nTOTAL: {PASS} passed, {FAIL} failed of {len(names)}')
     for name, why in failures:
         print(f'  FAIL {name}: {why}')

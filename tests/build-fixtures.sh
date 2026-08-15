@@ -3,9 +3,26 @@
 # Nothing here needs root: every filesystem is populated without mounting.
 set -euo pipefail
 
-OUT="${1:-$(mktemp -d /tmp/ghost-fixtures.XXXXXX)}"
+# The default lives on real disk (NOT /tmp, which is tmpfs on many distros):
+# 2 GiB of images in RAM-backed tmpfs both fills it and pins memory, and it
+# vanishes on reboot. $HOME/.cache survives reboots and keeps RAM free.
+OUT="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/ghost-recover/fixtures}"
 SRC="$OUT/corpus"
 IMG="$OUT/img"
+
+# Rebuild-from-scratch is slow (2 GiB of images, 20+ mkfs runs) and verify.sh
+# runs it on every invocation. Cache by the builder's own hash: identical
+# script, identical fixtures — reuse what is already on disk.
+STAMP_FILE="$OUT/.builder-sha1"
+STAMP="$(sha1sum "$0" | awk '{print $1}')"
+if [ -f "$IMG/ext4.img" ] && [ -f "$STAMP_FILE" ] && \
+   [ "$(cat "$STAMP_FILE")" = "$STAMP" ]; then
+  echo "fixtures -> $OUT (cached)"
+  echo "$OUT"
+  exit 0
+fi
+
+rm -rf "$OUT"
 mkdir -p "$SRC/docs" "$SRC/media" "$IMG"
 
 echo "fixtures -> $OUT"
@@ -466,4 +483,5 @@ stamp('raid10-md', sb1, 10, 2, 4, [0, 1, 2, 3])
 PY
 fi
 
+printf '%s' "$STAMP" > "$STAMP_FILE"
 echo "$OUT"
