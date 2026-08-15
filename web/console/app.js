@@ -16,6 +16,53 @@ const API = '/api';
 // the UI reconnects when the engine comes back.
 setInterval(() => { try { fetch(API + '/health').catch(() => {}); } catch (e) {} }, 45000);
 
+// Closing the tab must free the engine right away, not after the watchdog
+// timeout: fire the shutdown beacon on pagehide. sendBeacon survives the
+// unload where a fetch would be aborted; if the browser refuses it (rare),
+// fall back to an <img> beacon, which cannot be blocked and cannot send a
+// token header — the engine's shutdown route therefore accepts GET and
+// ?tok=. Reloads are forgiven — the engine waits 3 s after a beacon and
+// aborts the shutdown if the page comes back (it starts fetching health
+// within milliseconds, which counts as newer activity). bfcache back/forward
+// is skipped entirely: the user is coming back. The presence WebSocket below
+// is the reliable fallback when a beacon is lost at unload: the socket drop
+// alone makes the engine shut down within ~5 s.
+window.addEventListener('pagehide', (e) => {
+  if (e.persisted) return;
+  const t = sessionToken();
+  const url = API + '/shutdown' + (t ? '?tok=' + encodeURIComponent(t) : '');
+  try {
+    if (!navigator.sendBeacon(url)) {
+      const img = new Image();
+      img.src = url;
+    }
+  } catch (err) {
+    const img = new Image();
+    img.src = url;
+  }
+});
+
+// Presence channel: one WebSocket kept open for the page's whole lifetime.
+// The engine treats its drop (tab closed, browser closed or crashed, page
+// discarded) as "the GUI is gone" and shuts down within ~5 s, releasing
+// scan results and page cache — no unload beacon required. On a reload the
+// socket reconnects inside that grace period. The token (elevated engines)
+// rides in the URL because WebSocket cannot set headers. Reconnects stop
+// once the engine is expected to be down (Shut down button) or the page
+// is hidden, and are capped so a dead engine is not hammered forever.
+let __presenceTries = 0;
+function keepPresence() {
+  const t = sessionToken();
+  const ws = new WebSocket('ws://' + location.host + API + '/presence' +
+                           (t ? '?tok=' + encodeURIComponent(t) : ''));
+  ws.onclose = () => {
+    if (window.__ghostStopped || document.visibilityState !== 'visible') return;
+    if (++__presenceTries > 15) return;
+    setTimeout(keepPresence, 1000);
+  };
+}
+keepPresence();
+
 /* ------------------------------------------------------------------ utils */
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -1279,6 +1326,7 @@ function shutdownEngine() {
     ? '\n\nA job is still running and will be interrupted.'
     : '';
   if (!confirm('Shut down the GHOST RECOVER engine?' + job)) return;
+  window.__ghostStopped = true;
   fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
   setTimeout(() => {
     document.body.innerHTML = `<div class="center">

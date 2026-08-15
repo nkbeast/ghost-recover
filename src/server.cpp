@@ -27,6 +27,10 @@
 #include <mutex>
 #include <unordered_map>
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 #include <chrono>
 #include <thread>
 
@@ -60,9 +64,26 @@ std::atomic<bool> g_handedOver{false};
 // Last time any HTTP request arrived. The UI heartbeats /api/health every
 // ~45 s, so a closed browser goes silent and the idle watchdog shuts the
 // engine down, releasing every scan result and device page-cache page instead
-// of pinning them in the background.
+// of pinning them in the background. Closing the tab itself is handled far
+// faster by the pagehide beacon in app.js (immediate kill, ~3 s); the
+// watchdog is only the fallback for crashed/frozen browsers, and 90 s is
+// safely above the 45 s heartbeat gap (and above the ~60 s worst case when
+// Chrome throttles background-tab timers to one per minute).
 std::atomic<i64> g_lastActivityMs{0};
-constexpr i64 kIdleShutdownMs = 5 * 60 * 1000;   // 5 minutes of silence
+std::atomic<i64> g_lastBeaconMs{0};
+constexpr i64 kIdleShutdownMs = 90 * 1000;   // 90 seconds of silence
+
+// Live-GUI presence. The page keeps one WebSocket (/api/presence) open for
+// its whole lifetime; when the tab closes — or the browser crashes, or the
+// page is discarded — the socket drops at the network level, which is
+// detected without any unload-beacon cooperation from the page. The watchdog
+// then shuts the engine down ~5 s later. A reload reconnects within a second,
+// far inside that grace period. presenceEver distinguishes "a GUI connected
+// once and left" (fast shutdown) from "never connected" (API/CLI use, where
+// the plain idle watchdog applies).
+std::atomic<int> g_presenceCount{0};
+std::atomic<bool> g_presenceEver{false};
+std::atomic<i64> g_presenceZeroSinceMs{0};
 
 // Session token guarding the API. Non-empty only on instances that run with
 // root privileges (elevated via the handover, or started as root directly):
@@ -82,9 +103,18 @@ std::atomic<bool> g_sudoCachedResult{false};
 
 // Graceful shutdown. /api/shutdown and the signal thread both land here:
 // stop() makes httplib's listen() return, after which startServer returns and
-// the process exits, releasing the port for the next start.
+// the process exits, releasing the port for the next start. When no presence
+// socket is open the worker-pool unwind is instant; a socket that refuses to
+// unwind (its handler can sit in read() for the whole 300 s timeout) would
+// stall that exit, so a 2 s force-exit is the backstop — the engine keeps no
+// on-disk state worth flushing: results live in memory by design and are
+// released by exiting.
 void requestEngineShutdown() {
     if (g_server) g_server->stop();
+    std::thread([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        ::_exit(0);
+    }).detach();
 }
 
 // True when a GHOST RECOVER engine is answering health on the given port.
@@ -195,6 +225,13 @@ public:
             results_.erase(order_.front());
             order_.erase(order_.begin());
         }
+#if defined(__GLIBC__)
+        // A scan/carve's transient allocations live in glibc arenas that are
+        // not returned to the kernel when freed — RSS would stay at the scan
+        // peak even after the result is evicted or the job ends. Hand trimmed
+        // arenas back so finished scans free their RAM immediately.
+        malloc_trim(0);
+#endif
     }
     std::shared_ptr<StoredResult> get(const std::string& jobId) const {
         std::lock_guard<std::mutex> lk(mu_);
@@ -998,10 +1035,12 @@ int startServer(const ServerConfig& cfg) {
             // API calls from fetch() carry the token as a header. Media tags
             // (<img>, <video>, <audio>), inline previews and downloads cannot
             // set headers, so /api/content also accepts it as ?tok=… (the
-            // browser appends it in contentUrl()). No other route accepts a
-            // URL token: those GETs all go through fetch() and send the header.
+            // browser appends it in contentUrl()). /api/shutdown and
+            // /api/presence do too: closing the tab fires a header-less
+            // sendBeacon, and the WebSocket API cannot set headers at all.
             const std::string given =
-                (req.path == "/api/content")
+                (req.path == "/api/content" || req.path == "/api/shutdown" ||
+                 req.path == "/api/presence")
                     ? req.get_param_value("tok")
                     : std::string();
             // The header wins when both are present; fall back to the query
@@ -1236,14 +1275,40 @@ int startServer(const ServerConfig& cfg) {
     // Explicit engine shutdown — the UI's "Shut down" button, equivalent to a
     // SIGTERM. The engine exits once the response flushes, so a later start
     // always finds the port free.
-    svr.Post("/api/shutdown", [](const httplib::Request&, httplib::Response& res) {
+    //
+    // Closing the GUI tab also lands here: the page fires a header-less
+    // sendBeacon on pagehide (see app.js), which the pre-routing token check
+    // above admits via ?tok=. The shutdown is deferred 3 s and aborted if any
+    // request arrives in the meantime — a reload or back/forward re-opens the
+    // page and starts fetching /api/health within milliseconds, so a real
+    // reload keeps the engine alive while a real close (no follow-up requests)
+    // tears it down in ~3 s. The GET form exists for the page's <img> beacon
+    // fallback, which cannot POST.
+    auto shutdownHandler = [](const httplib::Request&, httplib::Response& res) {
         json::Writer w;
         w.beginObject().kv("ok", true).kv("message", "shutting down").endObject();
         res.set_content(w.str(), "application/json");
+        g_lastBeaconMs = nowMs();
         std::thread([]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (g_lastActivityMs.load() > g_lastBeaconMs.load()) return;   // page came back
             requestEngineShutdown();
         }).detach();
+    };
+    svr.Post("/api/shutdown", shutdownHandler);
+    svr.Get("/api/shutdown", shutdownHandler);
+
+    // Presence WebSocket: the GUI keeps this open while it is alive. The
+    // handler blocks for the connection's lifetime (httplib pings every 30 s
+    // and the browser answers at the protocol level, so read() below only
+    // returns when the socket is genuinely gone). Count transitions to zero
+    // are timestamped for the watchdog's ~5 s grace, which absorbs reloads.
+    svr.WebSocket("/api/presence", [](const httplib::Request&, httplib::ws::WebSocket& ws) {
+        g_presenceCount++;
+        g_presenceEver = true;
+        std::string msg;
+        while (ws.is_open() && ws.read(msg)) { /* liveness only */ }
+        if (g_presenceCount.fetch_sub(1) == 1) g_presenceZeroSinceMs = nowMs();
     });
 
     svr.Get("/api/filesystems", [](const httplib::Request&, httplib::Response& res) {
@@ -2287,21 +2352,36 @@ int startServer(const ServerConfig& cfg) {
 
     // Idle watchdog: when no browser is talking to the engine, shut down
     // gracefully so a finished scan's results do not pin RAM in the
-    // background. A running job or an open UI (health heartbeat) counts as
-    // activity. The UI heartbeats every ~45 s, so five minutes of silence
-    // means the browser is genuinely closed. A running job used to keep the
-    // engine alive until it completed — closing the page during a whole-disk
-    // scan then left multiple gigabytes pinned in the background for hours.
-    // The watchdog now cancels the running job on that same silence signal,
-    // waits for the worker to unwind, and shuts down. Detached: the process
-    // exits right after stop() returns.
+    // background. Two signals, two speeds:
+    //   - the GUI's presence socket dropping (tab closed, browser closed or
+    //     crashed, page discarded) shuts the engine down within ~4 s — no
+    //     waiting for timeouts, and a reload reconnects inside the grace;
+    //   - HTTP silence (the page's 45 s health heartbeat stopping) shuts it
+    //     down after 90 s. This catches sockets that linger after the page
+    //     died (frozen/unloaded tabs, hung browsers), where the drop is never
+    //     seen. A backgrounded tab still heartbeats at least once a minute,
+    //     safely inside the 90 s window, so normal tab-switching never kills
+    //     a live session.
+    // A running job used to keep the engine alive until it completed —
+    // closing the page during a whole-disk scan then left multiple gigabytes
+    // pinned in the background for hours. The watchdog now cancels the
+    // running job on the idle signal, waits for the worker to unwind, and
+    // shuts down. Detached: the process exits right after stop() returns.
     g_lastActivityMs = nowMs();
+    g_presenceZeroSinceMs = nowMs();
     std::thread([&]() {
         bool cancelling = false;
         while (true) {
-            for (int i = 0; i < 30; i++) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+            for (int i = 0; i < 5; i++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 if (g_server == nullptr) return;   // engine went down
+            }
+            if (g_presenceEver.load() && g_presenceCount.load() == 0 &&
+                nowMs() - g_presenceZeroSinceMs.load() >= 4000) {
+                fprintf(stderr,
+                        "ghost-recover: GUI connection closed — shutting down\n");
+                requestEngineShutdown();
+                return;
             }
             if (nowMs() - g_lastActivityMs.load() < kIdleShutdownMs) continue;
             if (JobManager::instance().hasRunningJob()) {

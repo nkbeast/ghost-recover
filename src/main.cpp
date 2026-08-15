@@ -501,9 +501,11 @@ int main(int argc, char* argv[]) {
                ghost::filesystemRegistry().size(), ghost::carverRegistry().size());
     }
 
-    if (!args.has("--no-browser") && cfg.takeover_file.empty()) {
-        cfg.open_browser = true;
-    }
+    // --no-browser suppresses the auto-open; the taking-over instance is a
+    // hidden helper (the old instance's tab keeps the URL), so it must not
+    // open another window either. The struct default is true, so this needs
+    // an explicit assignment in both directions.
+    cfg.open_browser = !args.has("--no-browser") && cfg.takeover_file.empty();
 
     return ghost::startServer(cfg);
 }
