@@ -23,7 +23,6 @@ i64 vIco(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 furthest = dirEnd;
     for (u16 i = 0; i < count; i++) {
         i64 e = off + 6 + (i64)i * 16;
-        u8 w = s.byte(e), h = s.byte(e + 1);
         u8 planes = s.byte(e + 4);
         u32 bytes = s.le32(e + 8);
         u32 imgOff = s.le32(e + 12);
