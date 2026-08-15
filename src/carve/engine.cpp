@@ -207,10 +207,10 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     std::atomic<bool> overflow{false};
     // See the RAM-scaling comment below: the cap is lowered on small boxes so
     // candidates + validated array + the resident scan result fit in RAM.
-    size_t kMaxCandidates = 2 * 1000 * 1000;
+    size_t kMaxCandidates = 4 * 1000 * 1000;
     {
         const i64 ramGB = std::max<i64>(1, systemRamKB() / (1024 * 1024));
-        size_t cap = (size_t)std::min<i64>(2LL * 1000 * 1000,
+        size_t cap = (size_t)std::min<i64>(4LL * 1000 * 1000,
                                            std::max<i64>(500LL * 1000, 500LL * 1000 * ramGB));
         kMaxCandidates = cap;
     }
@@ -326,8 +326,11 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     result.bytes_scanned = scanned.load();
     result.candidates_seen = (i64)candidates.size();
     if (overflow.load())
-        result.error = "signature candidate limit reached — results are partial; narrow the "
-                       "category filter or scan a smaller region";
+        result.error = "carving stopped early, but the job finished: the free space contained more "
+                       "than " + std::to_string(kMaxCandidates) +
+                       " signature matches, the in-memory safety cap, so only the earliest matches "
+                       "were carved and results are partial. Re-run with a single category selected "
+                       "to carve further into the disk.";
 
     if (prog.cancelled()) {
         result.ok = true;

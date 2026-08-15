@@ -747,7 +747,8 @@ function viewFilters() {
     <input class="input grow" placeholder="Filter by name or path…" value="${esc(S.filter.q)}"
       oninput="S.filter.q=this.value" onchange="S.page=0;loadResults()"
       onkeydown="if(event.key==='Enter'){S.page=0;loadResults()}">
-    <select class="input" onchange="S.filter.ext=this.value;S.page=0;loadResults()">
+    <select class="input" title="Every file extension found on the disk — numeric ones like 50 or 001 come from multi-part files (backup.50, part.001); odd names are extensions of the actual filenames"
+      onchange="S.filter.ext=this.value;S.page=0;loadResults()">
       <option value="">All types</option>
       ${exts.map(([e, n]) => `<option value="${esc(e)}"
         ${S.filter.ext === e ? 'selected' : ''}>${esc(e)} (${n})</option>`).join('')}
