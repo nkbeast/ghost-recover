@@ -679,6 +679,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         if (opt.compute_hashes) { cf.md5 = digest; cf.sha1 = sha1.hex(); }
         cf.extents.push_back(Extent(carveStart, written));
 
+        if (opt.on_file) opt.on_file(cf);
         result.by_format[spec.name]++;
         result.by_category[spec.category]++;
         result.files.push_back(std::move(cf));

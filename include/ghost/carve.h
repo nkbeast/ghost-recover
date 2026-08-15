@@ -122,6 +122,10 @@ struct CarveOptions {
     std::vector<std::string> categories;   // empty = all
     std::vector<std::string> extensions;   // empty = all
     std::vector<Extent>      regions;      // explicit regions (unallocated map)
+    // Optional per-file callback, fired in accept order as each file is
+    // recovered (before it is recorded in the result). The server uses it to
+    // publish files to the UI live, while the carve itself runs.
+    std::function<void(const CarvedFile&)> on_file;
 };
 
 CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& prog);

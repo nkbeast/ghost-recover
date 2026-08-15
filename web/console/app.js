@@ -1214,6 +1214,20 @@ async function startJob(kind, extra) {
     const r = await apiPost('/' + kind, body);
     if (!r.ok) { log(r.error || 'could not start', 'err'); alert(r.error); return; }
     S.job = { id: r.job, kind, state: 'queued', phase: 'starting', percent: 0 };
+    if (kind === 'scan' || kind === 'carve' || kind === 'deep') {
+      // Results stream in live: the scan list is published as soon as the
+      // scan ends, carved files appear one by one after that. Point the
+      // results table at this job from the start so pollJob can refresh it
+      // while the job runs instead of waiting for completion.
+      S.summary = null;
+      S.resultJob = r.job;
+      S.page = 0;
+      S.selIndex = -1;
+      S.selected.clear();
+      S.results = null;
+      S.lastLiveResults = 0;
+      S.warnedNoResults = false;
+    }
     render();
     pollJob(r.job);
   } catch (e) { log('start failed: ' + e.message, 'err'); }
@@ -1232,6 +1246,14 @@ function pollJob(id) {
         onJobFinished(r);
       } else {
         updateJobBar();
+        // Live results: refresh the table while the job runs (throttled —
+        // the server serialises every page over the full list, and the
+        // results only exist once the scan phase has been published).
+        const now = Date.now();
+        if (S.resultJob && now - (S.lastLiveResults || 0) > 1200) {
+          S.lastLiveResults = now;
+          await loadResults();
+        }
       }
     } catch (e) {
       clearInterval(S.jobPoll);
@@ -1330,12 +1352,23 @@ async function loadResults() {
     }
   } catch (e) {
     if (e.status === 404) {
-      // The engine released this result's memory (every new job frees the
-      // previous scan's result; see ResultStore::dropAll in server.cpp).
-      S.results = null;
-      S.summary = null;
-      S.resultJob = null;
-      log('that result was released from memory when a newer job ran', 'warn');
+      // Two distinct cases: the job is still running and has not published
+      // any results yet (the scan phase has not finished), or the engine
+      // released this result's memory (every new job frees the previous
+      // scan's result; see ResultStore::dropAll in server.cpp). Only the
+      // latter should clear the view — a running job will publish shortly.
+      const running = S.job && !['done', 'failed', 'cancelled'].includes(S.job.state);
+      if (running) {
+        if (!S.warnedNoResults) {
+          S.warnedNoResults = true;
+          log('no results published yet — the scan is still building the file list…', 'warn');
+        }
+      } else {
+        S.results = null;
+        S.summary = null;
+        S.resultJob = null;
+        log('that result was released from memory when a newer job ran', 'warn');
+      }
     } else {
       log('could not load results: ' + e.message, 'err');
     }

@@ -172,13 +172,18 @@ ElevationAttempt g_elevation;
 // through it, preview individual files and extract a selection afterwards.
 // ---------------------------------------------------------------------------
 struct StoredResult {
-    std::string kind;                 // "scan" | "carve" | "deep"
+    std::string kind;
     std::string target;
     i64 offset = 0;
     i64 length = 0;
     std::string filesystem;
     ScanResult  scan;
     CarveResult carve;
+    // The unified list is published to the UI live while a job runs (scan
+    // list as soon as the scan ends, carved files as they are recovered), so
+    // the results handlers read it concurrently with the job thread appending
+    // to it. Guard it.
+    mutable std::mutex mu;
     std::vector<RecoveredFile> files;   // unified view used by the UI
     i64 scan_file_count = 0;            // scan.files size before it was moved
 };
@@ -1571,6 +1576,10 @@ int startServer(const ServerConfig& cfg) {
                     for (const auto& sf : stored->files)
                         if (!sf.extents.empty()) scanOffsets.push_back(sf.extents.front().offset);
                     std::sort(scanOffsets.begin(), scanOffsets.end());
+                    // Publish now: the scan list is complete, and the UI shows
+                    // it (thousands of rows) while the carve is still running
+                    // instead of making the user wait for the whole deep job.
+                    ResultStore::instance().put(job.id, stored);
                 }
 
                 bool carveTruncated = false;
@@ -1581,29 +1590,39 @@ int startServer(const ServerConfig& cfg) {
                         co.regions = unallocatedRegions(*disk, stored->filesystem, job.progress);
                     }
                     job.progress.setPhase("carving");
-                    stored->carve = carveDevice(*disk, co, job.progress);
                     // Carved files join the unified list under the same byte
                     // budget as the scan result: without this, a full disk's
-                    // carved output could double the result's footprint.
+                    // carved output could double the result's footprint. The
+                    // hook fires per accepted file inside the engine, so the
+                    // UI sees carved files appear one by one while the carve
+                    // runs; the store is refreshed on a throttle so a fast
+                    // run does not churn the store on every single file.
                     const i64 budget = defaultMaxResultBytes();
                     i64 unifiedBytes = withScan ? stored->scan.resultBytes : 0;
-                    size_t base = stored->files.size();
-                    for (size_t i = 0; i < stored->carve.files.size(); i++) {
+                    auto t0Put = std::chrono::steady_clock::now();
+                    co.on_file = [&](const CarvedFile& cf) {
                         // Skip carved results that duplicate a file the
                         // filesystem scan already recovered at the same place.
-                        const auto& cf = stored->carve.files[i];
                         auto it = std::lower_bound(scanOffsets.begin(), scanOffsets.end(),
                                                    cf.offset - 4096);
                         bool dup = it != scanOffsets.end() && *it <= cf.offset + 4096;
-                        if (dup) continue;
-                        RecoveredFile rf =
-                            carvedToRecovered(std::move(stored->carve.files[i]), base + i);
-                        const i64 cost = 512 + (i64)rf.name.size() + (i64)rf.path.size() +
-                                         (i64)rf.method.size() + 32 * (i64)rf.extents.size();
-                        if (unifiedBytes + cost > budget) { carveTruncated = true; break; }
+                        if (dup) return;
+                        const i64 cost = 512 + (i64)cf.format.size() + (i64)cf.ext.size() +
+                                         32 * (i64)cf.extents.size();
+                        if (unifiedBytes + cost > budget) { carveTruncated = true; return; }
                         unifiedBytes += cost;
-                        stored->files.push_back(std::move(rf));
-                    }
+                        {
+                            std::lock_guard<std::mutex> lk(stored->mu);
+                            stored->files.push_back(
+                                carvedToRecovered(CarvedFile(cf), stored->files.size()));
+                        }
+                        auto now = std::chrono::steady_clock::now();
+                        if (now - t0Put >= std::chrono::milliseconds(250)) {
+                            t0Put = now;
+                            ResultStore::instance().put(job.id, stored);
+                        }
+                    };
+                    stored->carve = carveDevice(*disk, co, job.progress);
                     // Extents/strings of carve entries were moved into the
                     // unified list (or skipped as duplicates); drop the rest.
                     stored->carve.files.clear();
@@ -1727,6 +1746,7 @@ int startServer(const ServerConfig& cfg) {
         std::string only = req.get_param_value("only");     // "deleted" | "live" | ""
         std::string sort = req.get_param_value("sort");     // name|size|mtime|confidence
 
+        std::lock_guard<std::mutex> lk(stored->mu);   // live results grow under this
         std::vector<size_t> idx;
         idx.reserve(stored->files.size());
         for (size_t i = 0; i < stored->files.size(); i++) {
@@ -1779,6 +1799,12 @@ int startServer(const ServerConfig& cfg) {
         auto stored = ResultStore::instance().get(req.get_param_value("job"));
         i64 index = paramInt(req, "index", -1);
         if (!stored || index < 0 || index >= (i64)stored->files.size()) {
+            res.status = 404;
+            res.set_content(errorJson("no such file in that job"), "application/json");
+            return;
+        }
+        std::lock_guard<std::mutex> lk(stored->mu);   // live results grow under this
+        if (index >= (i64)stored->files.size()) {
             res.status = 404;
             res.set_content(errorJson("no such file in that job"), "application/json");
             return;
@@ -2209,20 +2235,32 @@ int startServer(const ServerConfig& cfg) {
         }
 
         std::vector<size_t> indices;
-        if (const json::Value* arr = body.getArray("indices"))
+        if (const json::Value* arr = body.getArray("indices")) {
+            std::lock_guard<std::mutex> lk(stored->mu);
             for (const auto& v : arr->arr) {
                 i64 i = v.asInt();
                 if (i >= 0 && i < (i64)stored->files.size()) indices.push_back((size_t)i);
             }
+        }
 
         std::string id = submitJob("extract", stored->target,
             [stored, opt, indices](Job& job) -> std::string {
                 std::string err;
                 auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
                 if (!disk) throw std::runtime_error(err);
+                // Snapshot the selection under the same lock the live job
+                // publishes results with: a deep job may still be appending
+                // carved files while this extraction is queued.
                 std::vector<RecoveredFile> selection;
-                if (indices.empty()) selection = stored->files;
-                else for (size_t i : indices) selection.push_back(stored->files[i]);
+                {
+                    std::lock_guard<std::mutex> lk(stored->mu);
+                    if (indices.empty()) selection = stored->files;
+                    else {
+                        selection.reserve(indices.size());
+                        for (size_t i : indices)
+                            if (i < stored->files.size()) selection.push_back(stored->files[i]);
+                    }
+                }
 
                 ExtractResult r = extractFiles(*disk, selection, opt, job.progress);
                 json::Writer w;

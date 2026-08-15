@@ -348,7 +348,18 @@ class Progress {
 public:
     void setPhase(const std::string& p) {
         std::lock_guard<std::mutex> lk(m_);
+        if (!phase_.empty() && p != phase_) {
+            // Retire the phase we are leaving: its share of the bar is the
+            // fraction it actually completed, so the overall percent can be
+            // monotonic across the whole job instead of resetting to 0 at
+            // every phase boundary (the old bar sat at 0% for the entire
+            // "validating and extracting" stretch of a big carve).
+            i64 t = total_.load();
+            segs_.push_back({phase_, t > 0 ? (double)done_.load() / (double)t : 1.0});
+        }
         phase_ = p;
+        done_ = 0;
+        total_ = 0;
     }
     std::string phase() const {
         std::lock_guard<std::mutex> lk(m_);
@@ -362,20 +373,90 @@ public:
     i64 done()  const { return done_; }
     i64 total() const { return total_; }
     i64 found() const { return found_; }
+
+    // Overall job percent, monotonic across phases. Phases retire into the
+    // bar weighted by their expected wall-time (signature pass and validation
+    // dominate a carve, inode walk dominates a scan); the current phase adds
+    // its own weighted fraction. Self-normalising, so unknown phases simply
+    // take their share and the bar still ends at 100% when "done" fires.
     double percent() const {
+        std::lock_guard<std::mutex> lk(m_);
+        if (phase_ == "done") return 100.0;
+        double usedW = 0, usedDone = 0;
+        for (const auto& [name, frac] : segs_) {
+            double w = phaseWeight(name);
+            usedW += w;
+            usedDone += w * frac;
+        }
+        double w = phaseWeight(phase_);
         i64 t = total_.load();
-        if (t <= 0) return 0.0;
-        double p = 100.0 * (double)done_.load() / (double)t;
+        double cur = t > 0 ? (double)done_.load() / (double)t : 0.0;
+        if (cur < 0) cur = 0;
+        if (cur > 1) cur = 1;
+        double p = 100.0 * (usedDone + w * cur) / (usedW + w);
         return p < 0 ? 0 : (p > 100 ? 100 : p);
     }
+
     void cancel() { cancel_ = true; }
     bool cancelled() const { return cancel_.load() || cliCancelRequested(); }
 
 private:
-    mutable std::mutex  m_;
-    std::string         phase_ = "starting";
-    std::atomic<i64>    done_{0}, total_{0}, found_{0};
-    std::atomic<bool>   cancel_{false};
+    // Weights proportional to expected wall-time per phase; exact names win,
+    // then the longest matching prefix (the imaging retry/resume phases carry
+    // a dynamic suffix), then a flat default.
+    static double phaseWeight(const std::string& p) {
+        struct Entry { const char* name; double w; };
+        static const Entry kExact[] = {
+            // scan drivers
+            {"walking $MFT", 3.0}, {"mining $I30 index slack", 1.0}, {"reading $UsnJrnl", 0.5},
+            {"reading inode tables", 3.0}, {"mining jbd2 journal", 0.5},
+            {"reconstructing directory tree", 2.5}, {"resolving paths", 1.0},
+            {"resolving data streams", 0.5}, {"reconstructing paths", 1.0},
+            {"walking directories", 2.0}, {"reading directories", 2.0},
+            {"sweeping node blocks", 2.0}, {"walking HFS catalog", 2.0},
+            {"walking HFS+ catalog", 2.0}, {"sweeping APFS B-tree leaves", 2.0},
+            {"locating APFS volumes", 0.5}, {"assembling APFS objects", 1.0},
+            {"scanning for orphaned chains", 1.0}, {"walking inode B+trees", 2.0},
+            {"harvesting metadata leaves", 1.0}, {"mapping chunk tree", 1.0},
+            {"reading inodes", 2.0}, {"walking MINIX directories", 1.0},
+            {"reading MINIX inodes", 1.0}, {"walking romfs entries", 1.0},
+            {"walking cramfs inodes", 1.0}, {"reading SquashFS inode table", 1.0},
+            {"reading SquashFS fragment table", 1.0}, {"walking ISO directory tree", 1.0},
+            {"scanning for orphaned ISO records", 1.0}, {"reading root directory", 1.0},
+            {"locating UDF anchor", 0.3}, {"reading UDF volume descriptors", 0.5},
+            {"walking UDF file entries", 1.0}, {"scanning UDF file identifiers", 1.0},
+            {"reading UFS inodes", 2.0}, {"walking UFS directories", 1.0},
+            {"sweeping ReiserFS leaves", 2.0}, {"scanning JFS inodes", 2.0},
+            {"scanning JFFS2 nodes", 2.0}, {"reading free-space map", 1.0},
+            // carve engine
+            {"building signature automaton", 0.1}, {"scanning for signatures", 8.0},
+            {"validating and extracting", 10.0}, {"recovering loose text", 1.0},
+            {"mapping free space", 1.0},
+            // extract / image / raid
+            {"extracting files", 6.0}, {"assembling files", 3.0},
+            {"imaging (pass 1: fast)", 8.0},
+            {"reading RAID superblocks", 1.0}, {"brute-forcing RAID parameters", 2.0},
+            {"ranking candidate geometries by reconstructed content", 1.0},
+            {"assembling RAID array", 4.0},
+            {"identifying filesystem", 0.3}, {"reading partition tables", 2.0},
+            {"scanning for deleted partitions", 1.0},
+            {"done", 1.0}, {"cancelled", 0.1}, {"cancelling", 0.1},
+        };
+        static const Entry kPrefix[] = {
+            {"imaging (retry pass ", 2.0}, {"resuming at ", 0.1},
+        };
+        for (const auto& e : kExact)
+            if (p == e.name) return e.w;
+        for (const auto& e : kPrefix)
+            if (p.compare(0, strlen(e.name), e.name) == 0) return e.w;
+        return 0.5;
+    }
+
+    mutable std::mutex m_;
+    std::string phase_ = "starting";
+    std::vector<std::pair<std::string, double>> segs_;   // retired phases
+    std::atomic<i64> done_{0}, total_{0}, found_{0};
+    std::atomic<bool> cancel_{false};
 };
 
 // Null-object progress so drivers never need to null-check.
