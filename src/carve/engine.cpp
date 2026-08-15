@@ -215,6 +215,42 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         kMaxCandidates = cap;
     }
 
+    // Regions a filesystem scan already accounts for (a deep job): signature
+    // hits inside them would be walked, validated and streamed only to be
+    // dropped as duplicates by the merge — on a real disk that meant reading
+    // every live file's full span twice. Skip them at hit time.
+    std::atomic<i64> skippedHits{0};
+    if (getenv("GHOST_DEBUG_CARVE")) {
+        i64 covered = 0;
+        for (const auto& e : opt.skip_regions) covered += e.length;
+        fprintf(stderr, "[carve] skipIndex regions=%zu covered=%lld bytes\n",
+                opt.skip_regions.size(), (long long)covered);
+    }
+    struct SkipIndex {
+        std::vector<i64> starts, ends;
+        bool contains(i64 off) const {
+            auto it = std::upper_bound(starts.begin(), starts.end(), off);
+            if (it == starts.begin()) return false;
+            size_t k = (size_t)(it - starts.begin()) - 1;
+            return off < ends[k];
+        }
+    } skipIndex;
+    if (!opt.skip_regions.empty()) {
+        std::vector<std::pair<i64, i64>> spans;
+        spans.reserve(opt.skip_regions.size());
+        for (const auto& e : opt.skip_regions)
+            if (e.length > 0) spans.push_back({e.offset, e.offset + e.length});
+        std::sort(spans.begin(), spans.end());
+        for (const auto& [s, e] : spans) {
+            if (!skipIndex.starts.empty() && s <= skipIndex.ends.back()) {
+                if (e > skipIndex.ends.back()) skipIndex.ends.back() = e;
+            } else {
+                skipIndex.starts.push_back(s);
+                skipIndex.ends.push_back(e);
+            }
+        }
+    }
+
     auto worker = [&]() {
         auto reader = disk.clone();
         if (!reader) return;
@@ -250,6 +286,8 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                                  const CarveSpec* sp = specs[(size_t)specId];
                                  i64 fileOff = hitOff - sp->magic_offset;
                                  if (fileOff < 0) return;
+                                 if (skipIndex.contains(fileOff)) return;
+                                 skippedHits.fetch_add(1, std::memory_order_relaxed);
                                  if (sp->scan_filter) {
                                      i64 rel = hitOff - pos;
                                      if (rel >= 0 &&
@@ -277,12 +315,14 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         else
             overflow = true;
     };
-
     {
         std::vector<std::thread> pool;
         for (int i = 0; i < threads; i++) pool.emplace_back(worker);
         for (auto& t : pool) t.join();
     }
+    if (getenv("GHOST_DEBUG_CARVE"))
+        fprintf(stderr, "[carve] done pass1: candidates=%zu skipped-by-scan=%lld overflow=%d\n",
+                candidates.size(), (long long)skippedHits.load(), (int)overflow.load());
     result.bytes_scanned = scanned.load();
     result.candidates_seen = (i64)candidates.size();
     if (overflow.load())
@@ -398,8 +438,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         // Determine the length.
         i64 size = -1;
         if (opt.validate && spec.validator) {
+            i64 tV = nowMs();
             src.setBackscan(0);
             size = spec.validator(src, off, cap, spec);
+            i64 dt = nowMs() - tV;
+            if (dbg2 && dt >= 100)
+                fprintf(stderr, "[carve] slow %s off=%lld took=%lldms\n",
+                        spec.name.c_str(), (long long)off, (long long)dt);
             v.backscan = src.backscan();
             if (size < 0) {
                 if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=validator\n",

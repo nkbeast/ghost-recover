@@ -46,14 +46,54 @@ i64 vRiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
 
 
 i64 vZip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    // Accept only the End Of Central Directory whose central-directory pointer
-    // and size add up to its own position — that identifies the EOCD belonging
-    // to *this* archive rather than one from a neighbouring file.
+    // Walk the chain of local entries from the archive start: each local
+    // header declares its payload, so a genuine archive advances cheaply,
+    // while a signature hit inside foreign data fails the second header
+    // check after one or two small reads — it must not scan the window.
+    const i64 kEocdBound = 8 * MB;
+    i64 p = off;
+    int entries = 0;
+    while (p + 30 <= off + max && entries < 200000) {
+        auto h = s.read(p, 30);
+        if (h.size() < 30) break;
+        if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 0x03 && h[3] == 0x04)) break;
+        u16 flags = (u16)((u16)h[6] | (u16)h[7] << 8);
+        u16 method = (u16)((u16)h[8] | (u16)h[9] << 8);
+        if (method > 12) break;                    // invalid compression method
+        u16 nameLen = (u16)((u16)h[26] | (u16)h[27] << 8);
+        u16 extraLen = (u16)((u16)h[28] | (u16)h[29] << 8);
+        i64 next = p + 30 + (i64)nameLen + (i64)extraLen;
+        if (next + 16 > off + max) break;
+        if (flags & 0x0008) {
+            // Streaming entry (data descriptor follows the payload): its
+            // sizes live in the descriptor, not the local header.
+            auto d = s.read(next, 16);
+            if (d.size() < 16) break;
+            size_t offComp = (d[0] == 'P' && d[1] == 'K' && d[2] == 0x07 && d[3] == 0x08) ? 8 : 4;
+            u32 compSize = (u32)d[offComp] | (u32)d[offComp + 1] << 8 |
+                           (u32)d[offComp + 2] << 16 | (u32)d[offComp + 3] << 24;
+            next += 16 + (i64)compSize;
+        } else {
+            u32 compSize = (u32)h[18] | (u32)h[19] << 8 | (u32)h[20] << 16 | (u32)h[21] << 24;
+            next += (i64)compSize;
+        }
+        if (next + 30 > off + max) {
+            entries++;                           // header validated; payload runs
+            break;                               // past the window — scan from p
+        }
+        p = next;
+        entries++;
+    }
+    if (entries < 1) return -1;
+    // The central directory (with the EOCD it points to) follows the last
+    // data entry. A real archive's directory is small relative to its data,
+    // so a bounded forward scan suffices — junk never gets here anyway.
     const i64 kStep = 1 * MB;
     const i64 kOverlap = 21;
-    i64 base = 0;
-    while (base < max) {
-        i64 want = std::min(kStep, max - base);
+    i64 base = p - off;
+    i64 limit = std::min<i64>(max, base + kEocdBound);
+    while (base < limit) {
+        i64 want = std::min(kStep, limit - base);
         auto buf = s.read(off + base, want);
         if (buf.size() < 22) break;
         for (size_t i = 0; i + 22 <= buf.size(); i++) {
@@ -63,6 +103,7 @@ i64 vZip(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             u32 cdOff  = (u32)buf[i+16] | (u32)buf[i+17] << 8 | (u32)buf[i+18] << 16 | (u32)buf[i+19] << 24;
             u16 comment = (u16)((u16)buf[i+20] | (u16)buf[i+21] << 8);
             i64 eocdPos = base + (i64)i;
+            if ((i64)cdOff < 0 || (i64)cdOff < p - off) continue;   // directory inside this archive
             if ((i64)cdOff + (i64)cdSize != eocdPos) continue;
             i64 total = eocdPos + 22 + comment;
             return (total <= max) ? total : -1;

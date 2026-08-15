@@ -122,6 +122,13 @@ struct CarveOptions {
     std::vector<std::string> categories;   // empty = all
     std::vector<std::string> extensions;   // empty = all
     std::vector<Extent>      regions;      // explicit regions (unallocated map)
+    // Regions already accounted for by a filesystem scan (a deep job passes the
+    // scanned files' extents). Signature hits inside them are duplicates the
+    // merge would drop anyway — the dedup does that after a full validation
+    // walk, which on a real disk means reading every live file twice. Skipping
+    // them in pass 1 collapses the flood of in-file junk candidates and makes
+    // the carve validate only what the scan does not already cover.
+    std::vector<Extent>      skip_regions;
     // Optional per-file callback, fired in accept order as each file is
     // recovered (before it is recorded in the result). The server uses it to
     // publish files to the UI live, while the carve itself runs.

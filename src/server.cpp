@@ -1585,6 +1585,25 @@ int startServer(const ServerConfig& cfg) {
                 bool carveTruncated = false;
                 if (withCarve && !job.progress.cancelled()) {
                     CarveOptions co = copt;
+                    // Deep job: the carve only needs to look where the scan
+                    // could not — signature hits inside scanned extents were
+                    // dropped as duplicates anyway (after a full validation
+                    // walk that read every live file twice). Skipping them in
+                    // the signature pass collapses the flood of in-file junk
+                    // candidates that made validation crawl on real disks.
+                    if (withScan) {
+                        co.skip_regions.reserve(stored->files.size() * 2);
+                        for (const auto& sf : stored->files)
+                            for (const auto& e : sf.extents)
+                                if (e.length > 0 && sf.recoverable > 0)
+                                    co.skip_regions.push_back(e);
+                        i64 covered = 0;
+                        for (const auto& e : co.skip_regions) covered += e.length;
+                        if (getenv("GHOST_DEBUG_CARVE"))
+                            fprintf(stderr, "[deep] skip_regions=%zu covered=%lld bytes (files=%zu)\n",
+                                    co.skip_regions.size(), (long long)covered,
+                                    stored->files.size());
+                    }
                     if (unallocOnly) {
                         job.progress.setPhase("mapping free space");
                         co.regions = unallocatedRegions(*disk, stored->filesystem, job.progress);
