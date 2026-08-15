@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -191,20 +192,53 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     // cost ~32 MiB instead of ~512 MiB.
     disk.setCacheSize(2 * 1024 * 1024);
 
-    // Flatten the regions into fixed work units so threads stay balanced.
-    struct Unit { i64 start, length; };
-    std::vector<Unit> units;
-    const i64 kUnit = 64 * 1024 * 1024;
+    // ---- chunked processing ---------------------------------------------
+    // The whole disk's signature matches can exceed the in-memory candidate
+    // budget (a full disk of real data floods every pass), so the regions are
+    // carved in sequential windows: each window's candidates are validated and
+    // streamed out before the next window is scanned. The budget then bounds
+    // ONE window's matches instead of the whole disk and the carve never stops
+    // early. A window whose matches still overflow the budget is split in half
+    // and retried, so full coverage is guaranteed.
+    const i64 kWin = 4LL * 1024 * 1024 * 1024;
+    std::deque<std::vector<Extent>> windows;
     for (const auto& r : regions)
-        for (i64 o = 0; o < r.length; o += kUnit)
-            units.push_back({r.offset + o, std::min(kUnit, r.length - o)});
-    if ((int)units.size() < threads) threads = std::max(1, (int)units.size());
+        for (i64 o = 0; o < r.length; o += kWin) {
+            std::vector<Extent> w;
+            w.push_back(Extent(r.offset + o, std::min(kWin, r.length - o)));
+            windows.push_back(std::move(w));
+        }
 
-    std::vector<Candidate> candidates;
-    std::mutex candMutex;
-    std::atomic<size_t> nextUnit{0};
+    // Pass-2 state that must survive across windows: the masking rule (a
+    // verified file hides candidates inside it) and the whole-file dedup key
+    // are ordered decisions over the whole carve, not per window.
+    std::unordered_set<std::string> seenHashes;
+    std::map<std::string, int> perFormatCount;
+    i64 acceptedEnd = -1;             // end of the most recently accepted file
+    i64 acceptedStart = -1;
+    bool acceptedValidated = false;   // only a structurally verified file masks others
+    i64 vDoneCum = 0, vTotalCum = 0;  // validation progress accumulated across windows
     std::atomic<i64> scanned{0};
-    std::atomic<bool> overflow{false};
+    prog.setPhase("validating and extracting");
+
+    while (!windows.empty() && !prog.cancelled()) {
+        auto win = std::move(windows.front());
+        windows.pop_front();
+
+        // Flatten the window into fixed work units so threads stay balanced.
+        struct Unit { i64 start, length; };
+        std::vector<Unit> units;
+        const i64 kUnit = 64 * 1024 * 1024;
+        for (const auto& r : win)
+            for (i64 o = 0; o < r.length; o += kUnit)
+                units.push_back({r.offset + o, std::min(kUnit, r.length - o)});
+        if ((int)units.size() < threads) threads = std::max(1, (int)units.size());
+        const int winThreads = threads;
+
+        std::vector<Candidate> candidates;
+        std::mutex candMutex;
+        std::atomic<size_t> nextUnit{0};
+        std::atomic<bool> overflow{false};
     // See the RAM-scaling comment below: the cap is lowered on small boxes so
     // candidates + validated array + the resident scan result fit in RAM.
     size_t kMaxCandidates = 4 * 1000 * 1000;
@@ -213,6 +247,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         size_t cap = (size_t)std::min<i64>(4LL * 1000 * 1000,
                                            std::max<i64>(500LL * 1000, 500LL * 1000 * ramGB));
         kMaxCandidates = cap;
+    }
+    // Test/support override: GHOST_CARVE_CAP sets the per-window candidate
+    // budget directly (the RAM scaling still applies otherwise).
+    if (const char* over = getenv("GHOST_CARVE_CAP")) {
+        char* end = nullptr;
+        long v = strtol(over, &end, 10);
+        if (end && *end == 0 && v > 0) kMaxCandidates = (size_t)v;
     }
 
     // Regions a filesystem scan already accounts for (a deep job): signature
@@ -300,7 +341,12 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                 pos += (i64)buf.size();
                 scanned += (i64)buf.size();
                 if ((scanned.load() & ((16 << 20) - 1)) == 0) prog.set(scanned.load(), totalBytes);
-                if (local.size() > 200000) {
+                // Flush a worker's local batch once it approaches the budget; the flush
+                // threshold must scale with the cap so a tiny cap (a small box
+                // or the GHOST_CARVE_CAP override) never lets one worker's
+                // unflushed batch trip a false overflow.
+                const size_t kLocalFlush = std::min<size_t>(200000, kMaxCandidates / 2);
+                if (local.size() > kLocalFlush) {
                     std::lock_guard<std::mutex> lk(candMutex);
                     if (candidates.size() + local.size() > kMaxCandidates) { overflow = true; }
                     else candidates.insert(candidates.end(), local.begin(), local.end());
@@ -317,20 +363,43 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     };
     {
         std::vector<std::thread> pool;
-        for (int i = 0; i < threads; i++) pool.emplace_back(worker);
+        for (int i = 0; i < winThreads; i++) pool.emplace_back(worker);
         for (auto& t : pool) t.join();
     }
-    if (getenv("GHOST_DEBUG_CARVE"))
-        fprintf(stderr, "[carve] done pass1: candidates=%zu skipped-by-scan=%lld overflow=%d\n",
+    if (getenv("GHOST_DEBUG_CARVE")) {
+        i64 wlen = 0;
+        for (const auto& e : win) wlen += e.length;
+        fprintf(stderr, "[carve] done pass1: win=[%lld,%lld) len=%lld candidates=%zu skipped-by-scan=%lld overflow=%d\n",
+                (long long)win.front().offset, (long long)(win.front().offset + wlen), (long long)wlen,
                 candidates.size(), (long long)skippedHits.load(), (int)overflow.load());
+    }
     result.bytes_scanned = scanned.load();
-    result.candidates_seen = (i64)candidates.size();
-    if (overflow.load())
+    if (overflow.load()) {
+        // The window's matches exceeded the in-memory budget: split it in
+        // half and retry the halves instead of truncating the carve. Each
+        // half becomes its own window — the pass 1 budget applies per
+        // window, so a half can only hold half the matches. The halving
+        // converges (a tiny window can never overflow), so the whole disk
+        // is always covered.
+        std::vector<Extent> halves;
+        for (const auto& e : win)
+            if (e.length > 1) {
+                i64 mid = e.length / 2;
+                halves.push_back(Extent(e.offset, mid));
+                halves.push_back(Extent(e.offset + mid, e.length - mid));
+            }
+        if (!halves.empty()) {
+            for (auto it = halves.rbegin(); it != halves.rend(); ++it)
+                windows.push_front(std::vector<Extent>{*it});
+            continue;
+        }
         result.error = "carving stopped early, but the job finished: the free space contained more "
                        "than " + std::to_string(kMaxCandidates) +
                        " signature matches, the in-memory safety cap, so only the earliest matches "
                        "were carved and results are partial. Re-run with a single category selected "
                        "to carve further into the disk.";
+    }
+    result.candidates_seen += (i64)candidates.size();
 
     if (prog.cancelled()) {
         result.ok = true;
@@ -339,7 +408,6 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     }
 
     // ---- pass 2: validate (parallel), then accept and stream out -----------
-    prog.setPhase("validating and extracting");
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) {
                   if (a.offset != b.offset) return a.offset < b.offset;
@@ -511,19 +579,16 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         v.valid = true;
     };
 
-    std::unordered_set<std::string> seenHashes;
-    std::map<std::string, int> perFormatCount;
-    i64 acceptedEnd = -1;             // end of the most recently accepted file
-    i64 acceptedStart = -1;
-    bool acceptedValidated = false;   // only a structurally verified file masks others
-
     // Progress runs 0..2n across the two phases so the bar is monotonic and
     // never fakes: validation drives [0, n), the serial walk continues [n, 2n).
     // Without this the validation phase — on a flood disk the bulk of the wall
     // time — sat at 0% and the walk restarted the bar from zero, so the UI
-    // looked frozen or rewinding.
-    const i64 progTotal = 2 * (i64)candidates.size();
-    prog.set(0, progTotal);
+    // looked frozen or rewinding. The counters accumulate across windows so
+    // the phase stays continuous for the whole carve instead of rewinding per
+    // window.
+    const i64 winProgTotal = 2 * (i64)candidates.size();
+    vTotalCum += winProgTotal;
+    prog.set(vDoneCum, vTotalCum);
 
     // Phase A: validate every candidate in parallel. Pure read work, so the
     // whole set goes at once (slabs only bound how many reads each worker
@@ -532,7 +597,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         std::atomic<size_t> nextCand{0};
         std::atomic<size_t> validatedCount{0};
         std::vector<std::thread> pool;
-        for (int i = 0; i < threads; i++)
+        for (int i = 0; i < winThreads; i++)
             pool.emplace_back([&]() {
                 auto reader = disk.clone();
                 if (!reader) return;
@@ -544,7 +609,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                     for (size_t ci = beg; ci < end; ci++)
                         examine(ci, candidates[ci], *reader, src);
                     validatedCount += end - beg;
-                    prog.set((i64)validatedCount.load(), progTotal);
+                    prog.set(vDoneCum + (i64)validatedCount.load(), vTotalCum);
                 }
             });
         for (auto& t : pool) t.join();
@@ -601,7 +666,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     for (size_t ci = 0; ci < candidates.size(); ci++) {
         if (prog.cancelled()) break;
         if ((ci & 1023) == 0)
-            prog.set((i64)candidates.size() + (i64)ci, progTotal);
+            prog.set(vDoneCum + (i64)candidates.size() + (i64)ci, vTotalCum);
         if ((i64)result.files.size() >= opt.max_files) break;
 
         const Candidate& cand = candidates[ci];
@@ -755,6 +820,8 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         acceptedEnd = carveStart + written;
         acceptedValidated = !v.guessed && !cf.truncated;
     }
+    vDoneCum += winProgTotal;
+    }  // window loop
 
     // ---- optional loose-text pass -----------------------------------------
     if (opt.text_carving && !prog.cancelled() && (i64)result.files.size() < opt.max_files) {
