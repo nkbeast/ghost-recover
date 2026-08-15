@@ -69,8 +69,19 @@ decompression); zstd is too (enables Btrfs zstd extents).
 ```sh
 git clone https://github.com/nkbeast/ghost-recover
 cd ghost-recover
+./scripts/build.sh               # RAM-aware job count — safe on any machine
+```
+
+`scripts/build.sh` sizes the compiler parallelism from your RAM (≈1 job per 2 GiB, capped
+at your core count) instead of using every core at once. A first full build on a 12-core
+laptop with a naive `cmake --build build -j` can exhaust memory and freeze the system —
+the heavy translation units parse a large single-header HTTP library — so contributors
+should use the script. Override with `JOBS=8 ./scripts/build.sh` or `./scripts/build.sh -j8`.
+Manual steps, for those who prefer them:
+
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --build build -j $(nproc)  # or a smaller -j value on low-RAM machines
 ```
 
 ### Run

@@ -335,6 +335,15 @@ struct SaveResult {
 // ---------------------------------------------------------------------------
 // Progress reporting — shared between a worker thread and the HTTP poller.
 // ---------------------------------------------------------------------------
+// CLI Ctrl+C cancellation. The CLI installs a SIGINT handler that calls
+// requestCliCancel(); every heavy loop consults it through
+// Progress::cancelled(), so scan/carve/recover/image/raid stop cleanly on
+// Ctrl+C instead of being cut off mid-write. The server path never sets it
+// (its own signal thread handles SIGINT/SIGTERM via installShutdownSignals).
+// Both functions are async-signal-safe (lock-free atomic).
+void requestCliCancel();
+bool cliCancelRequested();
+
 class Progress {
 public:
     void setPhase(const std::string& p) {
@@ -360,7 +369,7 @@ public:
         return p < 0 ? 0 : (p > 100 ? 100 : p);
     }
     void cancel() { cancel_ = true; }
-    bool cancelled() const { return cancel_.load(); }
+    bool cancelled() const { return cancel_.load() || cliCancelRequested(); }
 
 private:
     mutable std::mutex  m_;

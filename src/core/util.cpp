@@ -1,6 +1,7 @@
 #include "ghost/util.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -17,6 +18,17 @@
 #include <unistd.h>
 
 namespace ghost {
+
+// ---------------------------------------------------------------------------
+// CLI Ctrl+C cancellation (see types.h). Written from a SIGINT handler
+// (lock-free atomic store — async-signal-safe), read by every heavy loop.
+// ---------------------------------------------------------------------------
+namespace {
+std::atomic<bool> g_cliCancel{false};
+}
+
+void requestCliCancel() { g_cliCancel.store(true, std::memory_order_relaxed); }
+bool cliCancelRequested() { return g_cliCancel.load(std::memory_order_relaxed); }
 
 // ---------------------------------------------------------------------------
 // CRC32

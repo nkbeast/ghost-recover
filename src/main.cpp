@@ -163,6 +163,15 @@ int cmdParts(const Args& a) {
     return 0;
 }
 
+// Ctrl+C result helper: returns 0 when nothing was interrupted, otherwise
+// prints what the interrupted command kept and returns the conventional
+// exit code 130 (128 + SIGINT).
+int cliInterrupted(const char* note) {
+    if (!ghost::cliCancelRequested()) return 0;
+    fprintf(stderr, "interrupted (Ctrl+C) — %s\n", note);
+    return 130;
+}
+
 int cmdScan(const Args& a) {
     if (a.positional.size() < 2) { printUsage(); return 2; }
     std::string err;
@@ -175,6 +184,7 @@ int cmdScan(const Args& a) {
     opt.max_files = a.getInt("--max-files", defaultMaxFiles());
     Progress prog;
     ScanResult r = scanVolume(*disk, a.get("--fs"), opt, prog);
+    if (int rc = cliInterrupted("scan cancelled — results are not printed"); rc) return rc;
     if (!r.ok) {
         fprintf(stderr, "scan failed: %s\n", r.error.c_str());
         return 1;
@@ -230,6 +240,7 @@ int cmdCarve(const Args& a) {
     Progress prog;
     printf("Carving %s into %s ...\n", a.positional[1].c_str(), opt.output_dir.c_str());
     CarveResult r = carveDevice(*disk, opt, prog);
+    if (int rc = cliInterrupted(("carve cancelled — files recovered so far are in " + opt.output_dir).c_str()); rc) return rc;
     printf("Scanned     : %s\n", humanSize(r.bytes_scanned).c_str());
     printf("Signatures  : %lld\n", (long long)r.signatures_loaded);
     printf("Candidates  : %lld (rejected %lld, duplicates %lld)\n",
@@ -265,6 +276,7 @@ int cmdRecover(const Args& a) {
     Progress prog;
     printf("Scanning %s ...\n", a.positional[1].c_str());
     ExtractResult r = recoverVolume(*disk, a.get("--fs"), sopt, eopt, prog);
+    if (int rc = cliInterrupted(("recovery cancelled — files written so far are in " + out).c_str()); rc) return rc;
     printf("Written     : %d files, %s\n", r.files_written, humanSize(r.bytes_written).c_str());
     if (r.files_failed) printf("Failed      : %d\n", r.files_failed);
     if (r.files_undecoded) {
@@ -295,6 +307,7 @@ int cmdImage(const Args& a) {
     Progress prog;
     printf("Imaging %s -> %s\n", a.positional[1].c_str(), out.c_str());
     ImageResult r = createImage(*disk, opt, prog);
+    if (int rc = cliInterrupted(("imaging cancelled — partial image kept at " + out).c_str()); rc) return rc;
     printf("Copied      : %s at %.1f MB/s\n", humanSize(r.bytes_copied).c_str(), r.rate_mb_s);
     printf("Unreadable  : %s in %lld regions\n", humanSize(r.bytes_bad).c_str(),
            (long long)r.bad_regions);
@@ -358,6 +371,7 @@ int cmdRaid(const Args& a) {
     if (!out.empty()) {
         printf("\nAssembling into %s ...\n", out.c_str());
         RaidBuildResult r = assembleRaid(layout, out, a.getInt("--size", 0), prog);
+        if (int rc = cliInterrupted(("raid assembly cancelled — partial output kept at " + out).c_str()); rc) return rc;
         printf("Written     : %s\n", humanSize(r.bytes_written).c_str());
         if (r.stripes_reconstructed)
             printf("Rebuilt     : %lld stripe unit(s) from parity\n",
@@ -419,6 +433,16 @@ int cmdCarvers(const Args& a) {
 
 int main(int argc, char* argv[]) {
     signal(SIGPIPE, SIG_IGN);
+
+    // Ctrl+C during CLI work: set the shared cancel flag instead of dying
+    // abruptly. Every heavy loop (scan/carve/recover/image/raid) checks it
+    // via Progress::cancelled() and unwinds cleanly; the server mode blocks
+    // SIGINT/SIGTERM in installShutdownSignals and handles them in its own
+    // thread, so this handler is inert there. sigaction, not signal(): the
+    // one-shot reset of signal() would lose a second Ctrl+C.
+    struct sigaction sa {};
+    sa.sa_handler = [](int) { ghost::requestCliCancel(); };
+    ::sigaction(SIGINT, &sa, nullptr);
 
     // glibc inflates one ~64 MB virtual malloc arena per thread (up to 8x
     // cores); on a 1 GiB box with strict overcommit that reservation alone
