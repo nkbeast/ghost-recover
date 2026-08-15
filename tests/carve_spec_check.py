@@ -58,7 +58,14 @@ def u16be(x): return struct.pack('>H', x)
 def u32be(x): return struct.pack('>I', x)
 def u64be(x): return struct.pack('>Q', x)
 def d8(x): return bytes([x & 0xFF])
-def junk(n, b=0x5A): return bytes([b]) * n
+_junk_rng = __import__('random').Random(0xC0FFEE)
+
+def junk(n, b=None):
+    # Varied pseudo-random bytes by default (fixtures must pass the engine's
+    # zero-run entropy screen); an explicit byte repeats as before.
+    if b is not None:
+        return bytes([b]) * n
+    return _junk_rng.randbytes(n)
 
 
 def nonzero(b):
@@ -363,7 +370,7 @@ def make_pcx(_):
 
 def make_qoi(_):
     return (b'qoif' + u32be(2) + u32be(2) + bytes([4, 0])
-            + bytes([0xFF]) + junk(4) + bytes([0, 0, 0, 0, 0, 0, 0, 1]))
+            + bytes([0xFF]) + bytes([0x5A, 0x5A, 0x5A, 0x5A]) + bytes([0, 0, 0, 0, 0, 0, 0, 1]))
 
 
 def make_psd(_):
@@ -867,16 +874,18 @@ def make_glb(_):
             + u32le(20) + b'JSON' + junk(20))
 
 
-def make_sqlite3_wal(_):
+def make_sqlite3_wal(name):
     salt1, salt2 = 0xA1B2C3D4, 0x55667788
-    out = b'\x37\x7f\x06\x82' + u32be(3007000) + u32be(4096)
-    out += u32be(0) + u32be(2)
+    magic = b'\x37\x7f\x06\x83' if name == 'SQLite_WAL_BE' else b'\x37\x7f\x06\x82'
+    out = magic + u32be(0) + u32be(4096)
+    out += u32be(0) + u32be(0)
     out += u32be(salt1) + u32be(salt2) + b'\x00' * 4
     for pgno in (1, 2):
         out += u32be(pgno) + u32be(0) + u32be(salt1) + u32be(salt2)
         out += u32be(0) + u32be(0)
         out += junk(4096)
-    out += u32be(salt1) + u32be(salt2) + u32be(0) + u32be(0) + b'\x00' * 8
+    out += u32be(0) + u32be(0) + u32be(salt1) + u32be(salt2)
+    out += u32be(0) + u32be(0)
     return out
 
 
@@ -1012,12 +1021,13 @@ def make_stub(magic, n=64):
 
 
 def make_bik(_):
-    # 'BIK' + version char + u32 version/width/height/frames/fps/flags,
-    # 12 reserved bytes (v1), then the frame size table (4 bytes per frame)
-    # and the frame payloads it sizes.
-    hdr = b'BIKb' + u32le(0) + u32le(640) + u32le(480) + u32le(1) + u32le(30) + u32le(0)
-    hdr += b'\x00' * 12
-    return nonzero(hdr + u32le(10) + junk(10))
+    # 'BIK' + version char + u32 width/height/frames/fps + 20 reserved bytes,
+    # then the offset table (frames+1 u32 entries: entry 0 must sit past the
+    # table, the last entry is the total file size), then frame payloads.
+    hdr = b'BIKb' + u32le(640) + u32le(480) + u32le(1) + u32le(30) + junk(20)
+    body = junk(12)
+    table = u32le(48) + u32le(48 + len(body))
+    return nonzero(hdr + table + body)
 
 
 def make_zws(_):
@@ -1027,10 +1037,12 @@ def make_zws(_):
 
 
 def make_mpc(name):
-    if name == 'MPC':       # SV8 "MPCK": magic + crc32 + u32 LE total size
-        return b'MPCK' + u32le(0) + u32le(16) + b'\x00' * 4
-    # SV7 "MP+": version 0x07 + u32 BE total size (incl. 16-byte header)
-    return b'MP+' + bytes([0x07]) + struct.pack('>I', 17) + b'\x00' * 9
+    if name == 'MPC':       # SV8: SH stream-header packet, then ST stream end
+        sh = b'MPCK' + b'\x53\x48' + bytes([7 + 40]) + junk(40)
+        st = b'MPCK' + b'\x53\x54' + bytes([7])
+        return sh + st
+    # SV7 "MP+": version byte 0x07; the walker only validates it
+    return nonzero(b'MP+' + bytes([0x07]) + junk(48))
 
 
 def make_lzma_alone(_):
@@ -1041,13 +1053,19 @@ def make_lzma_alone(_):
 
 
 def make_wv(_):
-    # single wvpk block: 'wvpk' + u32 LE ckSize (everything after the 8-byte
-    # header) + 24 bytes of block metadata; total file = 8 + 24 = 32.
-    return b'wvpk' + u32le(24) + b'\x00' * 24
+    # single final wvpk block: ckSize spans everything after the 8-byte
+    # header; flags at +24 carry FINAL_BLOCK (0x1000)
+    blk = bytearray(32)
+    blk[0:4] = b'wvpk'
+    blk[4:8] = u32le(24)
+    blk[8:10] = u16le(0x412)
+    blk[24:28] = u32le(0x1000)
+    blk[28:32] = u32le(1)
+    return bytes(blk)
 
 
 def make_dxf(_):
-    return nonzero(b'  0\r\nSECTION' + junk(64))
+    return nonzero(b'  0\r\nSECTION' + junk(64, 0x5A))
 
 
 # ---------------- spec-valid fixtures for walker-verified formats --------------
@@ -1064,13 +1082,13 @@ def make_aifc(_):
 
 
 def make_ape(_):
-    desc = b'MAC ' + u32le(3980) + u32le(52) + u32le(24)
+    desc = b'MAC ' + u32le(3980) + u32le(52) + u32le(28) + u32le(0) + u32le(0)
+    desc += u32le(2000) + u32le(0) + u32le(0) + u32le(0)
     desc += b'\x00' * (52 - len(desc))
-    hdr = b'\x00' * 8 + u16le(2) + b'\x00' * (24 - 10)
-    tag = bytearray(12) + junk(2014)
-    tag[10:12] = u16le(16)
-    footer = b'APETAGEX' + u32le(3980) + u32le(1994) + u32le(0) + u32le(0) + junk(8)
-    return desc + hdr + bytes(tag) + footer
+    hdr = b'\x00' * 8 + u32le(73728) + u32le(0) + u32le(1)
+    hdr += u16le(16) + u16le(2) + u32le(44100)
+    assert len(hdr) == 28
+    return nonzero(desc + hdr + junk(2000))
 
 
 def make_rm(_):
@@ -1104,21 +1122,35 @@ def make_s3m(_):
 
 
 def make_xm(_):
-    out = bytearray(94)
+    out = bytearray(60 + 25)
     out[0:16] = b'Extended Module:'
+    out[16:36] = junk(20)
     out[37] = 0x1A
-    out[60:64] = u32le(34)
-    out[64:66] = u16le(0)
-    out[66:68] = u16le(0)
-    out[68:70] = u16le(1)
-    out[70:72] = u16le(0)
-    out[72:74] = u16le(0x1234)
-    out[74:76] = u16le(0)
-    out[76] = 0x78
-    out[77] = 0x78
-    pat = u32le(8115) + u32le(64) + u16le(8105)
-    pat += b'\x00\x00' + junk(8103)
-    return bytes(out) + pat
+    out[38:58] = junk(20)
+    out[58:60] = junk(2)
+    out[60:62] = u16le(0x0104)
+    out[62:64] = junk(2)
+    out[64:68] = u32le(25)          # headerSize = 24 + songLen
+    out[68:70] = u16le(1)           # song length
+    out[70:72] = u16le(0)           # restart position
+    out[72:74] = u16le(4)           # channels
+    out[74:76] = u16le(1)           # patterns
+    out[76:78] = u16le(1)           # instruments
+    out[78:80] = u16le(0)           # flags
+    out[80:82] = u16le(125)         # tempo
+    out[82:84] = u16le(6)           # bpm
+    out[84] = 0                     # order table (songLen bytes)
+    assert len(out) == 60 + 25
+    rows = 64
+    packed = junk(rows * 4 * 4)
+    pat = u32le(9) + bytes([0]) + u16le(rows) + u16le(len(packed)) + packed
+    inst = bytearray(29 + 40)
+    inst[0:4] = u32le(29 + 40)
+    inst[4:26] = (b'instrument' + b'\x00' * 20)[:22]
+    inst[27:29] = u16le(1)
+    inst[29:33] = u32le(64)         # sample length
+    inst[33:69] = bytes((i * 3 + 2) & 0xFF for i in range(36))
+    return nonzero(bytes(out) + pat + bytes(inst) + junk(64))
 
 
 def make_djvu(_):
@@ -1131,31 +1163,48 @@ def make_djvu(_):
 
 
 def make_mobi(_):
+    # The walker is invoked at BOOKMOBI - magic_offset(60), so the structure
+    # must sit at off: BOOKMOBI at +60, record count at +76, the record table
+    # at +78 (offsets relative to off), and 'TEXtREAd' at off + table[0].
     out = bytearray(512)
+    out[0:32] = (b'crafted-corpus-mobi' + b'\x00' * 16)[:32]
+    out[32:60] = b'\x00' * 28
     out[60:68] = b'BOOKMOBI'
+    out[68:72] = b'MOBI'
+    out[72:76] = b'\x00' * 4
     out[76:78] = u16be(2)
-    out[78:82] = u32be(512)
-    out[82:86] = u32be(0)
-    out[86:90] = u32be(1000)
-    out[90:94] = u32be(0)
-    out[94:96] = u16be(382)
-    return bytes(out) + junk(488) + junk(382)
+    out[78:86] = u32be(512) + b'\x00\x00\x00\x00'
+    out[86:94] = u32be(752) + b'\x00\x00\x00\x00'
+    rec0 = bytearray(240)
+    rec0[0:8] = b'TEXtREAd'
+    rec0[8:240] = junk(232)
+    out[512:752] = bytes(rec0)
+    return bytes(out) + nonzero(junk(400))
 
 
 def make_chm(_):
     out = b'ITSF' + u32be(3) + u32be(0x60) + junk(0x60 - 12)
-    pages = b''
-    for i, nxt in enumerate((1, 2, 3, 0)):
-        pg = b'PMGL' + b'\x00' * 4 + u32le(nxt) + junk(0x800 - 12)
-        pages += pg
-    return out + pages
+    itsp = bytearray(0x38)
+    itsp[0:4] = b'ITSP'
+    itsp[4:8] = u32be(3)
+    itsp[0x14:0x18] = u32le(2)
+    itsp[0x1C:0x20] = u32le(0x60 + 0x38)
+    out += bytes(itsp)
+    for i, nxt in enumerate((1, 0xFFFFFFFF)):
+        pg = bytearray(junk(0x800))
+        pg[0:4] = b'PMGL'
+        pg[8:12] = u32le(nxt)
+        out += bytes(pg)
+    return out
 
 
 def make_one(_):
-    out = b'\xE4\x52\x5C\x7B\x8C\xD8\xA7\x4D' + junk(72 - 8)
-    out += u32le(8128)
-    out += junk(8200 - len(out))
-    return out
+    out = bytearray(0xCC)
+    out[0:8] = b'\xE4\x52\x5C\x7B\x8C\xD8\xA7\x4D'
+    out[0x10:0x14] = u32le(1)
+    total = 0xCC + 4096
+    out[0xC4:0xCC] = struct.pack('<Q', total)
+    return nonzero(bytes(out) + junk(4096))
 
 
 def make_wpd(_):
@@ -1187,17 +1236,12 @@ def make_evt(_):
 def make_pst(_):
     hdr = bytearray(512)
     hdr[0:4] = b'!BDN'
-    hdr[0x0A:0x0C] = u16le(23)
-    hdr[0x14:0x18] = u32le(530)
+    hdr[4:6] = u16le(23)
     return bytes(hdr) + junk(271360 - 512)
 
 
 def make_job(_):
-    out = bytearray(0x3C)
-    out[0:4] = b'\x01\x05\x01\x00'
-    out[4:6] = u16le(1)
-    out[6:8] = u16le(4)
-    return bytes(out) + junk(1988) + b'\x00\x00\x00\x00'
+    return nonzero(b'\x01\x05\x01\x00' + junk(2048))
 
 
 def make_prefetch(_):
@@ -1222,24 +1266,24 @@ def make_vmdk(_):
 
 
 def make_leveldb(_):
-    out = b'\x57\xFB\x80\x8B\x24\x75\x47\xDB'
-    out += u32le(0x12345678) + u16le(4096) + b'\x01'
-    out += junk(4096)
-    out += b'\x00' * (32776 - len(out))
-    return out
+    # 64 B data block, 64 B index block, then a 48-byte footer ending in the
+    # magic: varints (metaOff, metaSize, idxOff=0x40, idxSize=0x40) + padding
+    # + the 8-byte magic. The walker is invoked at the magic and backscans.
+    varints = bytes([0x00, 0x00, 0x40, 0x40])
+    footer = varints + b'\x00' * 36 + b'\x57\xFB\x80\x8B\x24\x75\x47\xDB'
+    assert len(footer) == 48
+    return nonzero(junk(64) + junk(64) + footer)
 
 
 def make_blend(_):
-    out = bytearray(31)
-    out[0:7] = b'BLENDER'
-    out[18:22] = u32le(4)
-    out[22] = 0x2C
-    out += b'\x00' * (31 - len(out))
-    for code, size in ((b'GLOB', 100), (b'DNA1', 1000), (b'SCEN', 500),
-                       (b'OB\x00\x00', 134893)):
-        out += code + u32le(size) + b'\x00' * 24 + junk(size)
-    out += b'ENDB' + u32le(0) + b'\x00' * 24
-    return bytes(out)
+    hdr = b'BLENDER' + b'BLEND' + b'100' + b'-' + b'v'
+    assert len(hdr) == 17
+    def bhead(code, payload):
+        return code + u32le(len(payload)) + u32le(0) + u32le(0) + u32le(0) + payload
+    body = bhead(b'GLOB', junk(100))
+    body += bhead(b'SCEN', junk(50))
+    body += b'ENDB' + u32le(0) + u32le(0) + u32le(0) + u32le(0)
+    return hdr + body
 
 
 def make_dwg(_):
@@ -1253,7 +1297,10 @@ def make_dwg(_):
     ent2 = u16le(0x0B) + b'\x00' * 14
     ent2 += u64le(0x1050) + u64le(169541)
     out += ent1 + ent2
-    out += junk(173717 - len(out))
+    # Guessed-size file: the tail must not contain the 'AC10' signature (the
+    # engine bounds it at the next signature match) and must keep entropy
+    # above the zero-run floor, so use a two-byte pattern instead of random.
+    out += bytes(0x5A if i % 2 else 0x5B for i in range(173717 - len(out)))
     return bytes(out)
 
 
@@ -1319,11 +1366,8 @@ def make_dmg_koly(_):
 
 def make_kdb(_):
     out = b'\x03\xD9\xA2\x9A\x65\xFB\x4B\xB5'
-    out += u32le(3)
-    out += b'\x00' * (116 - len(out))
-    out += u32le(500)
-    out += junk(620 - len(out))
-    return out
+    out += u32le(0) + u32le(0x00030000)          # flags, version
+    return nonzero(out + junk(256))
 
 
 def make_kdbx(_):
@@ -1502,16 +1546,17 @@ def make_hdr(_):
     header += b'-Y %d +X %d\n' % (h, w)
     scan = b''
     for y in range(h):
-        scan += b'\x02\x02' + u16be(1) + bytes([w])
+        scan += b'\x02\x02' + u16be(w)
         for c in range(4):
-            run = bytes(((x * (c + 1) + y) & 0xFF) for x in range(w))
+            run = bytes(((x * 7 + c * 31 + y * 13) & 0x7F) for x in range(w))
             scan += run
     return header + scan
 
 
 def make_raf(_):
-    jpeg = junk(15000)
-    tiff = junk(23346)
+    alt = bytes(0x5A if i % 2 else 0x5B for i in range(15000 + 23346))
+    jpeg = alt[:15000]
+    tiff = alt[15000:]
     tiffOff = 0x6A + len(jpeg)
     out = b'FUJIFILMCCD-RAW ' + junk(0x5A - 16)
     out += u32be(0x6A) + u32be(len(jpeg))
@@ -1528,10 +1573,8 @@ def make_x3f(_):
 
 
 def make_xcf(_):
-    out = b'gimp xcf ' + b'v0010' + b'\x00' * (22 - len(b'gimp xcf v0010'))
-    out += u32be(2405)
-    out += junk(2405 - len(out))
-    return out
+    out = b'gimp xcf ' + b'v0010' + u32be(64) + u32be(64) + u32be(0)
+    return nonzero(out + junk(64))
 
 
 def make_y4m(_):
@@ -1543,11 +1586,17 @@ def make_y4m(_):
 
 # ---------------- phase-2 formats (arj/arc/pak/wad/... plus 52 new specs) -----
 def make_arj(_):
-    hdr = b'\x60\xEA' + u16le(30) + bytes([1, 0, 1, 0])          # magic, hdrSize, ver, flags, method, ftype
-    hdr += u16le(0) + u16le(0) + u32le(0)                        # time, date, crc
-    hdr += u32le(64) + u32le(64)                                 # comp, orig
-    hdr += bytes([1, 0]) + u16le(0) + b'a.txt\x00'               # filever, host, reserved, name
-    return hdr + junk(64) + b'\x60\xEA' + u16le(0)               # entry + end marker
+    fname = b'a.txt\x00'
+    first = 32                     # filename begins at 4 + firstHdr
+    hdr = b'\x60\xEA' + u16le(4 + first + len(fname))
+    hdr += bytes([first, 2, 1, 0])            # firstHdr, version, minVersion, host
+    hdr += bytes([0, 1, 0, 0])                # flags, method, ftype, reserved
+    hdr += u32le(0) + u32le(64) + u32le(64)   # datetime, comp, orig
+    hdr += u16le(0) + u16le(len(fname))       # crc, fnameSize
+    hdr += u16le(0) + u16le(0) + u32le(0)     # mode, fileMode, reserved2
+    hdr += fname
+    assert len(hdr) == 4 + first + len(fname)
+    return hdr + b'\x00\x00\x00\x00' + junk(64) + b'\x60\xEA' + u16le(0)
 
 
 def make_arc(_):
@@ -1606,11 +1655,18 @@ def make_android_boot(_):
 
 
 def make_ewf(version):
-    magic = b'EVF' if version == 'E01' else b'LVF'
-    out = magic + b'\x09\x0D\x0A\xFF\x00' + u32le(2) + u32le(16)
-    out += u32le(0x10000000) + u32le(64) + u64le(32) + junk(32)      # section 1
-    out += u32le(0x20000001) + u32le(0) + u64le(16) + junk(16)       # section 2
-    return out
+    magic = b'\x45\x56\x46\x09\x0D\x0A\xFF\x00' if version == 'E01' else b'\x4C\x56\x46\x09\x0D\x0A\xFF\x00'
+    out = bytearray(magic + u32le(0x00010000) + b'\x00')
+    def section(typ, payload, last=False):
+        hdr = bytearray(76)
+        hdr[0:len(typ)] = typ
+        hdr[16:24] = struct.pack('<Q', 0 if last else 76 + len(payload))
+        hdr[24:32] = struct.pack('<Q', 76 + len(payload))
+        return bytes(hdr) + payload
+    out += section(b'header', junk(40))
+    out += section(b'data', junk(100))
+    out += section(b'done', b'', last=True)
+    return bytes(out)
 
 
 def make_dmp(_):
@@ -1725,7 +1781,7 @@ reg('PSD', make_psd, 'image')
 reg('XCF', make_xcf, 'image')
 reg('JP2', make_jp2, 'image')
 reg('J2K', make_j2k, 'image')
-reg('JXL', lambda _n: bytes([0xFF, 0x0A]) + struct.pack('>I', 66) + b'\x00' * 66, 'image')  # codestream: 4-byte BE size + zero-prefixed payload
+reg('JXL', lambda _n: bytes([0xFF, 0x0A]) + struct.pack('>I', 66) + junk(66), 'image')  # codestream: 4-byte BE size + nonzero payload
 reg('JXL_ISO', make_jxl_iso, 'image')
 reg('QOI', make_qoi, 'image')
 reg('DDS', make_stub(b'DDS '), 'image')
@@ -1857,6 +1913,7 @@ reg('CRAMFS', make_cramfs, 'archive')
 # ---------------- databases ----------------
 reg('SQLite', make_sqlite, 'database')
 reg('SQLite_WAL', make_sqlite3_wal, 'database')
+reg('SQLite_WAL_BE', make_sqlite3_wal, 'database')
 reg('MDB', lambda n: make_mdb(False), 'database')
 reg('ACCDB', lambda n: make_mdb(True), 'database')
 reg('BerkeleyDB', make_stub(bytes([0x00, 0x05, 0x31, 0x62])), 'database')

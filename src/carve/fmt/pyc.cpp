@@ -69,7 +69,8 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 pos += 4 + (i64)std::abs(n) * 4;
                 break;
             }
-            case 0x73: case 0x75: case 0x61: case 0x41: {
+            case 0x73: case 0x75: case 0x61: case 0x41: case 0x74:
+            case 0x94: case 0x97: case 0x98: {
                 auto v = s.read(pos, 4);                       // 4-byte len strings
                 if (v.size() < 4) return -1;
                 i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
@@ -77,12 +78,36 @@ i64 vPyc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 pos += 4 + n;
                 break;
             }
-            case 0x74: case 0x7A: case 0x5A: {
+            case 0x7A: case 0x5A: case 0x95: case 0x96: case 0x9A: case 0x9B: {
                 u8 n = s.byte(pos);                            // 1-byte len strings
                 pos += 1 + n;
                 break;
             }
             case 0x72: pos += 4; break;                        // REF
+            case 0x8C: {                                       // FROZENSET1: 1-byte count
+                u8 n = s.byte(pos);
+                pos++;
+                if (depth >= 64) return -1;
+                frames[depth++] = {n, K_ITEMS, 0};
+                break;
+            }
+            case 0x8D: {                                       // FROZENSET2: 2-byte count
+                auto v = s.read(pos, 2);
+                if (v.size() < 2) return -1;
+                u16 n = (u16)v[0] | (u16)v[1] << 8;
+                pos += 2;
+                if (depth >= 64) return -1;
+                frames[depth++] = {n, K_ITEMS, 0};
+                break;
+            }
+            case 0x8E: case 0x8F: {                            // LONG4 / NEGATIVE_LONG4
+                auto v = s.read(pos, 4);
+                if (v.size() < 4) return -1;
+                i32 n = (i32)((u32)v[0] | (u32)v[1] << 8 | (u32)v[2] << 16 | (u32)v[3] << 24);
+                if (n < -10000000 || n > 10000000) return -1;
+                pos += 4 + (i64)std::abs(n) * 4;
+                break;
+            }
             case 0x28: case 0x5B: case 0x3C: case 0x3E: {      // TUPLE/LIST/SET
                 auto v = s.read(pos, 4);
                 if (v.size() < 4) return -1;

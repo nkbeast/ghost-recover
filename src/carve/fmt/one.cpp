@@ -16,10 +16,14 @@
 namespace ghost {
 
 i64 vOne(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    u32 cb = s.le32(off + 72);
-    if (cb < 8) return -1;
-    i64 total = 72 + (i64)cb;
-    return (total <= max) ? total : -1;
+    auto h = s.read(off, 0xCC);
+    if (h.size() < 0xCC) return -1;
+    // OneNote file header: FileType = 0x00000001 at +0x10, then the
+    // cbExpectedFileLength (LE64) at 0xC4.
+    if (s.le32(off + 0x10) != 1) return -1;
+    u64 cb = s.le64(off + 0xC4);
+    if (cb < 0xC8) return -1;
+    return ((i64)cb <= max) ? (i64)cb : -1;
 }void registerFmt_one(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

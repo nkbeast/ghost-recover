@@ -23,15 +23,13 @@ i64 vKdbx(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (p + 5 > off + max) return -1;
         u8 type = s.byte(p);
         if (type == 0) break;                                  // END
-        if (type > 7) return -1;
+        if (type > 10) return -1;                              // fields 0..10
         u32 size = s.le32(p + 1);
         if (size > (1 << 20)) return -1;
         p += 5 + size;
     }
-    u32 len = s.le32(p);
-    if (len < 1 || len > (u32)max) return -1;
-    i64 total = p + 4 + (i64)len;
-    return (total <= off + max) ? total - off : -1;
+    // The payload after the END field is an encrypted stream: no length.
+    return 0;
 }void registerFmt_kdbx(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

@@ -43,7 +43,7 @@ i64 vWasm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (!done || shift >= 35) break;      // unterminated LEB -> not ours
         if (len == 0) break;                  // empty section: stop, not run
         p = leb;
-        if (p - 8 + (i64)len > max) break;
+        if (p + (i64)len > max) break;
         p += (i64)len;
         sections++;
     }

@@ -20,23 +20,24 @@ i64 vTtc(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (ver != 0x00010000 && ver != 0x00020000) return -1;
     u32 nfonts = s.be32(off + 8);
     if (nfonts == 0 || nfonts > 100000) return -1;
-    const i64 end = off + max;
+    // All offsets in a TTC are relative to the file start, so they compare
+    // against the relative cap `max`, not against the image end.
     i64 highest = -1;
     for (u32 f = 0; f < nfonts; f++) {
         u32 foff = s.be32(off + 12 + 4 * f);
-        if ((i64)foff > end) return -1;
+        if ((i64)foff >= max) return -1;
         u16 numTables = s.be16(off + foff + 4);
         if (numTables == 0 || numTables > 4096) return -1;
         for (u16 t = 0; t < numTables; t++) {
             i64 toff = off + foff + 12 + 16 * t;
-            if (toff + 16 > end) return -1;
+            if (toff + 16 > off + max) return -1;
             u32 eoff = s.be32(toff + 8);
             u32 elen = s.be32(toff + 12);
             highest = std::max(highest, (i64)eoff + elen);
         }
     }
     if (highest < 0) return -1;
-    if (highest > end) return -1;
+    if (highest > max) return -1;
     return highest;
 }void registerFmt_ttc(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };

@@ -29,10 +29,20 @@ i64 vHdr(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (nl == std::string::npos) return -1;
     i64 p = off + (i64)nl + 1;
     for (int r = 0; r < h; r++) {
-        if (p + 5 > off + max) return -1;
-        if (s.byte(p) != 0x02 || s.byte(p + 1) != 0x02 || s.be16(p + 2) != 1) return -1;
-        if ((int)s.byte(p + 4) != w) return -1;
-        p += 5 + 4 * (i64)w;
+        if (p + 4 > off + max) return -1;
+        // New-style RLE scanline: 0x02 0x02 then the BE16 scanline width,
+        // which must match the header width.
+        if (s.byte(p) != 0x02 || s.byte(p + 1) != 0x02 || s.be16(p + 2) != w) return -1;
+        p += 4;
+        int out = 0;
+        const int need = 4 * w;               // 4 components per pixel
+        while (out < need) {
+            if (p >= off + max) return -1;
+            u8 b = s.byte(p++);
+            if (b < 128) { out++; }           // literal component
+            else { int n = b & 0x7F; out += n; p += n; }
+            if (out > need || p > off + max) return -1;
+        }
     }
     return p - off;
 }void registerFmt_hdr(Registry& r) {

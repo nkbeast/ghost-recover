@@ -30,16 +30,15 @@ i64 vSgi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (x == 0 || y == 0 || z == 0) return -1;
     if (dim == 1 && z > 1) return -1;
     i64 nRows = (i64)z * y;
-    i64 tablesEnd = 512 + 4 * nRows;
-    if (dim >= 2) tablesEnd += 4 * (i64)z;               // start table
+    i64 tablesEnd = 512 + 8 * nRows;               // lengths + offset tables
     if (tablesEnd > max) return -1;
     if (storage == 0) {
         i64 end = 512 + (i64)x * y * z * bpc;
         return end <= max ? end : -1;
     }
-    // RLE: offset table entry of the last row points at its first code byte;
-    // walk that row's run-length stream to the end of the file.
-    u32 lastRowStart = s.be32(off + 512 + 4 * (i64)z + 4 * (nRows - 1));
+    // RLE: the offset table (after the length table) holds each row's start;
+    // walk the last row's run-length stream to the end of the file.
+    u32 lastRowStart = s.be32(off + 512 + 4 * nRows + 4 * (nRows - 1));
     if (lastRowStart < tablesEnd) return -1;
     i64 p = off + lastRowStart;
     i64 want = (i64)x * bpc;
@@ -49,13 +48,13 @@ i64 vSgi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u8 code = s.byte(p++);
         if (code > 0x80) {
             i64 n = (i64)code - 0x80;
-            if (p + n > off + max) return -1;
-            p += n;
+            if (p + 1 > off + max) return -1;
+            p += 1;                                // one repeated value byte
             have += n;
-        } else if (code < 0x80) {
-            have += code;
         } else {
-            return -1;                                   // 0x80: no run length
+            if (p + (i64)code > off + max) return -1;
+            p += code;                             // literal bytes
+            have += code;
         }
     }
     if (have != want) return -1;

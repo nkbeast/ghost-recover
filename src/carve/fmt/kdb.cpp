@@ -16,11 +16,15 @@
 namespace ghost {
 
 i64 vKdb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    if (s.le32(off + 8) != 3) return -1;                       // version
-    u32 len = s.le32(off + 116);
-    if (len < 1 || len > (u32)max) return -1;
-    i64 total = 120 + (i64)len;
-    return (total <= max) ? total : -1;
+    auto h = s.read(off, 16);
+    if (h.size() < 16) return -1;
+    u32 flags = s.le32(off + 8);          // dwFlags: bit 0 = SHA-256 seed
+    u32 ver = s.le32(off + 12);           // dwVersion, not the flags field
+    if (flags & ~0x3u) return -1;
+    if ((ver >> 16) < 1 || (ver >> 16) > 3) return -1;
+    // KDB v1 carries no file length: the extent is bounded by the next
+    // signature and trailing-zero trim.
+    return 0;
 }void registerFmt_kdb(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

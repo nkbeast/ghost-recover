@@ -43,6 +43,7 @@ i64 vPnm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             u8 b = s.byte(p);
             if (b == '#' || b == ' ' || b == '\t' || b == '\r' || b == '\n') break;
             if (b < '0' || b > '9') { ok = false; return -1; }
+            if (v > (1LL << 50)) { ok = false; return -1; }
             v = v * 10 + (b - '0');
             any = true;
             p++;
@@ -66,7 +67,7 @@ i64 vPnm(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         return -1;
     };
     i64 w = readInt(), h = readInt();
-    if (!ok || w <= 0 || h <= 0) return -1;
+    if (!ok || w <= 0 || h <= 0 || w > 65536 || h > 65536) return -1;
     if (t == '1') return scanText();
     if (t == '4') {
         // advance past the whitespace separating the header from the raster

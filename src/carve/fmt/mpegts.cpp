@@ -34,11 +34,11 @@ i64 vMpegTs(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     // misses packet one and every real TS carves 188 bytes short. Match the
     // PID pair only; the 16-packet walk + entropy screen reject junk hits.
     { auto c = mk("MPEG_TS", "ts", "video", B({0x47,0x40}), 16*GB, SizeMode::FrameStream, vMpegTs);
-      c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
+      c.min_size = 188 * 16; c.min_entropy = 0.7; add(c); }
     { auto c = mk("MPEG_TS1", "ts", "video", B({0x47,0x41}), 16*GB, SizeMode::FrameStream, vMpegTs);
-      c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
+      c.min_size = 188 * 16; c.min_entropy = 0.7; add(c); }
     { auto c = mk("MPEG_TS_NULL", "ts", "video", B({0x47,0x1F}), 16*GB, SizeMode::FrameStream, vMpegTs);
-      c.min_size = 188 * 16; c.min_entropy = 1.0; add(c); }
+      c.min_size = 188 * 16; c.min_entropy = 0.2; add(c); }
 }
 
 }  // namespace ghost

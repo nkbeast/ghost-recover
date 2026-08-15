@@ -23,7 +23,7 @@ i64 vAu(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u32 chans = s.be32(off + 20);
     if (encoding > 27) return -1;
     if (rate == 0 || rate > 200000 || chans == 0 || chans > 256) return -1;
-    if (dataSize == 0xFFFFFFFFu) return -1;         // unknown: can't size it
+    if (dataSize == 0xFFFFFFFFu) return 0;  // valid: data runs to EOF, size unknown
     if (dataOff < 24 || dataOff > 32 * 1024) return -1;
     i64 end = off + (i64)dataOff + (i64)dataSize;
     return (end <= off + max) ? end - off : -1;

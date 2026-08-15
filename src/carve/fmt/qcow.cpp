@@ -63,7 +63,7 @@ i64 vQcow(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u64 e = be64v(l1.data() + i * 8);
         if (e == 0) continue;
         u64 l2Off = (e >> 9) & 0x3FFFFFFFFFFFFFULL;   // bits 9..62 = cluster addr
-        if (l2Off == 0 || l2Off * cluster >= (u64)max) continue;
+        if (l2Off == 0 || l2Off >= (u64)max / cluster) continue;   // no overflow
         end = std::max(end, endOf(l2Off * cluster, cluster));
         auto l2 = s.read(off + (i64)(l2Off * cluster), cluster);
         if (l2.size() < 8) continue;
@@ -72,7 +72,7 @@ i64 vQcow(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             u64 d = be64v(l2.data() + j * 8);
             if (d == 0) continue;
             u64 dOff = (d >> 9) & 0x3FFFFFFFFFFFFFULL;
-            if (dOff == 0 || dOff * cluster >= (u64)max) continue;
+            if (dOff == 0 || dOff >= (u64)max / cluster) continue;
             end = std::max(end, endOf(dOff * cluster, cluster));
         }
     }

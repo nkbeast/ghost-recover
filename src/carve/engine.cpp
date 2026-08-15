@@ -402,6 +402,16 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             size = trimTrailingZeros(rd, off, bound);
             v.guessed = true;
         }
+        if (v.guessed && size > 0 && size < spec.min_size) {
+            // The fallback shrank the candidate below the format minimum (a
+            // footer hit near the start or a next signature right behind this
+            // one): it is a false positive, not a short file. Exact sizes
+            // returned by a walker are legitimate no matter how small.
+            if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=fallback%lld<min%lld\n",
+                             spec.name.c_str(), (long long)off, (long long)size,
+                             (long long)spec.min_size);
+            return;
+        }
 
         if (size > cap) { size = cap; v.sizeClamped = true; }
 
@@ -412,11 +422,23 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             auto probe = rd.readBlock((u64)off, probeLen);
             if (probe.empty()) return;
             double entropy = shannonEntropy(probe.data(), probe.size());
-            // Near-zero entropy means the region is a single repeated byte —
-            // free space, not a file. Without this a weak signature can validate
-            // a multi-megabyte run of zeroes and mask every real file behind it.
-            if (spec.mode == SizeMode::Text && !looksLikeText(probe.data(), probe.size(), 0.85))
             v.entropy = entropy;
+            if (spec.min_entropy >= 0 && entropy < spec.min_entropy) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
+            if (spec.max_entropy >= 0 && entropy > spec.max_entropy) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
+            if (spec.mode == SizeMode::Text &&
+                !looksLikeText(probe.data(), probe.size(), 0.85)) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=not-text\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
         }
 
         v.size = size;
@@ -533,6 +555,17 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             continue;
         }
         if (!v.valid) { result.rejected++; continue; }
+        // A walker whose computed size had to be clamped and lands on the
+        // device end is a junk signature hit (a header that computed a giant
+        // length), not a real file ending exactly at the end of the device —
+        // the latter carries an exact, unclamped size. Accepting it would
+        // carve garbage and mask every real file behind it.
+        if (v.sizeClamped && off + v.size >= result.image_size) {
+            if (dbg) fprintf(stderr, "[carve] reject %s off=%lld reason=disk-end-clamped\n",
+                             spec.name.c_str(), (long long)off);
+            result.rejected++;
+            continue;
+        }
         if (dbg) fprintf(stderr, "[carve] accept %s off=%lld size=%lld\n",
                          spec.name.c_str(), (long long)off, (long long)v.size);
         i64 size = v.size;
@@ -661,7 +694,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         prog.setPhase("recovering loose text");
         std::vector<std::pair<i64, i64>> claimed;
         claimed.reserve(result.files.size());
-        for (const auto& f : result.files) claimed.emplace_back(f.offset, f.offset + f.size);
+        for (const auto& f : result.files) {
+            // The real byte span is [offset - backscan, offset + size); the
+            // extents record it, the offset field only the signature position.
+            const Extent& e = f.extents.empty() ? Extent(f.offset, f.size)
+                                                : f.extents.front();
+            claimed.emplace_back(e.offset, e.offset + e.length);
+        }
         std::sort(claimed.begin(), claimed.end());
         auto isClaimed = [&](i64 o) {
             auto it = std::upper_bound(claimed.begin(), claimed.end(), std::make_pair(o, (i64)0));

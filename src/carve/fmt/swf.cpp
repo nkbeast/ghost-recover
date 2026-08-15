@@ -27,7 +27,11 @@ i64 vSwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     bool cws = b[0] == 'C' && b[1] == 'W' && b[2] == 'S';
     if (!fws && !cws) return -1;
     u32 len = (u32)b[4] | (u32)b[5] << 8 | (u32)b[6] << 16 | (u32)b[7] << 24;
-    if (len < 8 || (u64)len > (u64)max + 1) return -1;
+    if (len < 8) return -1;
+    if (fws && (u64)len > (u64)max + 1) return -1;   // FWS: exact file length
+    // For CWS the length is the *uncompressed* size and may exceed the
+    // region cap legitimately (large compressed games) — only the compressed
+    // bytes must fit the region.
 #ifdef GHOST_HAVE_ZLIB
     if (cws && len > 8) {
         // CWS: the length field is the *uncompressed* size; inflate the body

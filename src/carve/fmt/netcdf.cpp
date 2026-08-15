@@ -39,6 +39,22 @@ i64 vNetcdf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         *p += n;
         return true;
     };
+    // netCDF attribute values are aligned to 4-byte boundaries; per-type
+    // sizes are 1,1,2,4,4,8 for NC_BYTE..NC_DOUBLE.
+    static const i64 kTypeSize[7] = {0, 1, 1, 2, 4, 4, 8};
+    auto skipAttr = [&](i64* p) -> bool {
+        if (!skipName(p)) return false;
+        u32 t = 0, l = 0;
+        if (!readU32(*p, &t) || t < 1 || t > 6) return false;
+        *p += 4;
+        if (!readU32(*p, &l) || l > (1u << 28)) return false;
+        *p += 4;
+        i64 bytes = kTypeSize[t] * (i64)l;
+        i64 padded = (bytes + 3) & ~3LL;
+        if (*p + padded > off + max) return false;
+        *p += padded;
+        return true;
+    };
     i64 p = off + 4;
     u32 numrecs = 0, ndims = 0;
     if (!readU32(p, &numrecs) || numrecs > (1u << 28)) return -1;
@@ -66,30 +82,14 @@ i64 vNetcdf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (!readU32(p, &nvs) || nvs > (1u << 30)) return -1;
         p += 4;
         for (u32 a = 0; a < natt; a++) {
-            if (!skipName(&p)) return -1;
-            u32 t = 0, l = 0;
-            if (!readU32(p, &t) || t < 1 || t > 6) return -1;
-            p += 4;
-            if (!readU32(p, &l) || l > (1u << 28)) return -1;
-            p += 4;
-            i64 bytes = (t == 2 || t == 6) ? (i64)l * 8 : (t == 3 || t == 4) ? (i64)l * 4 : l;
-            if (p + bytes > off + max) return -1;
-            p += bytes;
+            if (!skipAttr(&p)) return -1;
         }
     }
     u32 ngatt = 0;
     if (!readU32(p, &ngatt) || ngatt > (1u << 16)) return -1;
     p += 4;
     for (u32 a = 0; a < ngatt; a++) {
-        if (!skipName(&p)) return -1;
-        u32 t = 0, l = 0;
-        if (!readU32(p, &t) || t < 1 || t > 6) return -1;
-        p += 4;
-        if (!readU32(p, &l) || l > (1u << 28)) return -1;
-        p += 4;
-        i64 bytes = (t == 2 || t == 6) ? (i64)l * 8 : (t == 3 || t == 4) ? (i64)l * 4 : l;
-        if (p + bytes > off + max) return -1;
-        p += bytes;
+        if (!skipAttr(&p)) return -1;
     }
     return 0;    // structure sound: guessed-end path trims trailing zeros
 }

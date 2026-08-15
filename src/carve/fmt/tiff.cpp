@@ -40,7 +40,7 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         // longer the strip start — adding there over-runs every single-strip
         // TIFF by the strip length.
         i64 stripOff = 0;
-        std::vector<i64> tileOffs, tileCnts;
+        std::vector<i64> tileOffs, tileCnts, stripOffs, stripCnts;
         for (u16 i = 0; i < count; i++) {
             i64 e = off + ifd + 2 + (i64)i * 12;
             u16 type = rd16(e + 2);
@@ -59,6 +59,14 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 } else if (tag == 325 && type == 4) {   // TileByteCounts
                     tileCnts.clear();
                     for (u32 k = 0; k < n; k++) tileCnts.push_back(rd32(off + vo + (i64)k * 4));
+                } else if (tag == 273 && type == 4) {   // StripOffsets: array
+                    stripOffs.clear();
+                    for (u32 k = 0; k < n; k++) stripOffs.push_back(rd32(off + vo + (i64)k * 4));
+                } else if (tag == 279 && (type == 3 || type == 4)) {  // StripByteCounts
+                    stripCnts.clear();
+                    for (u32 k = 0; k < n; k++)
+                        stripCnts.push_back(type == 3 ? (i64)rd16(off + vo + (i64)k * 2)
+                                                      : rd32(off + vo + (i64)k * 4));
                 }
                 if (tag == 330 && type == 4) {   // SubIFDs: each value is an IFD
                     for (u32 k = 0; k < n; k++) pushIfd(rd32(off + vo + (i64)k * 4));
@@ -79,6 +87,9 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         for (size_t k = 0; k < tileOffs.size() && k < tileCnts.size(); k++)
             if (tileOffs[k] > 0 && tileCnts[k] > 0 && tileOffs[k] + tileCnts[k] <= max)
                 furthest = std::max(furthest, tileOffs[k] + tileCnts[k]);
+        for (size_t k = 0; k < stripOffs.size() && k < stripCnts.size(); k++)
+            if (stripOffs[k] > 0 && stripCnts[k] > 0 && stripOffs[k] + stripCnts[k] <= max)
+                furthest = std::max(furthest, stripOffs[k] + stripCnts[k]);
         pushIfd(rd32(off + ifd + 2 + (i64)count * 12));
     }
     if (furthest <= 8) return -1;

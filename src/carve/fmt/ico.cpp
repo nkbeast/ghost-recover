@@ -27,9 +27,8 @@ i64 vIco(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u8 planes = s.byte(e + 4);
         u32 bytes = s.le32(e + 8);
         u32 imgOff = s.le32(e + 12);
-        // Icon dimensions are 0 (meaning 256) or a real pixel count, colour
+        // Dimensions are 0 (meaning 256) or a real pixel count, colour
         // planes are 0 or 1, and image data must follow the directory.
-        if (w == 0 && h == 0 && count == 1) return -1;
         if (planes > 1 && type == 1) return -1;
         if (bytes < 16 || bytes > 16 * 1024 * 1024) return -1;
         if ((i64)imgOff < dirEnd) return -1;

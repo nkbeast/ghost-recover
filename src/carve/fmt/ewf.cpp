@@ -16,22 +16,31 @@
 namespace ghost {
 
 i64 vEwf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    i64 pos = off + 16;                                  // first section header
+    auto fh = s.read(off, 13);
+    if (fh.size() < 13) return -1;
+    if (s.le32(off + 8) != 0x00010000) return -1;      // file format version 1
+    // Section chain: 76-byte section headers. The "next" field (u64 at +16)
+    // is the offset of the following header relative to this section's start;
+    // "size" (u64 at +24) spans from this header through the section data.
+    i64 pos = off + 13;
     i64 end = 0;
     for (int step = 0; step < 64; step++) {
-        if (pos + 16 > off + max) return -1;
-        auto h = s.read(pos, 16);
-        if (h.size() < 16) return -1;
-        u32 next = 0;
-        u64 size = 0;
-        for (int i = 0; i < 4; i++) next |= (u32)h[4 + i] << (i * 8);
-        for (int i = 0; i < 8; i++) size |= (u64)h[8 + i] << (i * 8);
-        i64 secEnd = pos + 16 + (i64)size;
+        if (pos + 76 > off + max) return -1;
+        auto h = s.read(pos, 76);
+        if (h.size() < 76) return -1;
+        u64 next = 0, size = 0;
+        for (int i = 0; i < 8; i++) {
+            next |= (u64)h[16 + i] << (8 * i);
+            size |= (u64)h[24 + i] << (8 * i);
+        }
+        i64 secEnd = pos + (i64)size;
+        if (size == 0) secEnd = pos + 76;               // "done": header only
         if (secEnd > off + max) return -1;
-        if (secEnd > end) end = secEnd;
+        end = std::max(end, secEnd);
         if (next == 0) break;
-        if (next <= (u32)(pos - off)) return -1;         // sections move forward
-        pos = off + next;
+        i64 nextPos = pos + (i64)next;
+        if (nextPos <= pos) return -1;
+        pos = nextPos;
     }
     return end > 0 ? end - off : -1;
 }

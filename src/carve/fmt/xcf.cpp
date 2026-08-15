@@ -20,9 +20,11 @@ i64 vXcf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (v.size() < 5 || v[0] != 'v' || v[1] < '0' || v[1] > '1' ||
         v[2] < '0' || v[2] > '9' || v[3] < '0' || v[3] > '9' || v[4] < '0' || v[4] > '9')
         return -1;
-    i64 total = s.be32(off + 22);
-    if (total < 26 || total > max) return -1;
-    return total;
+    u32 baseType = s.be32(off + 22);
+    if (baseType > 3) return -1;                    // 0 RGB, 1 grayscale, 2 indexed
+    // The 27-byte header carries no file length: the extent is bounded by the
+    // next signature and trailing-zero trim.
+    return 0;
 }void registerFmt_xcf(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

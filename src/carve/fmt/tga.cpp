@@ -46,11 +46,19 @@ i64 vTga(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 p = off + 18 + idLen;
     if (cmapType == 1) p += (i64)cmapLen * ((cmapBpp + 7) / 8);
     const i64 pixels = (i64)w * hgt;
+    const i64 indexBytes = (cmapBpp >= 16) ? 2 : 1;   // palette index width
     if (imgType == 1 || imgType == 2 || imgType == 3) {
-        if (imgType == 3 && depth != 8) return -1;           // grayscale only
-        p += pixels * ((depth + 7) / 8);
+        if (imgType == 1) p += pixels * indexBytes;
+        else if (imgType == 3) {
+            if (depth != 8) return -1;               // grayscale only
+            p += pixels;
+        } else {
+            p += pixels * ((depth + 7) / 8);
+        }
     } else {
-        const i64 pxBytes = (imgType == 10) ? ((depth + 7) / 8) : 1;
+        const i64 pxBytes = (imgType == 9) ? indexBytes
+                         : (imgType == 10) ? ((depth + 7) / 8) : 1;
+        if (imgType == 11 && depth != 8) return -1;  // RLE grayscale only
         i64 got = 0;
         for (i64 guard = 0; guard < pixels + 1; guard++) {
             if (p >= off + max) return -1;

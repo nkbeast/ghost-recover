@@ -17,19 +17,38 @@ namespace ghost {
 
 i64 vArj(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 pos = off;
-    for (int step = 0; step < 64; step++) {
+    for (int step = 0; step < 4096; step++) {
+        if (pos + 4 > off + max) return -1;
+        if (s.byte(pos) != 0x60 || s.byte(pos + 1) != 0xEA) return -1;
+        u16 hdrSize = s.le16(pos + 2);            // includes the 4 header bytes
+        if (hdrSize == 0) return pos + 4 - off;   // end-of-archive marker
         if (pos + 30 > off + max) return -1;
-        auto h = s.read(pos, 30);
-        if (h.size() < 30) return -1;
-        if (h[0] != 0x60 || h[1] != 0xEA) return -1;
-        u16 hdrSize = (u16)h[2] | ((u16)h[3] << 8);
-        if (hdrSize == 0) return pos + 4 - off;          // end-of-archive marker
-        if (hdrSize < 26) return -1;
-        u8 flags = h[5], ftype = h[7];
-        u32 comp = 0;
-        for (int i = 0; i < 4; i++) comp |= (u32)h[16 + i] << (i * 8);
-        pos += 4 + hdrSize;
-        if (ftype == 3 || (flags & 0x02)) continue;      // comment header: no data
+        u8 firstHdr = s.byte(pos + 4);
+        u8 flags = s.byte(pos + 8);
+        u8 method = s.byte(pos + 9);
+        u8 ftype = s.byte(pos + 10);
+        u32 comp = s.le32(pos + 16);
+        if (hdrSize < 26 || hdrSize > 65535) return -1;
+        if (firstHdr < 24 || firstHdr > 128) return -1;
+        if (method > 4) return -1;
+        if (ftype > 4) return -1;
+        if (pos + hdrSize > off + max) return -1;
+        pos += hdrSize;                           // header + filename
+        if (ftype == 3 || ftype == 4) continue;   // comment/special: no data
+        if (flags & 0x02) continue;               // volume end / no data
+        // Optional extended-header chain: {u16 id, u16 size, data} entries
+        // terminated by an empty (0,0) header.
+        for (int ex = 0; ex < 16; ex++) {
+            if (pos + 4 > off + max) return -1;
+            u16 id = s.le16(pos);
+            u16 sz = s.le16(pos + 2);
+            if (id == 0 && sz == 0) { pos += 4; break; }
+            if (sz == 0 || sz > 4096) return -1;
+            if (pos + 4 + (i64)sz > off + max) return -1;
+            pos += 4 + sz;
+        }
+        if (comp > 0x7FFFFFFF) return -1;
+        if (pos + (i64)comp > off + max) return -1;
         pos += comp;
     }
     return -1;

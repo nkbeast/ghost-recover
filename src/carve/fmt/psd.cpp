@@ -31,6 +31,10 @@ i64 vPsd(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u32 colorLen = s.be32(off + p); p += 4 + colorLen;
     u32 resLen   = s.be32(off + p); p += 4 + resLen;
     u32 layerLen = s.be32(off + p); p += 4 + layerLen;
+    if (version == 2) {                          // global layer mask info section
+        u32 maskLen = s.be32(off + p);
+        p += 4 + maskLen;
+    }
     if (p > max) return -1;
     // Image data section: uncompressed size is an upper bound.
     i64 raw = (i64)width * height * channels * (depth / 8 ? depth / 8 : 1);

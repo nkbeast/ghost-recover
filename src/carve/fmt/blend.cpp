@@ -16,20 +16,31 @@
 namespace ghost {
 
 i64 vBlend(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    if (s.le32(off + 18) != 4) return -1;                      // pointer size
-    u8 endian = s.byte(off + 22);
-    if (endian != 0x2C && endian != 0x3C) return -1;           // < or >
-    i64 p = off + 31;                                          // after the version
+    // 17-byte file header: "BLENDER" + "BLEND" + 3 version digits, a pointer
+    // size byte ('_' = 8, '-' = 4) and an endianness byte ('v' = LE, 'V' = BE).
+    auto h = s.read(off, 17);
+    if (h.size() < 17) return -1;
+    if (std::memcmp(h.data(), "BLENDER", 7) != 0) return -1;
+    if (std::memcmp(h.data() + 7, "BLEND", 5) != 0) return -1;
+    u8 ptr = h[15];
+    u8 endian = h[16];
+    if (ptr != '_' && ptr != '-') return -1;
+    if (endian != 'v' && endian != 'V') return -1;
+    const i64 bheadLen = (ptr == '_') ? 24 : 20;   // code+size+ptr+sdna+nr
+    i64 p = off + 17;
     for (int guard = 0; guard < (1 << 20); guard++) {
-        if (p + 32 > off + max) return -1;
+        if (p + bheadLen > off + max) return -1;
         auto code = s.read(p, 4);
         if (code.size() < 4) return -1;
-        u32 size;
-        if (endian == 0x2C) size = s.le32(p + 4);
-        else                size = s.be32(p + 4);
-        if (size > (u32)(max - (p - off))) return -1;
-        if (std::memcmp(code.data(), "ENDB", 4) == 0) return (p + 32) - off;
-        p += 32 + size;
+        u32 size = (endian == 'v') ? s.le32(p + 4) : s.be32(p + 4);
+        if (std::memcmp(code.data(), "ENDB", 4) == 0) return p + bheadLen - off;
+        if (std::memcmp(code.data(), "SDNA", 4) == 0) {
+            if (p + bheadLen + (i64)size > off + max) return -1;
+            return p + bheadLen + (i64)size - off;
+        }
+        if (size > 0x7FFFFFFF) return -1;
+        if (p + bheadLen + (i64)size > off + max) return -1;
+        p += bheadLen + (i64)size;
     }
     return -1;
 }void registerFmt_blend(Registry& r) {

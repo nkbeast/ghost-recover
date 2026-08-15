@@ -22,18 +22,18 @@ i64 vMobi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (num < 1 || num > 100000) return -1;
     i64 table = off + 78;
     if (table + 8 * (i64)num > off + max) return -1;
-    u32 lastOff = s.be32(table + 8 * (num - 1));
-    u16 lastSize = s.be16(table + 8 * (i64)num);
-    if (lastSize == 0) return -1;
-    i64 total = (i64)lastOff + lastSize;
-    if (total < 78 + 8 * (i64)num || total > max) return -1;
-    u32 prev = 0;
+    u32 prev = 78 + 8 * num;                   // record 0 must follow the table
     for (u32 i = 0; i < num; i++) {
         u32 o = s.be32(table + 8 * (i64)i);
-        if (o < prev || o > (u32)total) return -1;
+        if (o < prev) return -1;
         prev = o;
     }
-    return total;
+    // Record 0 is the MOBI header; its first 8 bytes are the PalmDoc magic.
+    u32 r0 = s.be32(table);
+    auto sig = s.read(off + (i64)r0, 8);
+    if (sig.size() < 8 || std::memcmp(sig.data(), "TEXtREAd", 8) != 0) return -1;
+    // The last record has no stored size: report an unknown size.
+    return 0;
 }void registerFmt_mobi(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

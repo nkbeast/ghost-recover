@@ -113,6 +113,7 @@ i64 vQoi(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vRar(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vRegf(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vRiff(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
+i64 vRm(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vSfnt(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vSgi(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);
 i64 vSqlite(ByteSource& s, i64 off, i64 max, const CarveSpec& spec);

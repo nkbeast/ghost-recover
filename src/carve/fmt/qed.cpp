@@ -57,8 +57,10 @@ i64 vQed(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (l1 < headerEnd || l1 % cluster != 0 ||
         off + l1 + (i64)tableSize * cluster > off + max)
         return -1;
+    // A hostile header could claim huge tables; the physical file bounds the
+    // reads, but cap the per-table scan to keep hostile images cheap.
     const i64 entries = std::min<i64>((i64)tableSize * cluster / 8,
-                                      (i64(1) << 30));
+                                      (i64(1) << 23));
     const i64 l1Abs = off + l1;
     const i64 l1End = l1Abs + (i64)tableSize * cluster;
     i64 end = l1End;

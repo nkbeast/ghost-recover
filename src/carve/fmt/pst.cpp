@@ -16,12 +16,11 @@
 namespace ghost {
 
 i64 vPst(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    u16 ver = s.le16(off + 0x0A);
-    if (ver != 23) return -1;                                  // ANSI only
-    u32 nextFree = s.le32(off + 0x14);
-    if (nextFree < 2) return -1;
-    i64 total = (i64)nextFree * 512;
-    return (total <= max) ? total : -1;
+    u16 ver = s.le16(off + 4);                 // dwVersion: 14/15 ANSI, 23 Unicode
+    if (ver != 14 && ver != 15 && ver != 23) return -1;
+    // No reliable total-size field exists across ANSI/Unicode layouts: the
+    // extent is bounded by the next signature and trailing-zero trim.
+    return 0;
 }void registerFmt_pst(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

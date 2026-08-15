@@ -16,9 +16,11 @@
 namespace ghost {
 
 i64 vRaf(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
-    i64 total = s.be32(off + 0x62) + s.be32(off + 0x66);
-    if (total < 0x70 || total > max) return -1;
-    return total;
+    // The header carries the embedded JPEG extent, but metadata trailers
+    // commonly follow it, so no single field yields the true file size:
+    // report an unknown size and let the next-signature bound and trailing
+    // zero trim size the carve.
+    return 0;
 }void registerFmt_raf(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 

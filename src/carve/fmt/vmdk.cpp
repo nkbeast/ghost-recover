@@ -23,10 +23,10 @@ i64 vVmdk(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     u64 descSize = s.le64(off + 36);
     u32 numGT = s.le32(off + 44);
     u32 numGTE = s.le32(off + 48);
-    if (grainSize > (1 << 20)) return -1;
+    if (grainSize > (1u << 21)) return -1;
     if (numGTE > 0 && grainSize == 0) return -1;
     if (descSize == 0 || descSize > 1024 * 1024) return -1;
-    if (numGT > 1024 * 1024 || numGTE > 1024 * 1024) return -1;
+    if (numGT > (1u << 23) || numGTE > (1u << 23)) return -1;
     i64 total = 512 + (i64)descSize * 512 + (i64)numGT * 4 + (i64)numGTE * 4 +
                 (i64)numGTE * (i64)grainSize * 512;
     if (flags & 0x10000) total += 512;                        // embedded backup

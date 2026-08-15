@@ -176,7 +176,8 @@ bool walksWholeFile(SizeFn fn) {
 // the next signature on the device, so the engine clamps the result to it.
 bool walksToBoundary(SizeFn fn) {
     static const SizeFn kBounded[] = {
-        vGpg, vMat, vPickle, vDer, vPlistBin, vQcow, vVhd, vVhdx, vVdi, vSwf, nullptr};
+        vGpg, vMat, vPickle, vDer, vPlistBin, vQcow, vVhd, vVhdx, vVdi, vSwf,
+        vRm, nullptr};
     for (int i = 0; kBounded[i]; i++) if (fn == kBounded[i]) return true;
     return false;
 }

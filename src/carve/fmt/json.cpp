@@ -43,6 +43,7 @@ i64 vJson(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (c == '\t' || c == '\n' || c == '\r') continue;
         if (c == '-') continue;
         if (c >= '0' && c <= '9') continue;
+        if (c == '.' || c == 'e' || c == 'E' || c == '+') continue;
         if (c == 't' && p + 4 <= off + max && s.byte(p + 1) == 'r' &&
             s.byte(p + 2) == 'u' && s.byte(p + 3) == 'e') { p += 3; continue; }
         if (c == 'f' && p + 5 <= off + max && s.byte(p + 1) == 'a' &&

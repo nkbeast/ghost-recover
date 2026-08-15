@@ -23,23 +23,8 @@ i64 vDwg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (v.size() >= 6 && std::memcmp(v.data(), k, 6) == 0) { known = true; break; }
     if (!known) return -1;
     if (s.byte(off + 6) != 0x1F) return -1;                    // end-of-header
-    u32 pageSize = s.le32(off + 0x30);
-    if (pageSize != 0x1000 && pageSize != 0x2000) return -1;
-    u32 count = s.le32(off + 0x38);
-    if (count < 2 || count > 128) return -1;
-    i64 total = 0;
-    for (u32 i = 0; i < count; i++) {
-        i64 e = off + 0x3C + 0x20 * (i64)i;
-        if (e + 0x20 > off + max) return -1;
-        u16 type = s.le16(e);
-        if (type > 0x18) return -1;
-        i64 aoff = (i64)s.le64(e + 0x10);
-        i64 size = (i64)s.le64(e + 0x18);
-        if (size > max || size < 2) return -1;
-        i64 end = aoff + size;
-        if (end > total) total = end;
-    }
-    return (total > 0 && total <= max) ? total : -1;
+    // The section map is compressed per version; no reliable length field.
+    return 0;
 }void registerFmt_dwg(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
