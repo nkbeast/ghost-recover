@@ -623,10 +623,28 @@ function updateJobBar() {
   if (bar) bar.outerHTML = jobBarHtml();
   const stat = $('.topbar .stat');
   if (stat) {
-    const busy = S.job && (S.job.state === 'running' || S.job.state === 'queued');
+    const busy = !!(S.job && (S.job.state === 'running' || S.job.state === 'queued'));
     stat.innerHTML = `<span class="dot ${busy ? 'red' : 'green'}"></span> ` +
-                     (busy ? esc(S.job.phase || 'working') : 'idle');
+      (busy ? 'working…' : 'ready');
   }
+}
+
+// Live-results refresh: patch only the results region in place. A full
+// render() here every ~1.2 s would rebuild the filter <select>s while the user
+// is reading them — the open dropdown gets destroyed and "closes itself" with
+// a glitch — and would steal focus from the search input. The table, pager
+// and filters are swapped individually instead; the filters are left alone
+// whenever one of their controls has focus so an open dropdown survives.
+function updateResultsRegion() {
+  const tw = $('#tablewrap');
+  if (!tw) return render();
+  tw.innerHTML = viewFileTable();
+  const pg = $('#pager');
+  if (pg) pg.outerHTML = viewPager();
+  const fl = $('#filters');
+  if (fl && !fl.contains(document.activeElement)) fl.innerHTML = viewFilters();
+  const rbtn = Array.from($$('.toolbar .btn') || []).find(b => /Recover files/.test(b.textContent));
+  if (rbtn) rbtn.disabled = !(S.results && S.results.files.length);
 }
 
 function viewWorkspace() {
@@ -661,7 +679,7 @@ function viewWorkspace() {
     ${viewSidebar()}
     <div class="center pane">
       ${viewFilters()}
-      <div class="tablewrap">${viewFileTable()}</div>
+      <div class="tablewrap" id="tablewrap">${viewFileTable()}</div>
       ${viewPager()}
     </div>
     ${viewInspector()}
@@ -725,7 +743,7 @@ function kv(k, v) {
 
 function viewFilters() {
   const exts = S.results ? Object.entries(S.results.by_ext || {}).sort((a, b) => b[1] - a[1]) : [];
-  return `<div class="filters">
+  return `<div class="filters" id="filters">
     <input class="input grow" placeholder="Filter by name or path…" value="${esc(S.filter.q)}"
       oninput="S.filter.q=this.value" onchange="S.page=0;loadResults()"
       onkeydown="if(event.key==='Enter'){S.page=0;loadResults()}">
@@ -811,7 +829,7 @@ function viewPager() {
   const to = Math.min(r.offset + r.limit, r.matched);
   const pages = Math.max(1, Math.ceil(r.matched / r.limit));
   const cur = Math.floor(r.offset / r.limit) + 1;
-  return `<div class="pager">
+  return `<div class="pager" id="pager">
     <button class="btn sm" ${r.offset <= 0 ? 'disabled' : ''} onclick="S.page--;loadResults()">◀</button>
     <span>${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(r.matched)}${r.matched !== r.total ? ' (filtered from ' + fmtNum(r.total) + ')' : ''}</span>
     <button class="btn sm" ${to >= r.matched ? 'disabled' : ''} onclick="S.page++;loadResults()">▶</button>
@@ -921,7 +939,12 @@ const AUD = ['mp3','wav','flac','ogg','oga','opus','m4a','aac','aiff','ac3','amr
 const TRANSCODE = ['mkv','avi','flv','ts','mpg','mpeg','wmv','asf','au','aiff','aifc','amr','mid','wma','ac3','spx'];
 const TXT = ['txt','md','log','json','xml','html','htm','csv','yaml','yml','ini','conf','toml',
              'py','sh','js','ts','c','cpp','h','hpp','rs','go','java','rb','php','sql','pem',
-             'service','gitconfig','tex','dockerfile','cmake','env','eml','mbox'];
+             'service','gitconfig','tex','dockerfile','cmake','env','eml','mbox',
+             // hash / checksum / signature files are plain text
+             'md5','sha1','sha224','sha256','sha384','sha512','crc','sum','sfv','hash','checksum',
+             'asc','sig','key','crt','cer','csr','gpg','pub','nfo','info','cfg','properties',
+             'props','manifest','desktop','lst','list','rules','diff','patch','gitignore',
+             'gitattributes','editorconfig'];
 
 function contentUrl(index, max) {
   // Media tags, iframes and downloads cannot send the X-Ghost-Token header,
@@ -1156,6 +1179,12 @@ async function loadPreview(f, host) {
     try {
       const r = await fetch(contentUrl(f.index, 1024 * 1024));
       let t = await r.text();
+      if (!r.ok || t.startsWith('{"ok":false')) {
+        host.innerHTML = `<div class="empty">No readable data for this file.<br><br>
+          Its name and metadata survived, but the blocks that held its contents
+          have been released or overwritten.</div>`;
+        return;
+      }
       if (t.length > 400000) t = t.slice(0, 400000) + '\n\n[truncated at 400 KB]';
       host.innerHTML = `<pre>${esc(t)}</pre>`;
     } catch (e) {
@@ -1163,6 +1192,32 @@ async function loadPreview(f, host) {
     }
     return;
   }
+  // Unknown formats: sniff the bytes instead of defaulting to hex. Printable
+  // text (configs, exports, key material, dumps…) reads far better as text;
+  // only genuinely binary data falls back to the hex view.
+  host.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const r = await fetch(contentUrl(f.index, 64 * 1024));
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (!r.ok || buf.length < 8) {
+      host.innerHTML = `<div class="empty">No readable data for this file.<br><br>
+        Its name and metadata survived, but the blocks that held its contents
+        have been released or overwritten.</div>`;
+      return;
+    }
+    let printable = 0;
+    const n = Math.min(buf.length, 4096);
+    for (let i = 0; i < n; i++) {
+      const b = buf[i];
+      if (b === 9 || b === 10 || b === 13 || (b >= 32 && b < 127)) printable++;
+    }
+    if (printable / n >= 0.95) {
+      let t = new TextDecoder().decode(buf);
+      if (buf.length >= 64 * 1024) t += '\n\n[truncated at 64 KB]';
+      host.innerHTML = `<pre>${esc(t)}</pre>`;
+      return;
+    }
+  } catch (e) { /* fall through to hex */ }
   loadHex(f, host);
 }
 
@@ -1252,7 +1307,7 @@ function pollJob(id) {
         const now = Date.now();
         if (S.resultJob && now - (S.lastLiveResults || 0) > 1200) {
           S.lastLiveResults = now;
-          await loadResults();
+          await loadResults(true);
         }
       }
     } catch (e) {
@@ -1334,7 +1389,7 @@ async function cancelJob() {
   log('cancelling…', 'warn');
 }
 
-async function loadResults() {
+async function loadResults(live) {
   if (!S.resultJob) return;
   const q = new URLSearchParams({
     job: S.resultJob,
@@ -1348,8 +1403,9 @@ async function loadResults() {
     S.results = r;
     if (S.page * S.pageSize >= r.matched && r.matched > 0) {
       S.page = Math.floor((r.matched - 1) / S.pageSize);
-      return loadResults();
+      return loadResults(live);
     }
+    if (live) { updateResultsRegion(); return; }
   } catch (e) {
     if (e.status === 404) {
       // Two distinct cases: the job is still running and has not published

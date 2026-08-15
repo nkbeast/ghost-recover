@@ -51,9 +51,16 @@ bool confirmMatches(DiskReader& disk, const CarveSpec& spec, i64 fileOffset, i64
 }
 
 // Scans forward for a footer, in overlapping windows so a footer straddling a
-// read boundary is still found.
+// read boundary is still found. The search is capped: footer-based lengths are
+// a heuristic for formats without a self-describing walker, and on a flood
+// disk the junk candidates that never find their footer would otherwise scan
+// the whole 4 GiB cap each — that single cost is what made a big carve's
+// validation phase crawl. A real file whose footer lies beyond the cap still
+// gets carved, just via the next-signature bound instead.
 i64 findFooter(DiskReader& disk, i64 start, i64 limit, const std::vector<u8>& footer) {
     if (footer.empty()) return -1;
+    constexpr i64 kFooterCap = 128LL * 1024 * 1024;
+    if (limit > kFooterCap) limit = kFooterCap;
     const i64 kStep = 1 * 1024 * 1024;
     const i64 overlap = (i64)footer.size() - 1;
     i64 pos = 0;
@@ -364,6 +371,30 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             return;
         }
 
+        // Entropy bounds are screened BEFORE the length is determined: they
+        // sample the same 64 KiB prefix either way, and rejecting junk early
+        // skips the expensive part for the flood candidates that dominate a
+        // big carve — a zero-filled region's signature hits, for example,
+        // previously walked the whole window trimming zeros before the screen
+        // rejected them. The text screen stays on the sized sample below.
+        {
+            i64 probeLen = std::min<i64>(avail, 64 * 1024);
+            auto probe = rd.readBlock((u64)off, probeLen);
+            if (probe.empty()) return;
+            double entropy = shannonEntropy(probe.data(), probe.size());
+            v.entropy = entropy;
+            if (spec.min_entropy >= 0 && entropy < spec.min_entropy) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
+            if (spec.max_entropy >= 0 && entropy > spec.max_entropy) {
+                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
+                                 spec.name.c_str(), (long long)off);
+                return;
+            }
+        }
+
         // Determine the length.
         i64 size = -1;
         if (opt.validate && spec.validator) {
@@ -415,26 +446,13 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
 
         if (size > cap) { size = cap; v.sizeClamped = true; }
 
-        // Entropy screen: rejects both random noise that happens to contain a
-        // signature and, for text formats, binary garbage.
-        {
+        // Text screen on the sized sample (a small text file must not be
+        // judged by whatever follows it on the disk).
+        if (spec.mode == SizeMode::Text) {
             i64 probeLen = std::min<i64>(size, 64 * 1024);
             auto probe = rd.readBlock((u64)off, probeLen);
             if (probe.empty()) return;
-            double entropy = shannonEntropy(probe.data(), probe.size());
-            v.entropy = entropy;
-            if (spec.min_entropy >= 0 && entropy < spec.min_entropy) {
-                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
-                                 spec.name.c_str(), (long long)off);
-                return;
-            }
-            if (spec.max_entropy >= 0 && entropy > spec.max_entropy) {
-                if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=entropy\n",
-                                 spec.name.c_str(), (long long)off);
-                return;
-            }
-            if (spec.mode == SizeMode::Text &&
-                !looksLikeText(probe.data(), probe.size(), 0.85)) {
+            if (!looksLikeText(probe.data(), probe.size(), 0.85)) {
                 if (dbg2) fprintf(stderr, "[carve] reject %s off=%lld reason=not-text\n",
                                  spec.name.c_str(), (long long)off);
                 return;
