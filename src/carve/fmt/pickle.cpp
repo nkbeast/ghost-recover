@@ -47,10 +47,12 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             case 0x5A: {                        // LONG_BINUNICODE: u64 len (little-endian)
                 auto v = s.read(pos + 1, 8);
                 if (v.size() < 8) return -1;
-                i64 n64 = 0;
-                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
-                if (n64 < 0 || pos + 9 + n64 > end) return -1;
-                pos += 9 + n64;
+                // Accumulate unsigned: a hostile high byte at shift 56 would
+                // otherwise be signed-overflow UB before the range check.
+                u64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (u64)v[k] << (8 * k);
+                if (n64 > (u64)(end - pos - 9)) return -1;
+                pos += 9 + (i64)n64;
                 continue;
             }
             case 0x4B: case 0x55: case 0x68: case 0x71:   // 1-byte value/ref
@@ -103,10 +105,10 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             case 0x8D: case 0x96: {        // BINBYTES8 / BYTEARRAY8: u64 len (little-endian)
                 auto v = s.read(pos + 1, 8);
                 if (v.size() < 8) return -1;
-                i64 n64 = 0;
-                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
-                if (n64 < 0 || pos + 9 + n64 > end) return -1;
-                pos += 9 + n64;
+                u64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (u64)v[k] << (8 * k);
+                if (n64 > (u64)(end - pos - 9)) return -1;
+                pos += 9 + (i64)n64;
                 continue;
             }
             case 0x95: {                   // FRAME (u64 len) — protocol 4+
@@ -114,10 +116,10 @@ i64 vPickle(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                 if (fstart + 9 > end) return -1;
                 auto v = s.read(pos + 1, 8);
                 if (v.size() < 8) return -1;
-                i64 n64 = 0;
-                for (size_t k = 0; k < 8; k++) n64 |= (i64)v[k] << (8 * k);
-                if (n64 <= 0 || n64 > end - pos - 9) return -1;
-                i64 want = fstart + 9 + n64;
+                u64 n64 = 0;
+                for (size_t k = 0; k < 8; k++) n64 |= (u64)v[k] << (8 * k);
+                if (n64 == 0 || n64 > (u64)(end - fstart - 9)) return -1;
+                i64 want = fstart + 9 + (i64)n64;
                 // CPython packs the whole pickle (STOP included) into the last
                 // frame; the frame's final byte being STOP ends the file there.
                 // The frame may claim a byte past EOF (short frames are legal):

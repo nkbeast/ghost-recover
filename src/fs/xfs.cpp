@@ -114,7 +114,11 @@ struct XfsFs {
             { if (err) *err = "implausible XFS block size"; return false; }
         if (sb.inodesize < 256 || sb.inodesize > 2048 || (sb.inodesize & (sb.inodesize - 1)))
             { if (err) *err = "implausible XFS inode size"; return false; }
-        if (sb.agcount == 0 || sb.agcount > 1000000 || sb.agblocks == 0)
+        if (sb.agcount == 0 || sb.agcount > 1000000 || sb.agblocks == 0 ||
+            // A real AG never spans beyond the device (the trailing group is
+            // truncated, never inflated); this also keeps the AG-offset math
+            // from wrapping in the inode-B+tree walk.
+            (u64)sb.agblocks * sb.blocksize > (u64)d->size() + sb.blocksize)
             { if (err) *err = "implausible XFS AG geometry"; return false; }
         // These are shift counts used as `1 << x` when converting between inode
         // numbers, AG blocks and bytes. A corrupt value above 63 is undefined
@@ -280,8 +284,13 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     auto walkInobt = [&](u64 blockNo, int depth, auto&& self) -> void {
         if (depth > 16 || chunks.size() > 4000000) return;
         if (!visitedBlocks.insert(blockNo).second) return;
-        i64 off = (i64)blockNo * fs.sb.blocksize;
-        if (off < 0 || off + (i64)fs.sb.blocksize > fs.volume) return;
+        // Unsigned offset math: (i64)blockNo * blocksize overflows for huge
+        // disk block numbers and can wrap to a wrong in-volume block.
+        u64 offU = blockNo * (u64)fs.sb.blocksize;
+        if (offU >= (u64)fs.volume ||
+            (u64)fs.volume - offU < (u64)fs.sb.blocksize)
+            return;
+        i64 off = (i64)offU;
         auto raw = disk.readBlock((u64)off, fs.sb.blocksize);
         Bytes b(raw);
         bool v5 = b.eq(0, "IAB3", 4);
@@ -321,9 +330,14 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     for (u32 ag = 0; ag < fs.sb.agcount && !prog.cancelled(); ag++) {
         prog.set(ag, fs.sb.agcount);
         // AG layout: sector 0 SB, 1 AGF, 2 AGI, 3 AGFL
-        i64 agiOff = (i64)ag * fs.sb.agblocks * fs.sb.blocksize + 2 * fs.sb.sectsize;
-        if (agiOff + fs.sb.sectsize > fs.volume) break;
-        auto agi = disk.readBlock((u64)agiOff, fs.sb.sectsize);
+        // (i64)ag * agblocks * blocksize overflows i64 for unbounded
+        // agblocks; compute unsigned and bound against the volume.
+        u64 agiOffU = (u64)ag * (u64)fs.sb.agblocks * (u64)fs.sb.blocksize +
+                      2 * (u64)fs.sb.sectsize;
+        if (agiOffU >= (u64)fs.volume ||
+            (u64)fs.volume - agiOffU < (u64)fs.sb.sectsize)
+            break;
+        auto agi = disk.readBlock(agiOffU, fs.sb.sectsize);
         Bytes a(agi);
         if (!a.eq(0, "XAGI", 4)) continue;
         u32 root = a.be32(0x14);
@@ -556,7 +570,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         RecoveredFile f;
         f.id = ino;
         f.size = (i64)n.in.size;
-        f.alloc_size = (i64)n.in.nblocks * fs.sb.blocksize;
+        f.alloc_size = (i64)std::min<u64>(n.in.nblocks * (u64)fs.sb.blocksize, (u64)INT64_MAX);
         f.uid = n.in.uid; f.gid = n.in.gid; f.mode = n.in.mode & 0x0FFF;
         f.nlink = n.in.nlink;
         f.mtime = n.in.mtime; f.atime = n.in.atime; f.ctime = n.in.ctime; f.crtime = n.in.crtime;

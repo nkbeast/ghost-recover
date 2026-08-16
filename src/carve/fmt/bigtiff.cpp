@@ -39,6 +39,9 @@ i64 vBigTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         q += 20;
     }
     if (stripOff < 0) return -1;
+    // Guard the sum: two hostile LONG8 values could otherwise overflow the
+    // signed range. stripBytes is only trusted when it lands inside max.
+    if (stripBytes > 0 && stripOff > max - stripBytes) return -1;
     i64 total = std::max(q + 8, stripOff + stripBytes);
     return (total <= max) ? total : -1;
 }void registerFmt_bigtiff(Registry& r) {

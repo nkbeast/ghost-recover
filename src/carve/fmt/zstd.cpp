@@ -46,8 +46,11 @@ i64 vZstd(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     if (fcsFlag != 0 || fcs1) {
         const int bytes = fcsFlag == 0 ? 1 : fcsFlag == 1 ? 2 : fcsFlag == 2 ? 4 : 8;
         if (p + bytes > max) return -1;
-        fcs = 0;
-        for (int k = 0; k < bytes; k++) fcs |= (i64)s.byte(off + p + k) << (8 * k);
+        u64 f = 0;
+        // Unsigned accumulation: an 8-byte FCS with a hostile high byte
+        // would otherwise be signed-overflow UB.
+        for (int k = 0; k < bytes; k++) f |= (u64)s.byte(off + p + k) << (8 * k);
+        fcs = (i64)f;
         if (fcs1) fcs += 1;                  // 1-byte FCS stores size - 1
         if (fcsFlag == 1) fcs += 256;
         else if (fcsFlag == 2) fcs += 65536;

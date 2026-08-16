@@ -32,11 +32,15 @@ i64 vMachO(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         u32 cmdSize = rd32(p + 4);
         if (cmdSize < 8 || p + cmdSize > max) break;
         if (cmd == 0x01 || cmd == 0x19) {                     // LC_SEGMENT / _64
-            i64 fileOff = x64 ? (i64)((u64)rd32(p + 40) | ((u64)rd32(p + 44) << 32))
-                              : (i64)rd32(p + 32);
-            i64 fileSize = x64 ? (i64)((u64)rd32(p + 48) | ((u64)rd32(p + 52) << 32))
-                               : (i64)rd32(p + 36);
-            if (fileOff >= 0 && fileSize > 0) furthest = std::max(furthest, fileOff + fileSize);
+            u64 fileOff = x64 ? ((u64)rd32(p + 40) | ((u64)rd32(p + 44) << 32))
+                              : (u64)rd32(p + 32);
+            u64 fileSize = x64 ? ((u64)rd32(p + 48) | ((u64)rd32(p + 52) << 32))
+                               : (u64)rd32(p + 36);
+            // Sum in unsigned so two hostile near-2^63 offsets cannot invoke
+            // signed-overflow UB; an oversized result simply fails to extend
+            // `furthest` and the file is rejected below.
+            if (fileSize > 0 && fileOff <= (u64)max - fileSize)
+                furthest = std::max(furthest, (i64)(fileOff + fileSize));
         }
         p += cmdSize;
     }

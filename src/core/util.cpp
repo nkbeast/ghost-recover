@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -217,13 +218,14 @@ std::string base64Encode(const u8* d, size_t n) {
 }
 
 std::vector<u8> base64Decode(const std::string& s) {
-    static i8 tbl[256];
-    static bool init = false;
-    if (!init) {
-        std::memset(tbl, -1, sizeof(tbl));
-        for (int i = 0; i < 64; i++) tbl[(u8)kB64[i]] = (i8)i;
-        init = true;
-    }
+    // Function-local statics are initialised thread-safely by the compiler
+    // (magic statics), so concurrent first calls cannot race the table build.
+    static const std::array<i8, 256> tbl = [] {
+        std::array<i8, 256> t{};
+        t.fill(-1);
+        for (int i = 0; i < 64; i++) t[(u8)kB64[i]] = (i8)i;
+        return t;
+    }();
     std::vector<u8> out;
     out.reserve(s.size() * 3 / 4 + 3);
     u32 val = 0;

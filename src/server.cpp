@@ -870,6 +870,14 @@ bool spawnElevated(const std::string& method, const std::string& password,
         if (::waitpid(pid, &status, 0) == pid) {
             g_elevation.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
             g_elevation.child_exited = true;
+            // The child never claimed the port: the one-time handover token
+            // is now worthless and must not stay valid for a later claim.
+            // Guarded with the same mutex the elevate/handover handlers use.
+            if (!g_handedOver.load()) {
+                std::lock_guard<std::mutex> lk(g_elevateMutex);
+                g_handoverToken.clear();
+                if (!g_handoverFile.empty()) ::unlink(g_handoverFile.c_str());
+            }
         }
     }).detach();
     return true;
@@ -1256,7 +1264,12 @@ int startServer(const ServerConfig& cfg) {
         if (failed) {
             int code = g_elevation.exit_code.load();
             std::string detail;
-            if (g_elevation.method == "pkexec") {
+            std::string method;
+            {
+                std::lock_guard<std::mutex> lk(g_elevateMutex);
+                method = g_elevation.method;
+            }
+            if (method == "pkexec") {
                 detail = (code == 126) ? "Authentication was dismissed or refused."
                        : (code == 127) ? "pkexec could not run this program."
                                        : "The authentication dialog did not complete.";
@@ -1267,7 +1280,12 @@ int startServer(const ServerConfig& cfg) {
             }
             // Surface whatever sudo/pkexec printed, which is usually the reason.
             // The log sits next to the handover token in the 0700 runtime dir.
-            std::ifstream lf(joinPath(dirName(g_handoverFile), "elevated-engine.log"));
+            std::string logPath;
+            {
+                std::lock_guard<std::mutex> lk(g_elevateMutex);
+                logPath = joinPath(dirName(g_handoverFile), "elevated-engine.log");
+            }
+            std::ifstream lf(logPath);
             std::string line, tail;
             while (std::getline(lf, line)) {
                 line = trim(line);
@@ -1286,6 +1304,8 @@ int startServer(const ServerConfig& cfg) {
     svr.Post("/api/handover", [&](const httplib::Request& req, httplib::Response& res) {
         auto body = json::parse(req.body);
         std::string token = body.getStr("token");
+        // The elevated-child exit path clears the token under this mutex.
+        std::lock_guard<std::mutex> lk(g_elevateMutex);
         bool valid = !g_handoverToken.empty() && token.size() == g_handoverToken.size();
         if (valid) {
             // Constant-time compare; the token is short-lived but there is no
@@ -1349,8 +1369,24 @@ int startServer(const ServerConfig& cfg) {
     // and the browser answers at the protocol level, so read() below only
     // returns when the socket is genuinely gone). Count transitions to zero
     // are timestamped for the watchdog's ~5 s grace, which absorbs reloads.
-    svr.WebSocket("/api/presence", [](const httplib::Request&, httplib::ws::WebSocket& ws) {
-        g_presenceCount++;
+    svr.WebSocket("/api/presence", [](const httplib::Request& req, httplib::ws::WebSocket& ws) {
+        // WebSocket upgrades are dispatched before routing, so the
+        // pre-routing token gate never runs for this route — the token is
+        // verified here instead (the browser appends ?tok= to the socket
+        // URL). Without this, any local process could hold the socket, pin
+        // a thread-pool slot, and suppress the idle watchdog. The count cap
+        // is defence in depth: one browser opens exactly one socket.
+        const std::string given = req.get_param_value("tok");
+        bool ok = !g_sessionToken.empty() && given.size() == g_sessionToken.size();
+        if (ok) {
+            unsigned diff = 0;
+            for (size_t i = 0; i < given.size(); i++)
+                diff |= (unsigned)(given[i] ^ g_sessionToken[i]);
+            ok = (diff == 0);
+        }
+        if (!ok) return;
+        const int n = g_presenceCount.fetch_add(1) + 1;
+        if (n > 3) { g_presenceCount.fetch_sub(1); return; }
         g_presenceEver = true;
         std::string msg;
         while (ws.is_open() && ws.read(msg)) { /* liveness only */ }
@@ -1817,11 +1853,6 @@ int startServer(const ServerConfig& cfg) {
     svr.Get("/api/fileinfo", [&](const httplib::Request& req, httplib::Response& res) {
         auto stored = ResultStore::instance().get(req.get_param_value("job"));
         i64 index = paramInt(req, "index", -1);
-        if (!stored || index < 0 || index >= (i64)stored->files.size()) {
-            res.status = 404;
-            res.set_content(errorJson("no such file in that job"), "application/json");
-            return;
-        }
         std::lock_guard<std::mutex> lk(stored->mu);   // live results grow under this
         if (index >= (i64)stored->files.size()) {
             res.status = 404;
@@ -1861,10 +1892,19 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         i64 index = paramInt(req, "index", -1);
-        if (index < 0 || index >= (i64)stored->files.size()) {
-            res.status = 404;
-            res.set_content(errorJson("index out of range"), "application/json");
-            return;
+        // Snapshot the file under the store lock: a deep job's carve is
+        // still appending to stored->files, and a reallocation would move
+        // the element this handler (and the streaming provider below, which
+        // runs after the handler returns) holds a reference to.
+        RecoveredFile f;
+        {
+            std::lock_guard<std::mutex> lk(stored->mu);
+            if (index < 0 || index >= (i64)stored->files.size()) {
+                res.status = 404;
+                res.set_content(errorJson("index out of range"), "application/json");
+                return;
+            }
+            f = stored->files[(size_t)index];
         }
         i64 maxBytes = 64LL * 1024 * 1024;
         // A missing "max" means "serve everything" — downloads and media
@@ -1878,7 +1918,6 @@ int startServer(const ServerConfig& cfg) {
         if (capped) maxBytes = std::min<i64>(m, 256LL * 1024 * 1024);
         constexpr i64 kCodedBudget = 256LL * 1024 * 1024;
 
-        const RecoveredFile& f = stored->files[(size_t)index];
         i64 fileLen = f.size > 0 ? f.size : 0;
         if (fileLen <= 0)
             for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
@@ -1915,9 +1954,8 @@ int startServer(const ServerConfig& cfg) {
             // std::function.
             auto owned = std::shared_ptr<DiskReader>(std::move(disk));
             auto provider =
-                [owned, stored, index, serveLen](size_t offset, size_t length,
-                                                 httplib::DataSink& sink) -> bool {
-                    const RecoveredFile& f = stored->files[(size_t)index];
+                [owned, f, serveLen](size_t offset, size_t length,
+                                     httplib::DataSink& sink) -> bool {
                     if ((i64)offset >= serveLen) return false;
                     i64 want = std::min<i64>((i64)length, serveLen - (i64)offset);
                     want = std::min<i64>(want, 8LL * 1024 * 1024);
@@ -1961,12 +1999,19 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         i64 index = paramInt(req, "index", -1);
-        if (index < 0 || index >= (i64)stored->files.size()) {
-            res.status = 404;
-            res.set_content(errorJson("index out of range"), "application/json");
-            return;
+        // Snapshot under the store lock: a live deep job appends to
+        // stored->files, so the unlocked reference the feeder thread
+        // captures below would dangle on a reallocation.
+        RecoveredFile f;
+        {
+            std::lock_guard<std::mutex> lk(stored->mu);
+            if (index < 0 || index >= (i64)stored->files.size()) {
+                res.status = 404;
+                res.set_content(errorJson("index out of range"), "application/json");
+                return;
+            }
+            f = stored->files[(size_t)index];
         }
-        const RecoveredFile& f = stored->files[(size_t)index];
         i64 fileLen = f.size > 0 ? f.size : 0;
         if (fileLen <= 0)
             for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
@@ -2113,10 +2158,23 @@ int startServer(const ServerConfig& cfg) {
         if (!jobId.empty()) {
             auto stored = ResultStore::instance().get(jobId);
             i64 index = paramInt(req, "index", -1);
-            if (!stored || index < 0 || index >= (i64)stored->files.size()) {
+            if (!stored) {
                 res.status = 404;
                 res.set_content(errorJson("no such file in that job"), "application/json");
                 return;
+            }
+            // Snapshot under the store lock: a live deep job appends to
+            // stored->files and a reallocation would dangle this reference
+            // across the disk reads below.
+            RecoveredFile f;
+            {
+                std::lock_guard<std::mutex> lk(stored->mu);
+                if (index < 0 || index >= (i64)stored->files.size()) {
+                    res.status = 404;
+                    res.set_content(errorJson("no such file in that job"), "application/json");
+                    return;
+                }
+                f = stored->files[(size_t)index];
             }
             std::string err;
             auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
@@ -2125,7 +2183,6 @@ int startServer(const ServerConfig& cfg) {
                 res.set_content(errorJson(err), "application/json");
                 return;
             }
-            const RecoveredFile& f = stored->files[(size_t)index];
             // Bound the read to the file's real length. An offset near INT64_MAX
             // would otherwise make offset+length overflow and force readFileData
             // into materialising the whole file to return nothing at all.
@@ -2255,6 +2312,13 @@ int startServer(const ServerConfig& cfg) {
 
         std::vector<size_t> indices;
         if (const json::Value* arr = body.getArray("indices")) {
+            // Bound the selection: the snapshot below copies every selected
+            // file (~200 B each), so an unbounded indices array from a
+            // hostile body would balloon memory in the job thread.
+            if (arr->arr.size() > 100000) {
+                res.set_content(errorJson("too many indices (max 100000)"), "application/json");
+                return;
+            }
             std::lock_guard<std::mutex> lk(stored->mu);
             for (const auto& v : arr->arr) {
                 i64 i = v.asInt();
@@ -2314,8 +2378,9 @@ int startServer(const ServerConfig& cfg) {
         opt.output_path = body.getStr("output_path",
                                       joinPath(outputRoot(), "images/clone.img"));
         opt.mapfile     = body.getStr("mapfile", opt.output_path + ".map");
-        opt.block_size  = body.getInt("block_size", 1 << 20);
-        opt.retry_passes = body.getInt("retry_passes", 2);
+        opt.block_size  = std::clamp<i64>(body.getInt("block_size", 1 << 20),
+                                         4096, 64LL * 1024 * 1024);
+        opt.retry_passes = std::clamp<i64>(body.getInt("retry_passes", 2), 0, 16);
         opt.sparse      = body.getBool("sparse", true);
         opt.verify      = body.getBool("verify", false);
         opt.start       = t.offset;
@@ -2369,6 +2434,12 @@ int startServer(const ServerConfig& cfg) {
                             "application/json");
             return;
         }
+        // Each member opens its own reader with a multi-MiB cache; a
+        // megabyte-long members array from a hostile body would exhaust RAM.
+        if (members.size() > 64) {
+            res.set_content(errorJson("too many RAID members (max 64)"), "application/json");
+            return;
+        }
         Progress prog;
         RaidLayout layout = detectRaidLayout(members, prog);
         json::Writer w;
@@ -2402,6 +2473,10 @@ int startServer(const ServerConfig& cfg) {
         layout.parity_layout = body.getStr("parity_layout", "left-symmetric");
         if (const json::Value* arr = body.getArray("members")) {
             for (const auto& v : arr->arr) {
+                // Each member is opened as its own reader with a multi-MiB
+                // cache when the job runs; a hostile members array must not
+                // be able to mint unbounded readers.
+                if (layout.disks.size() >= 64) break;
                 RaidMember m;
                 if (v.isObject()) {
                     m.path = v.getStr("path");
@@ -2713,30 +2788,47 @@ int startServer(const ServerConfig& cfg) {
     // session token, kept in the 0700 runtime dir and delivered to the browser
     // as a URL fragment. Without it, any local process could drive the root
     // engine to read or write files it could not reach itself.
+    // Every instance gates the API on a session token, privileged or not.
+    // The unprivileged engine is what hands the browser the handover token
+    // that the elevated instance will demand: without a token here, any
+    // local process could POST /api/elevate, receive that handover token and
+    // later drive the root engine. The token is kept in the 0700 runtime dir
+    // and delivered to the browser as a URL fragment. A root instance that
+    // cannot mint one refuses to run; an unprivileged one logs and continues
+    // (it can already only read what its user can read — the fallback is no
+    // worse than the pre-token behaviour).
     std::string browserPageUrl = "http://localhost:" + std::to_string(cfg.port);
-    if (::getuid() == 0 && g_sessionToken.empty()) {
+    if (g_sessionToken.empty()) {
         std::string token = randomToken();
         if (token.empty()) {
-            fprintf(stderr, "ERROR: no usable system RNG; refusing to run privileged "
-                            "without a session token\n");
-            return 1;
+            if (::getuid() == 0) {
+                fprintf(stderr, "ERROR: no usable system RNG; refusing to run privileged "
+                                "without a session token\n");
+                return 1;
+            }
+            fprintf(stderr, "WARNING: no usable system RNG; running without a session token\n");
+        } else {
+            std::string dir = runtimeDir();
+            std::string tf;
+            if (dir.empty()) {
+                fprintf(stderr, "WARNING: cannot create the runtime directory for the session "
+                                "token\n");
+            } else {
+                tf = joinPath(dir, "session-token");
+                int fd = ::open(tf.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                if (fd < 0 || ::write(fd, token.data(), token.size()) != (ssize_t)token.size()) {
+                    if (fd >= 0) ::close(fd);
+                    tf.clear();
+                    fprintf(stderr, "WARNING: cannot write the session token file\n");
+                } else {
+                    ::close(fd);
+                    g_sessionToken = token;
+                }
+            }
+            if (!g_sessionToken.empty() && ::getuid() == 0)
+                fprintf(stderr, "note: session token written to %s and handed to the browser\n",
+                        tf.c_str());
         }
-        std::string dir = runtimeDir();
-        if (dir.empty()) {
-            fprintf(stderr, "ERROR: cannot create the runtime directory for the session token\n");
-            return 1;
-        }
-        std::string tf = joinPath(dir, "session-token");
-        int fd = ::open(tf.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd < 0 || ::write(fd, token.data(), token.size()) != (ssize_t)token.size()) {
-            if (fd >= 0) ::close(fd);
-            fprintf(stderr, "ERROR: cannot write the session token file\n");
-            return 1;
-        }
-        ::close(fd);
-        g_sessionToken = token;
-        fprintf(stderr, "note: session token written to %s and handed to the browser\n",
-                tf.c_str());
     }
     if (!g_sessionToken.empty()) browserPageUrl += "#tok=" + g_sessionToken;
 

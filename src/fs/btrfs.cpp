@@ -61,7 +61,9 @@ struct BtrfsFs {
 
     i64 toPhysical(u64 logical) const {
         for (const auto& c : chunks) {
-            if (logical >= c.logical && logical < c.logical + c.length)
+            // Subtraction form: c.logical + c.length could wrap u64 with a
+            // hostile key/offset pair.
+            if (logical >= c.logical && logical - c.logical < c.length)
                 return (i64)(c.physical + (logical - c.logical));
         }
         return -1;
@@ -120,6 +122,9 @@ struct BtrfsFs {
                 cm.num_stripes = b.le16(cp + 44);
                 if (cm.num_stripes == 0 || cm.num_stripes > 64) break;
                 cm.physical    = b.le64(cp + 48 + 8);   // stripe[0].offset
+                if (cm.length == 0 || cm.length > (u64)volume ||
+                    cm.physical >= (u64)volume)
+                    break;
                 chunks.push_back(cm);
                 p = cp + 48 + (size_t)cm.num_stripes * 32;
                 (void)keyObj;
@@ -176,6 +181,9 @@ struct BtrfsFs {
                 if (cm.num_stripes == 0 || cm.num_stripes > 64) continue;
                 if (!b.has(cp + 48 + 8, 8)) continue;
                 cm.physical = b.le64(cp + 48 + 8);
+                if (cm.length == 0 || cm.length > (u64)volume ||
+                    cm.physical >= (u64)volume)
+                    continue;
                 bool dup = false;
                 for (const auto& e : chunks) if (e.logical == cm.logical) { dup = true; break; }
                 if (!dup) chunks.push_back(cm);
@@ -302,7 +310,12 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             if ((scanned % (16 * 1024 * 1024)) == 0) prog.set(scanned, totalMetaBytes);
 
             u64 physical = c.physical + off;
-            if ((i64)physical + fs.nodesize > fs.volume) break;
+            // Unsigned bounds: (i64)physical + nodesize would be negative and
+            // slip past a signed check when a hostile chunk maps near 2^63,
+            // turning the sweep into a ~2^48-iteration spin on empty reads.
+            if ((u64)fs.volume <= (u64)fs.nodesize ||
+                physical > (u64)fs.volume - (u64)fs.nodesize)
+                break;
             auto raw = disk.readBlock(physical, fs.nodesize);
             if (raw.size() < kHeaderSize) break;
             Bytes b(raw);
@@ -388,6 +401,12 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         if (extType == 0) {                 // inline
                             u8 compression = b.u8at(dp + 16);
                             u64 ramBytes = b.le64(dp + 8);
+                            // A hostile inline item can claim gigabytes of
+                            // decompressed data; real btrfs inline items are
+                            // a few KiB, so anything past 16 MiB is bogus.
+                            // (Unclamped, the zlib path would inflate up to
+                            // its 512 MiB ceiling per inode.)
+                            if (ramBytes > 16 * 1024 * 1024) break;
                             size_t len = dataLen > 21 ? dataLen - 21 : 0;
                             if (b.has(dp + 21, len) && n.inlineData.empty()) {
                                 std::vector<u8> blob(b.p + dp + 21, b.p + dp + 21 + len);
@@ -440,6 +459,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                             }
                             break;
                         }
+                        // diskBytenr + extOffset can wrap u64 with hostile
+                        // fields; clamp the sum to the volume before mapping.
+                        if (diskBytenr > (u64)fs.volume ||
+                            extOffset > (u64)fs.volume - diskBytenr)
+                            break;
                         i64 phys = fs.toPhysical(diskBytenr + extOffset);
                         if (phys < 0 || phys >= fs.volume) break;
                         // Deduplicate: CoW means the same extent shows up in

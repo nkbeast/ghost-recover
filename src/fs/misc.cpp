@@ -168,6 +168,16 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     fs.dir_table    = b.le64(72);
     fs.frag_table   = b.le64(80);
 
+    // block_size divides file sizes in the directory walk below; a zero or
+    // bogus value from a damaged superblock would SIGFPE the whole process.
+    // SquashFS block sizes are powers of two between 4 KiB and 1 MiB.
+    if (fs.block_size < 4096 || fs.block_size > (1u << 20) ||
+        (fs.block_size & (fs.block_size - 1)) != 0) {
+        res.ok = false;
+        res.error = "implausible SquashFS block size";
+        return res;
+    }
+
     res.ok = true;
     res.block_size = fs.block_size;
     res.total_inodes = fs.inodes;
@@ -552,7 +562,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             auto nameBuf = disk.readBlock(off + 16, 256);
             for (size_t i = 0; i < nameBuf.size() && nameBuf[i]; i++) name += (char)nameBuf[i];
             u32 namePadded = (u32)((name.size() + 1 + 15) & ~size_t(15));
-            u32 dataOff = off + 16 + namePadded;
+            u64 dataOff = (u64)off + 16 + namePadded;
 
             if (!name.empty() && name != "." && name != "..") {
                 std::string path = cur.path + "/" + name;
@@ -571,7 +581,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     case 2:                                  // regular file
                         f.kind = FileKind::Regular;
                         if (size && (i64)dataOff < volume)
-                            f.extents.push_back(Extent(dataOff, size));
+                            f.extents.push_back(Extent((i64)dataOff, size));
                         break;
                     case 3:                                  // symlink
                         f.kind = FileKind::Symlink;
@@ -626,7 +636,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     u32 zmapBlocks = (version == 3) ? b.le16(8) : b.le16(6);
     u32 firstData  = (version == 3) ? b.le16(10) : b.le16(8);
     u32 nzones     = (version >= 2) ? b.le32(20) : b.le16(2);
-    if (ninodes == 0 || imapBlocks == 0) {
+    if (ninodes == 0 || imapBlocks == 0 || (u64)ninodes > (u64)volume / 16 + 1) {
         res.ok = false;
         res.error = "implausible MINIX superblock";
         return res;
@@ -654,7 +664,8 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
 
     prog.setPhase("reading MINIX inodes");
     const u32 perRead = 256;
-    for (u32 i = 0; i < ninodes; i += perRead) {
+    for (u32 i = 0; i < ninodes && (i64)inodes.size() < (i64)opt.max_files * 2;
+         i += perRead) {
         if (prog.cancelled()) break;
         u32 count = std::min(perRead, ninodes - i);
         auto buf = disk.readBlock(inodeTable + (u64)i * inodeSize, (i64)count * inodeSize);
@@ -995,6 +1006,16 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         res.error = "implausible UFS superblock geometry";
         return res;
     }
+    // A real volume can never have more cylinder groups than it has frags
+    // (makefs geometries can describe a larger design size than the image,
+    // so the per-group frag count is NOT bounded by the volume — but the
+    // group count is). Unbounded ncg/ipg from a hostile superblock would
+    // spin the cylinder-group loop for billions of empty groups.
+    if (ncg > (u32)((u64)volume / fsize) + 1 || ipg > (1u << 20)) {
+        res.ok = false;
+        res.error = "implausible UFS cylinder-group geometry";
+        return res;
+    }
     res.ok = true;
     res.block_size = bsize;
     res.total_inodes = (i64)ipg * ncg;
@@ -1021,6 +1042,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         prog.set(c, ncg);
         u64 itableFrag = cgstart(c) + iblkno;
         u64 itableOff = itableFrag * fsize;
+        if (itableOff >= (u64)volume) break;   // groups past the disk end
         for (u32 i = 0; i < ipg; i += 128) {
             u32 count = std::min<u32>(128, ipg - i);
             auto buf = disk.readBlock(itableOff + (u64)i * dinodeSize, (i64)count * dinodeSize);
@@ -1583,12 +1605,15 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
     };
 
-    for (i64 base = 0; base < limit && !prog.cancelled(); base += chunkSize) {
+    for (i64 base = 0;
+         base < limit && dinodes.size() < (size_t)opt.max_files * 2 && !prog.cancelled();
+         base += chunkSize) {
         prog.set(base, limit);
         auto chunk = disk.readBlock((u64)base, std::min(chunkSize, limit - base));
         if (chunk.empty()) break;
         Bytes cb(chunk);
         for (size_t p = 0; p + 512 <= chunk.size(); p += 512) {
+            if (dinodes.size() >= (size_t)opt.max_files * 2) break;
             u32 inostamp = cb.le32(p + 0);
             u32 fileset  = cb.le32(p + 4);
             u32 number   = cb.le32(p + 8);

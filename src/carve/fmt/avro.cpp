@@ -19,12 +19,15 @@ i64 vAvro(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     auto sync0 = s.read(off + 4, 16);
     if (sync0.size() < 16) return -1;
     auto varint = [&](i64& at) -> i64 {
-        i64 v = 0, shift = 0;
+        u64 v = 0;
+        int shift = 0;
         for (int i = 0; i < 10; i++) {
             if (at >= off + max) return -1;
             u8 b = s.byte(at++);
-            v |= (i64)(b & 0x7F) << shift;
-            if (!(b & 0x80)) return v;
+            // Unsigned accumulation: shift 63 on a hostile high byte would
+            // otherwise be signed-overflow UB.
+            v |= (u64)(b & 0x7F) << shift;
+            if (!(b & 0x80)) return (i64)v;
             shift += 7;
         }
         return -1;

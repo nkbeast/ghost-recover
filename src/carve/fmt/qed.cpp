@@ -67,22 +67,24 @@ i64 vQed(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     for (i64 i = 0; i < entries; i++) {
         auto e = s.read(l1Abs + i * 8, 8);
         if (e.size() < 8) break;
-        i64 v = 0;
-        for (int k = 0; k < 8; k++) v |= (i64)e[k] << (8 * k);
-        if (v == 0) continue;
-        if (v < headerEnd || v % cluster != 0) return -1;
-        if (off + v + (i64)tableSize * cluster > off + max) return -1;
-        const i64 l2Abs = off + v;
+        u64 v = 0;
+        for (int k = 0; k < 8; k++) v |= (u64)e[k] << (8 * k);
+        i64 vv = (i64)v;
+        if (vv == 0) continue;
+        if (vv < headerEnd || vv % cluster != 0) return -1;
+        if (off + vv + (i64)tableSize * cluster > off + max) return -1;
+        const i64 l2Abs = off + vv;
         end = std::max(end, l2Abs + (i64)tableSize * cluster);      // L2 table span
         for (i64 j = 0; j < entries; j++) {
             auto e2 = s.read(l2Abs + j * 8, 8);
             if (e2.size() < 8) break;
-            i64 v2 = 0;
-            for (int k = 0; k < 8; k++) v2 |= (i64)e2[k] << (8 * k);
-            if (v2 == 0) continue;
-            if (v2 < headerEnd || v2 % cluster != 0) return -1;
-            if (off + v2 + cluster > off + max) return -1;
-            end = std::max(end, off + v2 + cluster);                 // data cluster
+            u64 v2 = 0;
+            for (int k = 0; k < 8; k++) v2 |= (u64)e2[k] << (8 * k);
+            i64 vv2 = (i64)v2;
+            if (vv2 == 0) continue;
+            if (vv2 < headerEnd || vv2 % cluster != 0) return -1;
+            if (off + vv2 + cluster > off + max) return -1;
+            end = std::max(end, off + vv2 + cluster);                 // data cluster
         }
     }
     return end - off;

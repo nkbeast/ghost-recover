@@ -599,7 +599,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     if (opt.orphans && !prog.cancelled() && filesFound < opt.max_files) {
         prog.setPhase("scanning for orphaned chains");
         std::unordered_set<u64> chainStarts;
-        for (u64 c = 2; c < fs.cluster_count + 2 && (i64)chainStarts.size() < 200000; c++) {
+        // The scan is capped like the bad-cluster pass below (2^26) and
+        // cancellable: a freshly-zeroed FAT of a hostile 4.3e9-cluster volume
+        // would otherwise spin for minutes without ever filling the set.
+        for (u64 c = 2; c < fs.cluster_count + 2 && c < (1ull << 26) &&
+             (i64)chainStarts.size() < 200000 && !prog.cancelled(); c++) {
             u32 e = fs.fatEntry(fs.fat1, c);
             if (e == 0 || fs.isBad(e)) continue;
             if (referencedClusters.count(c)) continue;

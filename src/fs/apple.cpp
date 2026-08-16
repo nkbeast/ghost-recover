@@ -569,6 +569,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     u64 len = lenAndFlags & 0x00FFFFFFFFFFFFFFull;
                     u64 physBlock = b.le64(vp + 8);
                     if (len == 0 || physBlock == 0) continue;
+                    // physBlock * blockSize wraps u64 for huge block numbers;
+                    // reject anything beyond the volume before multiplying.
+                    if (physBlock > (u64)(volume / blockSize)) continue;
                     i64 off = (i64)(physBlock * blockSize);
                     if (off < 0 || off >= volume) continue;
                     if (objs.find(oid) == objs.end() &&

@@ -19,15 +19,17 @@ namespace ghost {
 // byte carries the least significant bits). Returns the byte length
 // consumed and stores the value; 0 on malformed input.
 static int xzVint(const u8* b, size_t n, i64* out) {
-    i64 v = 0;
+    u64 v = 0;
     size_t i = 0;
     for (; i < n && i < 9; i++) {
         if (i == 8) return 0;
-        v |= (i64)(b[i] & 0x7F) << (7 * i);
+        // Unsigned accumulation: the top 7-bit group can reach shift 49,
+        // which would be signed-overflow UB on a hostile byte.
+        v |= (u64)(b[i] & 0x7F) << (7 * i);
         if ((b[i] & 0x80) == 0) break;
     }
     if (i >= n || (b[i] & 0x80) != 0) return 0;
-    *out = v;
+    *out = (i64)v;
     return (int)i + 1;
 }
 

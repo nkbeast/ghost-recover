@@ -254,7 +254,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.name = n.name.empty() ? ("inode_" + std::to_string(ino)) : n.name;
         f.parent_id = n.pino;
         f.size = (i64)n.size;
-        f.alloc_size = (i64)n.blocks * sb.blocksize;
+        f.alloc_size = (i64)std::min<u64>(n.blocks * (u64)sb.blocksize, (u64)INT64_MAX);
         f.uid = n.uid; f.gid = n.gid; f.mode = n.mode & 0x0FFF;
         f.nlink = n.links;
         f.mtime = n.mtime; f.atime = n.atime; f.ctime = n.ctime;

@@ -246,8 +246,16 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             f.method = "extent_data_recovery";
             i64 fo = (i64)r.lba * kSector;
             if (fo >= 0 && fo < volume && r.size > 0) f.extents.push_back(Extent(fo, r.size));
-            for (u64 s = r.lba; s < (u64)r.lba + (r.size + kSector - 1) / kSector; s++)
-                claimed.insert(s);
+            // A disk u32 file size must not mint an unbounded claimed-sector
+            // set: clamp the span to what is actually on the volume and cap
+            // the total so a hostile tree cannot balloon RAM.
+            const u64 kMaxClaimed = 20ull * 1000 * 1000;
+            if (claimed.size() < kMaxClaimed && fo >= 0 && fo < volume) {
+                u64 span = (u64)std::min<i64>(r.size, volume - fo);
+                u64 sEnd = r.lba + (span + kSector - 1) / kSector;
+                for (u64 s = r.lba; s < sEnd && claimed.size() < kMaxClaimed; s++)
+                    claimed.insert(s);
+            }
             finalizeFile(f, volume);
             if (!pushFile(res, std::move(f), opt)) break;
         }

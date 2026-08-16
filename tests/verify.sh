@@ -477,18 +477,30 @@ if command -v curl >/dev/null; then
   "$BIN" --port "$PORT" --no-browser > "$WORK/server.log" 2>&1 &
   SRV=$!
   sleep 0.7
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/health" || true)
+  # Every engine mints a session token (0600 file in the runtime dir) and the
+  # API refuses unauthenticated callers — authenticate like the browser does.
+  # When the file is missing (the fail-open non-root fallback), the API stays
+  # open and the plain curls below keep working.
+  TOKEN=""
+  for tf in "$XDG_RUNTIME_DIR/ghost-recover-$(id -u)/session-token" \
+            "/tmp/ghost-recover-$(id -u)/session-token"; do
+    [ -f "$tf" ] && TOKEN=$(cat "$tf" 2>/dev/null) && break
+  done
+  AUTH=()
+  [ -n "$TOKEN" ] && AUTH=(-H "X-Ghost-Token: $TOKEN")
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
+         "http://127.0.0.1:$PORT/api/health" || true)
   [ "$code" = 200 ] && ok "health endpoint answers 200" || bad "health endpoint answered $code"
-  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://evil.example' \
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -H 'Origin: http://evil.example' \
          "http://127.0.0.1:$PORT/api/health" || true)
   [ "$code" = 403 ] && ok "cross-origin requests are refused with 403" \
                     || bad "cross-origin request answered $code"
-  code=$(curl -s -o /dev/null -w '%{http_code}' \
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
          "http://127.0.0.1:$PORT/api/hex?job=missing&index=0&offset=999999999999&length=16" || true)
   [ "$code" = 404 ] && ok "out-of-range hex-view requests are refused" \
                     || bad "out-of-range hex request answered $code"
   if [ -f "$IMG/ext4.img" ]; then
-    resp=$(curl -s -X POST "http://127.0.0.1:$PORT/api/scan" \
+    resp=$(curl -s "${AUTH[@]}" -X POST "http://127.0.0.1:$PORT/api/scan" \
            -H 'Content-Type: application/json' \
            -d "{\"path\":\"$IMG/ext4.img\",\"deep\":false,\"journal\":false,\"slack\":false,\"orphans\":false}" || true)
     jid=$(printf '%s' "$resp" | sed -n 's/.*"job":"\([^"]*\)".*/\1/p')
@@ -497,7 +509,7 @@ if command -v curl >/dev/null; then
     else
       state=starting
       for _ in $(seq 1 60); do
-        s=$(curl -s "http://127.0.0.1:$PORT/api/job?id=$jid" || true)
+        s=$(curl -s "${AUTH[@]}" "http://127.0.0.1:$PORT/api/job?id=$jid" || true)
         state=$(printf '%s' "$s" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
         [ "$state" = done ] || [ "$state" = failed ] && break
         sleep 0.5
@@ -519,13 +531,13 @@ if command -v curl >/dev/null; then
     || bad "refused takeover did not exit cleanly (rc=$rc)"
   # The engine must stop on request (UI "Shut down" button) and release the
   # port so a later start binds cleanly.
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -X POST \
          "http://127.0.0.1:$PORT/api/shutdown" || true)
   [ "$code" = 200 ] && ok "/api/shutdown accepts the request" \
                     || bad "/api/shutdown answered $code"
   gone=no
   for _ in $(seq 1 50); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' \
+    code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
            "http://127.0.0.1:$PORT/api/health" || true)
     [ "$code" != 200 ] && { gone=yes; break; }
     sleep 0.1
@@ -550,6 +562,10 @@ if command -v curl >/dev/null; then
   "$BIN" --port "$PORT" --no-browser > "$WORK/server2.log" 2>&1 &
   SRV2=$!
   sleep 0.7
+  # The second engine rewrote the session-token file with its own token;
+  # refresh the credential before talking to it.
+  [ -n "$TOKEN" ] && TOKEN=$(cat "${XDG_RUNTIME_DIR:-/tmp}/ghost-recover-$(id -u)/session-token" 2>/dev/null) \
+                  && AUTH=(-H "X-Ghost-Token: $TOKEN")
   "$BIN" --port "$PORT" --no-browser > "$WORK/server3.log" 2>&1
   rc=$?
   [ "$rc" -eq 0 ] && grep -q "already running" "$WORK/server3.log" \
@@ -557,7 +573,7 @@ if command -v curl >/dev/null; then
     || bad "second start did not reconnect (rc=$rc): $(tr '\n' ' ' < "$WORK/server3.log")"
   kill -0 "$SRV2" 2>/dev/null && ok "the original engine kept serving" \
                               || bad "the original engine died"
-  code=$(curl -s -o /dev/null -w '%{http_code}' \
+  code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" \
          "http://127.0.0.1:$PORT/api/health" || true)
   [ "$code" = 200 ] && ok "health still answers after reconnect" \
                     || bad "health answered $code after reconnect"
