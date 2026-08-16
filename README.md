@@ -77,6 +77,9 @@ at your core count) instead of using every core at once. A first full build on a
 laptop with a naive `cmake --build build -j` can exhaust memory and freeze the system —
 the heavy translation units parse a large single-header HTTP library — so contributors
 should use the script. Override with `JOBS=8 ./scripts/build.sh` or `./scripts/build.sh -j8`.
+Sanitizer builds (ASan/UBSan — each instrumented translation unit needs 1-2 GiB, so they
+are strictly opt-in) are built with `./scripts/build.sh --sanitize` into `build-san` with
+halved parallelism.
 Manual steps, for those who prefer them:
 
 ```sh
