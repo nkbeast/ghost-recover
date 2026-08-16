@@ -15,15 +15,36 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")
 # index the project with correct include paths and compiler flags.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# A Debug build turns on the sanitizers. This tool parses hostile on-disk
-# structures for a living, so being able to run the test suite under ASan/UBSan
-# is worth keeping wired up. The flags have to reach the link line too, or the
-# ASan runtime is not first in the library list and the binary refuses to run.
+# A Debug build stays lightweight: instrumented translation units need 1-2 GiB
+# each, so sanitizers are STRICTLY opt-in via -DGHOST_SANITIZE=ON. Any
+# contributor building Debug (or Release) must get a build that fits a modest
+# machine no matter how many cores they hand the compiler.
 option(GHOST_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 option(GHOST_BUILD_TESTS "Build lightweight unit tests" ON)
-if(GHOST_SANITIZE OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+if(GHOST_SANITIZE)
     add_compile_options(-fsanitize=address,undefined)
     add_link_options(-fsanitize=address,undefined)
+    # -O0 keeps the instrumented compiles at their lowest memory footprint;
+    # the sanitizers exist to find bugs, not to measure performance. The
+    # flags have to reach the link line too, or the ASan runtime is not first
+    # in the library list and the binary refuses to run.
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fno-omit-frame-pointer")
+endif()
+
+# Parallelism is bounded by the build wrapper, not here: a naive
+# `cmake --build build -j$(nproc)` compiles every translation unit at once,
+# and the heavy units can exhaust RAM and freeze a modest machine before the
+# OOM killer reacts. `scripts/build.sh` sizes the job count from the machine's
+# RAM (≈1 job per 2 GiB, halved for sanitizer builds) — use it for first
+# builds, or pass a small -j yourself. Sanitizer builds are memory-hungry by
+# design and are capped even harder there.
+cmake_host_system_information(RESULT _sys_mem_mb QUERY TOTAL_PHYSICAL_MEMORY)
+if(GHOST_SANITIZE AND _sys_mem_mb LESS 6144)
+    message(WARNING
+        "This machine has only ${_sys_mem_mb} MB of RAM and the sanitizer "
+        "build is memory-hungry. Expect a slow build; if the machine "
+        "struggles, build with `cmake --build . -j1` or drop "
+        "-DGHOST_SANITIZE=ON for a normal build.")
 endif()
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)

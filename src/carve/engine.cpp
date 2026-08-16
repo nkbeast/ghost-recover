@@ -232,8 +232,11 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         for (const auto& r : win)
             for (i64 o = 0; o < r.length; o += kUnit)
                 units.push_back({r.offset + o, std::min(kUnit, r.length - o)});
-        if ((int)units.size() < threads) threads = std::max(1, (int)units.size());
-        const int winThreads = threads;
+        // The thread count is per window: a small window (or a deep job whose
+        // regions arrive as scattered pieces) must not permanently shrink the
+        // pool for the larger windows that follow.
+        int winThreads = threads;
+        if ((int)units.size() < winThreads) winThreads = std::max(1, (int)units.size());
 
         std::vector<Candidate> candidates;
         std::mutex candMutex;
@@ -366,7 +369,7 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
         for (int i = 0; i < winThreads; i++) pool.emplace_back(worker);
         for (auto& t : pool) t.join();
     }
-    if (getenv("GHOST_DEBUG_CARVE")) {
+    if (getenv("GHOST_DEBUG_CARVE") && !win.empty()) {
         i64 wlen = 0;
         for (const auto& e : win) wlen += e.length;
         fprintf(stderr, "[carve] done pass1: win=[%lld,%lld) len=%lld candidates=%zu skipped-by-scan=%lld overflow=%d\n",
