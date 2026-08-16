@@ -1179,7 +1179,8 @@ def make_mobi(_):
     rec0[0:8] = b'TEXtREAd'
     rec0[8:240] = junk(232)
     out[512:752] = bytes(rec0)
-    return bytes(out) + nonzero(junk(400))
+    rec1 = b'FLIS' + u32be(392) + junk(392)
+    return bytes(out) + rec1
 
 
 def make_chm(_):
