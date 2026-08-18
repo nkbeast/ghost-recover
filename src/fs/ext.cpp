@@ -18,6 +18,7 @@
 #include "ghost/util.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <map>
 #include <set>
@@ -342,7 +343,9 @@ struct ExtFs {
             walkExtents(ib, 0, raw, logicalEnd, 0, seen);
         } else {
             Bytes ib(in.iblock, 60);
-            u64 maxBlocks = (in.size + block_size - 1) / block_size;
+            // Division form: a hostile 8-byte i_size near 2^64 wraps the
+            // addend and under-caps the walk.
+            u64 maxBlocks = in.size / block_size + (in.size % block_size ? 1 : 0);
             if (maxBlocks == 0) maxBlocks = in.blocks512 / (block_size / 512 ? block_size / 512 : 1);
             if (maxBlocks > 1u << 24) maxBlocks = 1u << 24;
             u64 count = 0;
@@ -666,20 +669,38 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             auto hits = mapJournal(fs, jext, prog);
             res.bump("journal_blocks_mapped", (i64)hits.size());
 
-            // Which filesystem blocks belong to an inode table?
-            auto inodeForBlock = [&](u64 blk, u32& groupOut, u64& firstInoOut) -> bool {
-                u64 tableBlocks = ((u64)fs.inodes_per_group * fs.inode_size + fs.block_size - 1) /
-                                  fs.block_size;
+            // Which filesystem blocks belong to an inode table? The naive
+            // per-hit linear scan over every group is O(hits * groups): a
+            // hostile superblock (millions of groups) plus a crafted journal
+            // (millions of tags) would stall the scan. Sort the table ranges
+            // once and binary-search instead.
+            std::vector<std::array<u64, 3>> tables;   // start, end, group
+            tables.reserve(fs.groups);
+            {
+                u64 tableBlocks = ((u64)fs.inodes_per_group * fs.inode_size +
+                                   fs.block_size - 1) / fs.block_size;
                 for (u32 g = 0; g < fs.groups; g++) {
                     u64 start = fs.inode_table[g];
                     if (start == 0) continue;
-                    if (blk >= start && blk < start + tableBlocks) {
+                    tables.push_back({start, start + tableBlocks, g});
+                }
+                std::sort(tables.begin(), tables.end(),
+                          [](const auto& a, const auto& b) { return a[0] < b[0]; });
+            }
+            auto inodeForBlock = [&](u64 blk, u32& groupOut, u64& firstInoOut) -> bool {
+                size_t lo = 0, hi = tables.size();
+                while (lo < hi) {
+                    size_t mid = (lo + hi) / 2;
+                    if (tables[mid][0] <= blk && blk < tables[mid][1]) {
+                        u32 g = (u32)tables[mid][2];
+                        u64 blockIdx = blk - tables[mid][0];
                         groupOut = g;
-                        u64 blockIdx = blk - start;
                         firstInoOut = (u64)g * fs.inodes_per_group +
                                       (blockIdx * fs.block_size) / fs.inode_size + 1;
                         return true;
                     }
+                    if (blk < tables[mid][0]) hi = mid;
+                    else lo = mid + 1;
                 }
                 return false;
             };

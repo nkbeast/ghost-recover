@@ -45,6 +45,18 @@ struct Run {
     i64  clusters = 0;
 };
 
+// Sum of run lengths in bytes, saturated: a crafted run list with thousands
+// of near-volume-sized runs overflows i64 (UB) before any cap downstream.
+i64 runBytesSaturated(const std::vector<Run>& runs, u32 clusterSize) {
+    i64 total = 0;
+    for (const auto& r : runs) {
+        if (r.clusters > 0 && r.clusters > (INT64_MAX - total) / (i64)clusterSize)
+            return INT64_MAX;
+        total += r.clusters * (i64)clusterSize;
+    }
+    return total;
+}
+
 // Decodes an NTFS runlist. Each element is a header byte whose nibbles give the
 // widths of the following length and offset fields; the offset is a *signed*
 // delta from the previous run's LCN, which is why it must be sign-extended.
@@ -71,6 +83,10 @@ std::vector<Run> decodeRunlist(const Bytes& b, size_t off, i64 maxClusters) {
         } else {
             i64 delta = b.sle(p, offLen);
             p += offLen;
+            // Deltas are signed and up to 8 bytes wide: two large offsets in a
+            // row can overflow the accumulator (UB) before the < 0 reject.
+            if (delta > 0 && lcn > INT64_MAX - delta) break;
+            if (delta < 0 && lcn < INT64_MIN - delta) break;
             lcn += delta;
             if (lcn < 0) break;
             runs.push_back({lcn, length});
@@ -319,8 +335,7 @@ struct NtfsFs {
             for (const auto& a : r.attrs) {
                 if (a.type == kAttrData && a.name.empty() && a.nonresident && !a.runs.empty()) {
                     mft_runs = a.runs;
-                    i64 bytes = 0;
-                    for (const auto& run : mft_runs) bytes += run.clusters * (i64)cluster_size;
+                    i64 bytes = runBytesSaturated(mft_runs, cluster_size);
                     mft_records = (u64)(bytes / record_size);
                     return mft_records > 0;
                 }
@@ -370,8 +385,7 @@ struct NtfsFs {
                 i64 avail = volume - off;
                 mft_runs = {Run{off / (i64)cluster_size, avail / (i64)cluster_size}};
             }
-            i64 bytes = 0;
-            for (const auto& run : mft_runs) bytes += run.clusters * (i64)cluster_size;
+            i64 bytes = runBytesSaturated(mft_runs, cluster_size);
             mft_records = (u64)(bytes / record_size);
             res.bump("mft_found_by_scan_at", off);
             return mft_records > 0;
@@ -764,8 +778,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         size_t entryEnd = 16 + b.le32(20);
                         parseIndexEntries(a.value, entryOff, std::min(entryEnd, a.value.size()), emit);
                     } else if (a.type == kAttrIndexAlloc && a.name == "$I30" && !a.runs.empty()) {
-                        i64 total = 0;
-                        for (const auto& run : a.runs) total += run.clusters * (i64)fs.cluster_size;
+                        i64 total = runBytesSaturated(a.runs, fs.cluster_size);
                         total = std::min<i64>(total, 16LL * 1024 * 1024);
                         for (i64 off = 0; off + fs.index_size <= total; off += fs.index_size) {
                             auto blk = fs.readRuns(a.runs, off, fs.index_size);
@@ -816,8 +829,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 Record r = fs.parseRecord(std::move(raw));
                 for (const auto& a : r.attrs) {
                     if (a.type != kAttrData || a.name != "$J" || a.runs.empty()) continue;
-                    i64 total = 0;
-                    for (const auto& run : a.runs) total += run.clusters * (i64)fs.cluster_size;
+                    i64 total = runBytesSaturated(a.runs, fs.cluster_size);
                     i64 cap = std::min<i64>(total, 256LL * 1024 * 1024);
                     const i64 step = 4LL * 1024 * 1024;
                     for (i64 off = std::max<i64>(0, total - cap); off < total && !prog.cancelled();
