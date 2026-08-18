@@ -10,6 +10,42 @@
 #   ./tests/verify.sh /path/to/fixtures   reuse a previously built fixture set
 set -uo pipefail
 
+# When the harness itself is running under a sanitizer preload (typically
+# LD_PRELOAD=libasan.so from an outer ASan run), re-exec this script with the
+# preload stripped: bash and the helper tools (/usr/bin/dd, mkfs.*) are not
+# instrumented, and the allocator intercept kills them. The preload is
+# remembered so the engine binary below still runs fully instrumented.
+if [ -z "${GHOST_REEXEC:-}" ] && [ -n "${LD_PRELOAD:-}" ]; then
+  GHOST_REEXEC=1 \
+  GHOST_SAN_PRELOAD="$LD_PRELOAD" \
+  GHOST_SAN_OPTS="${ASAN_OPTIONS:-}" \
+  GHOST_SAN_UOPTS="${UBSAN_OPTIONS:-}" \
+  exec env -u LD_PRELOAD -u ASAN_OPTIONS -u UBSAN_OPTIONS bash "$0" "$@"
+fi
+
+# Run the engine binary, re-applying the sanitizer environment that the
+# harness re-exec stripped from itself. `exec` keeps $! equal to the engine's
+# PID, so the script's kill/wait bookkeeping stays exact.
+runbin() {
+  if [ -n "${GHOST_SAN_PRELOAD:-}" ]; then
+    exec env LD_PRELOAD="$GHOST_SAN_PRELOAD" ASAN_OPTIONS="$GHOST_SAN_OPTS" \
+        UBSAN_OPTIONS="$GHOST_SAN_UOPTS" "$@"
+  fi
+  exec "$@"
+}
+
+# Like timeout(1), but the engine keeps the sanitizer env the harness was
+# stripped of (env(1) execs the engine, so timeout still kills the engine).
+engine_timeout() {
+  local t="$1"; shift
+  if [ -n "${GHOST_SAN_PRELOAD:-}" ]; then
+    timeout "$t" env LD_PRELOAD="$GHOST_SAN_PRELOAD" ASAN_OPTIONS="$GHOST_SAN_OPTS" \
+        UBSAN_OPTIONS="$GHOST_SAN_UOPTS" "$@"
+  else
+    timeout "$t" env "$@"
+  fi
+}
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 BIN="${GHOST_BIN:-$ROOT/build/ghost_recover}"
@@ -37,8 +73,8 @@ head2() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 # ---------------------------------------------------------------- codec selftest
 head2 "Codec selftest (embedded vectors)"
-if "$BIN" selftest >/dev/null 2>&1; then ok "lzo1x/lznt1/btrfs-lzo/zlib/zstd vectors decode"
-else bad "selftest failed: $("$BIN" selftest 2>&1 | tr '\n' ' ')"; fi
+if ( runbin "$BIN" selftest ) >/dev/null 2>&1; then ok "lzo1x/lznt1/btrfs-lzo/zlib/zstd vectors decode"
+else bad "selftest failed: $( runbin "$BIN" selftest 2>&1 | tr '\n' ' ')"; fi
 
 # Reference hashes, keyed by basename (layouts differ per filesystem).
 ( cd "$SRC" && find . -type f -exec md5sum {} \; ) \
@@ -72,7 +108,7 @@ declare -A EXPECT=(
 )
 for fs in "${!EXPECT[@]}"; do
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
-  got=$("$BIN" detect "$IMG/$fs.img" 2>/dev/null | awk '/^Filesystem/{print $3}')
+  got=$( runbin "$BIN" detect "$IMG/$fs.img" 2>/dev/null | awk '/^Filesystem/{print $3}')
   if [ "$got" = "${EXPECT[$fs]}" ]; then ok "$fs identified as $got"
   else bad "$fs identified as '${got:-nothing}', expected ${EXPECT[$fs]}"; fi
 done
@@ -90,7 +126,7 @@ for pair in "ext4:expected.md5" "ext2:expected.md5" "ntfs:expected.md5" "fat32:e
   out="$WORK/out-$fs"
   # The UDF fixture is a hybrid image that is also ISO 9660; name the driver.
   forcefs=""; [ "$fs" = udf ] && forcefs="--fs udf"
-  "$BIN" recover "$IMG/$fs.img" $forcefs --out "$out" >/dev/null 2>&1
+  ( runbin "$BIN" recover "$IMG/$fs.img" $forcefs --out "$out" ) >/dev/null 2>&1
   ( cd "$out" 2>/dev/null && find . -type f ! -name 'ghost-manifest.*' -exec md5sum {} \; ) 2>/dev/null \
     | awk '{n=$2; sub(/.*\//,"",n); print $1, n}' | sort > "$WORK/got-$fs.md5"
   want=$(wc -l < "$exp")
@@ -107,12 +143,12 @@ head2 "Deleted-file recovery"
 for pair in "ext4-deleted:ext4" "fat32-deleted:fat32"; do
   img="${pair%%:*}"; label="${pair##*:}"
   [ -f "$IMG/$img.img" ] || { skip "$label deleted files (no fixture)"; continue; }
-  n=$("$BIN" scan "$IMG/$img.img" --deleted --limit 50 2>/dev/null | grep -c '^deleted')
+  n=$( runbin "$BIN" scan "$IMG/$img.img" --deleted --limit 50 2>/dev/null | grep -c '^deleted')
   if [ "$n" -ge 3 ]; then ok "$label: $n deleted file(s) found"
   else bad "$label: found $n deleted files, expected 3"; fi
 
   out="$WORK/del-$label"
-  "$BIN" recover "$IMG/$img.img" --out "$out" >/dev/null 2>&1
+  ( runbin "$BIN" recover "$IMG/$img.img" --out "$out" ) >/dev/null 2>&1
   good=0
   for f in report.pdf photo.jpg contacts.sqlite; do
     want=$(find "$SRC" -name "$f" | head -1)
@@ -131,7 +167,7 @@ done
 head2 "Signature carving"
 if [ -f "$IMG/ext4-deleted.img" ]; then
   out="$WORK/carve"
-  "$BIN" carve "$IMG/ext4-deleted.img" --out "$out" >/dev/null 2>&1
+  ( runbin "$BIN" carve "$IMG/ext4-deleted.img" --out "$out" ) >/dev/null 2>&1
   ( cd "$out" && find . -type f -exec md5sum {} \; ) 2>/dev/null | awk '{print $1}' | sort -u > "$WORK/carved.md5"
   awk '{print $1}' "$WORK/expected.md5" | sort -u > "$WORK/srchash.md5"
   n=$(comm -12 "$WORK/carved.md5" "$WORK/srchash.md5" | wc -l)
@@ -169,7 +205,7 @@ open(sys.argv[1], 'wb').write(img)
 json.dump(expect, open(sys.argv[1] + '.expect', 'w'))
 print()
 PY
-"$BIN" carve "$WORK/cfmt.bin" --out "$WORK/cfmt-out" >/dev/null 2>&1
+( runbin "$BIN" carve "$WORK/cfmt.bin" --out "$WORK/cfmt-out" ) >/dev/null 2>&1
 for name in multi.gz data.bz2 data.xz; do
   want=$(python3 -c "import json;print(json.load(open('$WORK/cfmt.bin.expect'))['$name'])")
   got=$(find "$WORK/cfmt-out" -type f -exec md5sum {} \; 2>/dev/null | awk '{print $1}' | grep -cx "$want")
@@ -180,11 +216,11 @@ done
 # --------------------------------------------------------------- partitions
 head2 "Partition tables"
 if [ -f "$IMG/disk-gpt.img" ]; then
-  n=$("$BIN" parts "$IMG/disk-gpt.img" 2>/dev/null | grep -cE '^[0-9]+ +[0-9]+')
+  n=$( runbin "$BIN" parts "$IMG/disk-gpt.img" 2>/dev/null | grep -cE '^[0-9]+ +[0-9]+')
   if [ "$n" -eq 2 ]; then ok "GPT: both partitions listed"; else bad "GPT: listed $n partitions, expected 2"; fi
   # The human-readable size column contains a space, so match on content
   # rather than a fixed field index.
-  listing=$("$BIN" parts "$IMG/disk-gpt.img" 2>/dev/null)
+  listing=$( runbin "$BIN" parts "$IMG/disk-gpt.img" 2>/dev/null)
   if echo "$listing" | grep -q 'ext4' && echo "$listing" | grep -q 'fat32'; then
     ok "GPT: ext4 and fat32 detected inside the partitions"
   else
@@ -194,7 +230,7 @@ if [ -f "$IMG/disk-gpt.img" ]; then
 else skip "GPT (no fixture)"; fi
 
 if [ -f "$IMG/disk-mbr.img" ]; then
-  listing=$("$BIN" parts "$IMG/disk-mbr.img" 2>/dev/null)
+  listing=$( runbin "$BIN" parts "$IMG/disk-mbr.img" 2>/dev/null)
   # 1 primary + 1 extended container + 2 logical partitions inside it.
   n=$(echo "$listing" | grep -cE '^[0-9]+ +[0-9]+')
   if [ "$n" -eq 4 ]; then ok "MBR: primary, extended and both logical partitions listed"
@@ -205,7 +241,7 @@ if [ -f "$IMG/disk-mbr.img" ]; then
 else skip "MBR logical partitions (no fixture)"; fi
 
 if [ -f "$IMG/disk-gpt-wiped.img" ]; then
-  rec=$("$BIN" parts "$IMG/disk-gpt-wiped.img" --deep 2>/dev/null | grep -c 'signature scan')
+  rec=$( runbin "$BIN" parts "$IMG/disk-gpt-wiped.img" --deep 2>/dev/null | grep -c 'signature scan')
   if [ "$rec" -ge 2 ]; then ok "both partitions recovered after wiping every GPT copy"
   else bad "recovered $rec partitions from the wiped disk, expected 2"; fi
 else skip "deleted-partition recovery (no fixture)"; fi
@@ -215,7 +251,7 @@ head2 "RAID reconstruction"
 if [ -d "$IMG/raid-filled" ]; then
   # Members deliberately supplied in the wrong order.
   out="$WORK/raid0.img"
-  info=$("$BIN" raid "$IMG/raid-filled/member1.img" "$IMG/raid-filled/member0.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid-filled/member1.img" "$IMG/raid-filled/member0.img" \
          --out "$out" 2>/dev/null)
   chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
   if [ "$chunk" = "65536" ]; then ok "RAID 0 geometry recovered from the data alone (64 KiB chunks)"
@@ -226,7 +262,7 @@ else skip "RAID 0 (no fixture)"; fi
 
 if [ -d "$IMG/raid5-filled" ]; then
   out="$WORK/raid5.img"
-  info=$("$BIN" raid "$IMG/raid5-filled/member0.img" "$IMG/raid5-filled/member1.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid5-filled/member0.img" "$IMG/raid5-filled/member1.img" \
                      "$IMG/raid5-filled/member2.img" "$IMG/raid5-filled/member3.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
@@ -243,10 +279,10 @@ if [ -d "$IMG/raid5-filled" ]; then
   # Degraded: one member is gone entirely and must be rebuilt from parity.
   # Geometry is stated rather than detected — a missing member cannot be
   # detected around, because the assembled data is wrong until parity fills it.
-  "$BIN" raid "$IMG/raid5-filled/member0.img" "$IMG/raid5-filled/member1.img" \
+  ( runbin "$BIN" raid "$IMG/raid5-filled/member0.img" "$IMG/raid5-filled/member1.img" \
               missing "$IMG/raid5-filled/member3.img" \
               --level 5 --chunk 65536 --layout left-symmetric \
-              --out "$WORK/raid5-degraded.img" >/dev/null 2>&1
+              --out "$WORK/raid5-degraded.img" ) >/dev/null 2>&1
   head -c "$(stat -c%s "$IMG/filled.img")" "$WORK/raid5-degraded.img" > "$WORK/raid5-deg-trim.img" 2>/dev/null
   if cmp -s "$WORK/raid5-deg-trim.img" "$IMG/filled.img"; then
     ok "a destroyed RAID 5 member is rebuilt from parity, byte-perfect"
@@ -256,7 +292,7 @@ else skip "RAID 5 (no fixture)"; fi
 if [ -d "$IMG/raid5-md" ]; then
   out="$WORK/raid5-md.img"
   # Deliberately out of order: the superblock roles must re-sort the members.
-  info=$("$BIN" raid "$IMG/raid5-md/member2.img" "$IMG/raid5-md/member0.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid5-md/member2.img" "$IMG/raid5-md/member0.img" \
                      "$IMG/raid5-md/member3.img" "$IMG/raid5-md/member1.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
@@ -275,7 +311,7 @@ else skip "RAID 5 md superblock (no fixture)"; fi
 
 if [ -d "$IMG/raid0-md" ]; then
   out="$WORK/raid0-md.img"
-  info=$("$BIN" raid "$IMG/raid0-md/member0.img" "$IMG/raid0-md/member1.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid0-md/member0.img" "$IMG/raid0-md/member1.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
   chunk=$(echo "$info" | awk '/^Chunk/{print $4}')
@@ -290,7 +326,7 @@ else skip "RAID 0 md superblock (no fixture)"; fi
 
 if [ -d "$IMG/raid10-md" ]; then
   out="$WORK/raid10-md.img"
-  info=$("$BIN" raid "$IMG/raid10-md/member3.img" "$IMG/raid10-md/member0.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid10-md/member3.img" "$IMG/raid10-md/member0.img" \
                      "$IMG/raid10-md/member2.img" "$IMG/raid10-md/member1.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
@@ -307,7 +343,7 @@ else skip "RAID 10 md superblock (no fixture)"; fi
 
 if [ -d "$IMG/raid6-filled" ]; then
   out="$WORK/raid6-filled.img"
-  info=$("$BIN" raid "$IMG/raid6-filled/member0.img" "$IMG/raid6-filled/member1.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid6-filled/member0.img" "$IMG/raid6-filled/member1.img" \
                      "$IMG/raid6-filled/member2.img" "$IMG/raid6-filled/member3.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
@@ -322,10 +358,10 @@ if [ -d "$IMG/raid6-filled" ]; then
   else bad "assembled RAID 6 does not match the original"; fi
 
   # Degraded: a data member is gone entirely and must be rebuilt from parity.
-  "$BIN" raid "$IMG/raid6-filled/member0.img" missing \
+  ( runbin "$BIN" raid "$IMG/raid6-filled/member0.img" missing \
               "$IMG/raid6-filled/member2.img" "$IMG/raid6-filled/member3.img" \
               --level 6 --chunk 65536 --layout left-symmetric \
-              --out "$WORK/raid6-degraded.img" >/dev/null 2>&1
+              --out "$WORK/raid6-degraded.img" ) >/dev/null 2>&1
   head -c "$(stat -c%s "$IMG/filled.img")" "$WORK/raid6-degraded.img" > "$WORK/raid6-deg-trim.img" 2>/dev/null
   if cmp -s "$WORK/raid6-deg-trim.img" "$IMG/filled.img"; then
     ok "a destroyed RAID 6 data member is rebuilt from parity, byte-perfect"
@@ -334,7 +370,7 @@ else skip "RAID 6 (no fixture)"; fi
 
 if [ -d "$IMG/raid6-md" ]; then
   out="$WORK/raid6-md.img"
-  info=$("$BIN" raid "$IMG/raid6-md/member3.img" "$IMG/raid6-md/member1.img" \
+  info=$( runbin "$BIN" raid "$IMG/raid6-md/member3.img" "$IMG/raid6-md/member1.img" \
                      "$IMG/raid6-md/member0.img" "$IMG/raid6-md/member2.img" \
          --out "$out" 2>/dev/null)
   level=$(echo "$info" | awk '/^Level/{print $3}')
@@ -354,7 +390,7 @@ else skip "RAID 6 md superblock (no fixture)"; fi
 if [ -d "$IMG/raid" ]; then
   # A near-empty array is genuinely ambiguous: chunk N and N/2 map its start
   # identically. The engine must say so rather than assert a guess.
-  info=$("$BIN" raid "$IMG/raid/member0.img" "$IMG/raid/member1.img" 2>/dev/null)
+  info=$( runbin "$BIN" raid "$IMG/raid/member0.img" "$IMG/raid/member1.img" 2>/dev/null)
   if echo "$info" | grep -q 'AMBIGUOUS'; then
     ok "an undecidable array is reported as ambiguous instead of guessed at"
   else bad "an undecidable array was reported with false confidence"; fi
@@ -368,30 +404,30 @@ head2 "Repair"
 if [ -f "$IMG/ext2.img" ]; then
   cp "$IMG/ext2.img" "$WORK/nosuper.img"
   dd if=/dev/zero of="$WORK/nosuper.img" bs=1024 seek=1 count=1 conv=notrunc status=none
-  if "$BIN" detect "$WORK/nosuper.img" >/dev/null 2>&1; then
+  if ( runbin "$BIN" detect "$WORK/nosuper.img" ) >/dev/null 2>&1; then
     bad "wiping the superblock did not actually break detection (test is not testing anything)"
   else
     ok "wiped ext2 superblock: the volume is no longer identifiable"
   fi
-  res=$("$BIN" repair "$WORK/nosuper.img" --action ext_superblock_restore 2>/dev/null)
+  res=$( runbin "$BIN" repair "$WORK/nosuper.img" --action ext_superblock_restore 2>/dev/null)
   case "$res" in
     *"found a valid backup superblock"*) ok "dry run locates a backup superblock";;
     *) bad "dry run did not locate a backup superblock"; echo "$res" | sed 's/^/          /';;
   esac
   # A dry run must not have touched the volume.
-  if "$BIN" detect "$WORK/nosuper.img" >/dev/null 2>&1; then
+  if ( runbin "$BIN" detect "$WORK/nosuper.img" ) >/dev/null 2>&1; then
     bad "dry run modified the volume"
   else
     ok "dry run left the volume untouched"
   fi
-  "$BIN" repair "$WORK/nosuper.img" --action ext_superblock_restore --apply >/dev/null 2>&1
-  if "$BIN" detect "$WORK/nosuper.img" >/dev/null 2>&1; then
+  ( runbin "$BIN" repair "$WORK/nosuper.img" --action ext_superblock_restore --apply ) >/dev/null 2>&1
+  if ( runbin "$BIN" detect "$WORK/nosuper.img" ) >/dev/null 2>&1; then
     ok "applying the repair makes the volume identifiable again"
   else
     bad "applying the repair did not restore the volume"
   fi
   out="$WORK/out-repaired"
-  "$BIN" recover "$WORK/nosuper.img" --out "$out" >/dev/null 2>&1
+  ( runbin "$BIN" recover "$WORK/nosuper.img" --out "$out" ) >/dev/null 2>&1
   ( cd "$out" 2>/dev/null && find . -type f ! -name 'ghost-manifest.*' -exec md5sum {} \; ) 2>/dev/null \
     | awk '{n=$2; sub(/.*\//,"",n); print $1, n}' | sort > "$WORK/got-repaired.md5"
   n=$(comm -12 "$WORK/expected.md5" "$WORK/got-repaired.md5" | wc -l)
@@ -401,7 +437,7 @@ fi
 if [ -f "$IMG/ntfs.img" ]; then
   cp "$IMG/ntfs.img" "$WORK/nontfsboot.img"
   dd if=/dev/zero of="$WORK/nontfsboot.img" bs=512 count=1 conv=notrunc status=none
-  res=$("$BIN" repair "$WORK/nontfsboot.img" --action ntfs_boot_sector_restore 2>/dev/null)
+  res=$( runbin "$BIN" repair "$WORK/nontfsboot.img" --action ntfs_boot_sector_restore 2>/dev/null)
   case "$res" in
     *"backup boot sector found in the last sector"*) ok "wiped NTFS boot sector: the backup is located";;
     *) bad "wiped NTFS boot sector: no backup found"; echo "$res" | sed 's/^/          /';;
@@ -412,19 +448,19 @@ head2 "Damaged-volume handling"
 if [ -f "$IMG/ext4.img" ]; then
   cp "$IMG/ext4.img" "$WORK/truncated.img"
   truncate -s 6M "$WORK/truncated.img"
-  if timeout 120 "$BIN" scan "$WORK/truncated.img" --limit 5 >/dev/null 2>&1; then
+  if engine_timeout 120 "$BIN" scan "$WORK/truncated.img" --limit 5 >/dev/null 2>&1; then
     ok "truncated image scans without crashing"
   else bad "truncated image crashed or hung the scanner"; fi
   head -c 3000000 /dev/urandom > "$WORK/garbage.img"
   # Must report no filesystem rather than inventing one, and must not hang.
-  if timeout 120 "$BIN" scan "$WORK/garbage.img" >/dev/null 2>&1; then
+  if engine_timeout 120 "$BIN" scan "$WORK/garbage.img" >/dev/null 2>&1; then
     bad "random data was reported as a valid filesystem"
   elif [ $? -eq 124 ]; then
     bad "scanning random data hung"
   else
     ok "random data is rejected rather than misidentified"
   fi
-  if timeout 180 "$BIN" carve "$WORK/garbage.img" --out "$WORK/garbagecarve" >/dev/null 2>&1; then
+  if engine_timeout 180 "$BIN" carve "$WORK/garbage.img" --out "$WORK/garbagecarve" >/dev/null 2>&1; then
     ok "carving random data completes without crashing"
   else bad "carving random data failed"; fi
 fi
@@ -433,7 +469,7 @@ fi
 head2 "Imaging"
 if [ -f "$IMG/ext4.img" ]; then
   rm -f "$WORK/clone.img" "$WORK/clone.img.map"
-  "$BIN" image "$IMG/ext4.img" --out "$WORK/clone.img" >/dev/null 2>&1
+  ( runbin "$BIN" image "$IMG/ext4.img" --out "$WORK/clone.img" ) >/dev/null 2>&1
   if cmp -s "$WORK/clone.img" "$IMG/ext4.img"; then ok "clone is byte-identical to the source"
   else bad "clone differs from the source"; fi
   if [ -s "$WORK/clone.img.map" ]; then ok "a resumable block map is written"
@@ -444,10 +480,10 @@ else skip "imaging (no fixture)"; fi
 head2 "Carving free space only"
 if [ -f "$IMG/ext4-deleted.img" ]; then
   out="$WORK/carve-free"
-  "$BIN" carve "$IMG/ext4-deleted.img" --out "$out" --unallocated >/dev/null 2>&1 || true
+  ( runbin "$BIN" carve "$IMG/ext4-deleted.img" --out "$out" --unallocated ) >/dev/null 2>&1 || true
   # Falls back to a full carve if the option is unsupported; the API path is
   # covered separately. Here we assert the free-space map itself is usable.
-  if "$BIN" scan "$IMG/ext4-deleted.img" >/dev/null 2>&1; then
+  if ( runbin "$BIN" scan "$IMG/ext4-deleted.img" ) >/dev/null 2>&1; then
     ok "a volume with deleted files still scans"
   else bad "scanning the deleted-file volume failed"; fi
 else skip "free-space carving (no fixture)"; fi
@@ -456,13 +492,13 @@ else skip "free-space carving (no fixture)"; fi
 head2 "Safety guards"
 if [ -f "$IMG/ext4.img" ]; then
   cp "$IMG/ext4.img" "$WORK/self.img"
-  out=$("$BIN" recover "$WORK/self.img" --out "$WORK/self.img" 2>&1)
+  out=$( runbin "$BIN" recover "$WORK/self.img" --out "$WORK/self.img" 2>&1)
   case "$out" in *"refusing to write"*) ok "refuses to recover onto the source itself";;
                  *) bad "did not refuse to recover onto the source";; esac
-  out=$("$BIN" image "$WORK/self.img" --out "$WORK/self.img" 2>&1)
+  out=$( runbin "$BIN" image "$WORK/self.img" --out "$WORK/self.img" 2>&1)
   case "$out" in *"refusing to write"*) ok "refuses to clone onto the source itself";;
                  *) bad "did not refuse to clone onto the source";; esac
-  out=$("$BIN" carve "$WORK/self.img" --out "$WORK/self.img" 2>&1)
+  out=$( runbin "$BIN" carve "$WORK/self.img" --out "$WORK/self.img" 2>&1)
   case "$out" in *"refusing to carve"*) ok "refuses to carve onto the source itself";;
                  *) bad "did not refuse to carve onto the source";; esac
 fi
@@ -474,7 +510,7 @@ if command -v curl >/dev/null; then
   # --no-browser is required: without it the engine opens a real browser tab,
   # whose presence websocket then aborts /api/shutdown (the GUI-close safety)
   # and the engine survives — hanging this suite forever.
-  "$BIN" --port "$PORT" --no-browser > "$WORK/server.log" 2>&1 &
+  ( runbin "$BIN" --port "$PORT" --no-browser ) > "$WORK/server.log" 2>&1 &
   SRV=$!
   sleep 0.7
   # Every engine mints a session token (0600 file in the runtime dir) and the
@@ -523,8 +559,8 @@ if command -v curl >/dev/null; then
   # A takeover attempt that a live engine refuses (wrong token) must NOT bind
   # alongside it: that would split traffic between two engines.
   echo -n "not-the-token" > "$WORK/handover-token"
-  "$BIN" --port "$PORT" --no-browser --output "$WORK/handover-out" \
-         --takeover "$WORK/handover-token" > "$WORK/handover.log" 2>&1
+  ( runbin "$BIN" --port "$PORT" --no-browser --output "$WORK/handover-out" \
+         --takeover "$WORK/handover-token" ) > "$WORK/handover.log" 2>&1
   rc=$?
   grep -q "refused the handover token" "$WORK/handover.log" && [ "$rc" -ne 0 ] \
     && ok "a refused takeover exits instead of sharing the port" \
@@ -559,14 +595,14 @@ if command -v curl >/dev/null; then
   wait "$SRV" 2>/dev/null
   # Restarting while another engine already owns the port must not fail: the
   # second instance recognises the running engine and reconnects to it.
-  "$BIN" --port "$PORT" --no-browser > "$WORK/server2.log" 2>&1 &
+  ( runbin "$BIN" --port "$PORT" --no-browser ) > "$WORK/server2.log" 2>&1 &
   SRV2=$!
   sleep 0.7
   # The second engine rewrote the session-token file with its own token;
   # refresh the credential before talking to it.
   [ -n "$TOKEN" ] && TOKEN=$(cat "${XDG_RUNTIME_DIR:-/tmp}/ghost-recover-$(id -u)/session-token" 2>/dev/null) \
                   && AUTH=(-H "X-Ghost-Token: $TOKEN")
-  "$BIN" --port "$PORT" --no-browser > "$WORK/server3.log" 2>&1
+  ( runbin "$BIN" --port "$PORT" --no-browser ) > "$WORK/server3.log" 2>&1
   rc=$?
   [ "$rc" -eq 0 ] && grep -q "already running" "$WORK/server3.log" \
     && ok "a second start reconnects to the running engine (rc=$rc)" \
@@ -584,8 +620,16 @@ fi
 
 # ------------------------------------------------------- carver spec coverage
 head2 "Carver spec coverage (byte-exact fixtures, one per signature)"
-if python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec" \
-     >"$WORK/carve-spec.log" 2>&1; then
+carve_spec() {  # python spawns the engine via subprocess: keep it instrumented
+  if [ -n "${GHOST_SAN_PRELOAD:-}" ]; then
+    LD_PRELOAD="$GHOST_SAN_PRELOAD" ASAN_OPTIONS="$GHOST_SAN_OPTS" \
+      UBSAN_OPTIONS="$GHOST_SAN_UOPTS" \
+      python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec"
+  else
+    python3 "$HERE/carve_spec_check.py" --bin "$BIN" --work "$WORK/carve-spec"
+  fi
+}
+if carve_spec >"$WORK/carve-spec.log" 2>&1; then
   ok "every signature carves its byte-exact fixture"
 else
   bad "carve-spec mismatches ($(grep -c '^FAIL' "$WORK/carve-spec.log" 2>/dev/null || echo '?') of 260) — tail:"
