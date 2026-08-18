@@ -51,23 +51,50 @@ i64 vMobi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             last_len = (len > 0 && len <= 1048576) ? 8 + (i64)len : 12;
         } else if (tag == 0x494E4458) { // "INDX"
             u32 len = s.be32(last_off + 4);
-            last_len = (len > 0 && len <= 1048576) ? (i64)len : 192;
+            last_len = (len > 0 && len <= 1048576) ? 8 + (i64)len : 192;
         } else if (tag == 0x53524353) { // "SRCS"
             u32 len = s.be32(last_off + 4);
             last_len = (len > 0 && len <= 1048576) ? 8 + (i64)len : 16;
         } else if (tag == 0xE98E0D0A) { // MOBI EOF record marker
             last_len = 4;
         } else if (tag == 0x89504E47) { // PNG image record
-            for (i64 p = last_off + 8; p + 12 <= off + max; p++) {
-                if (s.be32(p + 4) == 0x49454E44) {
-                    last_len = (p + 12) - last_off;
-                    break;
-                }
+            // Walk the chunk chain from the signature: each chunk is
+            // [len(4)][type(4)][data][crc(4)]. A raw "find IEND" scan can
+            // truncate on the byte sequence inside a compressed IDAT stream.
+            i64 p = last_off + 8;
+            while (p + 12 <= off + max) {
+                u32 clen = s.be32(p);
+                u32 ctype = s.be32(p + 4);
+                if (ctype == 0x49454E44) { last_len = (p + 12) - last_off; break; }
+                if (clen > 0x7FFFFFFF) break;
+                i64 next = p + 12 + (i64)clen;
+                if (next > off + max) break;
+                p = next;
             }
         } else if ((tag & 0xFFFF0000) == 0xFFD80000) { // JPEG image record
-            for (i64 p = last_off + 2; p + 2 <= off + max; p++) {
-                if (s.be16(p) == 0xFFD9) {
-                    last_len = (p + 2) - last_off;
+            // Walk the segment chain from SOI. EOI (FF D9) is only valid at
+            // the real end of the image; a byte scan would truncate on an
+            // FF D9 inside an APPn/COM payload. Segments are skipped by
+            // their declared length, and the terminator is only searched
+            // for inside entropy-coded data (after SOS).
+            i64 p = last_off + 2;
+            while (p + 2 <= off + max) {
+                u16 m = s.be16(p);
+                if (m == 0xFFD9) { last_len = (p + 2) - last_off; break; }
+                if (m == 0xFFD8) { p += 2; continue; }   // SOI carries no length
+                if ((m & 0xFF00) != 0xFF00) break;       // not a marker
+                p += 2;
+                if (p + 2 > off + max) break;
+                u16 seg = s.be16(p);
+                if (seg < 2) break;
+                p += (i64)seg;
+                if (m == 0xFFDA) {       // SOS: entropy data until EOI
+                    for (; p + 2 <= off + max; p++) {
+                        if (s.be16(p) == 0xFFD9) {
+                            last_len = (p + 2) - last_off;
+                            break;
+                        }
+                    }
                     break;
                 }
             }
@@ -87,7 +114,9 @@ i64 vMobi(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
     i64 total_size = (i64)last_rec_off + last_len;
     if (total_size > max) return -1;
     return total_size;
-}void registerFmt_mobi(Registry& r) {
+}
+
+void registerFmt_mobi(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
 
     { auto c = mk("MOBI", "mobi", "document", S("BOOKMOBI"), 256*MB, SizeMode::Header, vMobi);
