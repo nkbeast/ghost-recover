@@ -359,10 +359,20 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     inodes.reserve(std::min<size_t>(chunks.size() * 64, 400000));
 
     i64 freeHarvest = 0;
+    // A hostile inode B+tree can mint up to 4M chunks (the walkInobt guard)
+    // of 64 slots each; an attacker who marks every slot free (or invalid)
+    // would otherwise make this scan 256M reads that never grow `inodes`
+    // past the max_files break. Cap the total slot visits and the work is
+    // bounded by the volume size, not the claimed table.
+    const i64 kMaxSlots = 16 * 1000 * 1000;
+    i64 slotsVisited = 0;
     for (size_t ci = 0; ci < chunks.size() && !prog.cancelled(); ci++) {
         if ((i64)inodes.size() >= opt.max_files * 2) break;
+        if (slotsVisited >= kMaxSlots) break;
         const Chunk& c = chunks[ci];
         for (int slot = 0; slot < 64; slot++) {
+            if (slotsVisited >= kMaxSlots) break;
+            slotsVisited++;
             bool isFree = (c.freeMask >> slot) & 1;
             if (isFree && !opt.orphans) continue;
             const u64 agShift = (u64)fs.sb.agblklog + fs.sb.inopblog;
