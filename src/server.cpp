@@ -1702,6 +1702,8 @@ int startServer(const ServerConfig& cfg) {
                 w.endObject();
                 return w.str();
             });
+        if (id.empty())
+            return {std::string(), "job queue is full — wait for the running job to finish"};
         return {id, ""};
     };
 
@@ -1710,6 +1712,7 @@ int startServer(const ServerConfig& cfg) {
             auto body = json::parse(req.body);
             auto [id, err] = startScanJob(body, withCarve, withScan);
             if (id.empty()) {
+                res.status = 503;
                 res.set_content(errorJson(err.empty() ? "could not start job" : err),
                                 "application/json");
                 return;
@@ -2418,6 +2421,12 @@ int startServer(const ServerConfig& cfg) {
                 w.endObject();
                 return w.str();
             });
+        if (id.empty()) {
+            res.status = 503;
+            res.set_content(errorJson("job queue is full — wait for the running job to finish"),
+                            "application/json");
+            return;
+        }
         json::Writer w;
         w.beginObject().kv("ok", true).kv("job", id).endObject();
         res.set_content(w.str(), "application/json");
@@ -2515,6 +2524,12 @@ int startServer(const ServerConfig& cfg) {
                 w.endObject();
                 return w.str();
             });
+        if (id.empty()) {
+            res.status = 503;
+            res.set_content(errorJson("job queue is full — wait for the running job to finish"),
+                            "application/json");
+            return;
+        }
         json::Writer w;
         w.beginObject().kv("ok", true).kv("job", id).endObject();
         res.set_content(w.str(), "application/json");

@@ -56,6 +56,7 @@ public:
     // one runs at a time and the rest wait in "queued" state. Two concurrent
     // scans of a large disk each hold their whole result in RAM, so on a 1 GiB
     // box a second job was the difference between slow and OOM-killed.
+    static constexpr size_t kMaxQueuedJobs = 8;
     std::string submit(const std::string& kind, const std::string& target, JobFn fn);
 
     std::shared_ptr<Job> get(const std::string& id) const;
@@ -77,6 +78,11 @@ private:
     std::vector<std::thread> workers_;   // joined on shutdown, guarded by mu_
     u64  counter_ = 0;
     bool stopping_ = false;
+    // Jobs still in the queue or running (guarded by mu_). The UI holds at
+    // most a handful, but the API is unauthenticated and a local client can
+    // POST job endpoints far faster than the serialised workers drain: every
+    // accepted submission parks a fresh 8 MiB-stack thread on the gate.
+    size_t inflight_ = 0;
 
     // Serialisation gate: only the job whose seq matches nextToRun_ may run;
     // everyone else waits on gateCv_ holding no lock at all. When the turn is

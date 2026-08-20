@@ -56,6 +56,8 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (stopping_) return {};
+        if (inflight_ >= kMaxQueuedJobs) return {};   // queue full: reject
+        inflight_++;
         char buf[64];
         snprintf(buf, sizeof(buf), "%s-%llu", kind.c_str(), (unsigned long long)(++counter_));
         job->id = buf;
@@ -111,6 +113,10 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
                     job->error = "cancelled";
                 }
                 job->progress.setPhase("cancelled");
+                {
+                    const std::lock_guard<std::mutex> lk(mu_);
+                    inflight_--;
+                }
                 return;
             }
         }
@@ -141,6 +147,10 @@ std::string JobManager::submit(const std::string& kind, const std::string& targe
             advanceLine();           // pass the turn to the next queued job
         }
         gateCv_.notify_all();
+        {
+            const std::lock_guard<std::mutex> lk(mu_);
+            inflight_--;
+        }
     });
 
     // Tracked rather than detached so shutdown() can join every worker.
