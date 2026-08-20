@@ -53,23 +53,37 @@ i64 vTiff(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             if (bytes > 4) {
                 i64 vo = rd32(e + 8);
                 if (vo > 0 && vo + bytes <= max) furthest = std::max(furthest, vo + bytes);
+                // n is an untrusted u32 count: a hostile IFD can claim up to
+                // 2^32 entries, and looping that many times pushes gigabytes
+                // into these vectors (or spins billions of times). Real tile
+                // images carry at most a few hundred thousand tiles, so the
+                // element loops are capped and only the in-range prefix of a
+                // bogus array is ever read.
+                const u32 kArrayCap = 1u << 20;
+                u32 arr = std::min(n, kArrayCap);
                 if (tag == 324 && type == 4) {   // TileOffsets: array, one u32 each
                     tileOffs.clear();
-                    for (u32 k = 0; k < n; k++) tileOffs.push_back(rd32(off + vo + (i64)k * 4));
+                    tileOffs.reserve(arr);
+                    for (u32 k = 0; k < arr; k++) tileOffs.push_back(rd32(off + vo + (i64)k * 4));
                 } else if (tag == 325 && type == 4) {   // TileByteCounts
                     tileCnts.clear();
-                    for (u32 k = 0; k < n; k++) tileCnts.push_back(rd32(off + vo + (i64)k * 4));
+                    tileCnts.reserve(arr);
+                    for (u32 k = 0; k < arr; k++) tileCnts.push_back(rd32(off + vo + (i64)k * 4));
                 } else if (tag == 273 && type == 4) {   // StripOffsets: array
                     stripOffs.clear();
-                    for (u32 k = 0; k < n; k++) stripOffs.push_back(rd32(off + vo + (i64)k * 4));
+                    stripOffs.reserve(arr);
+                    for (u32 k = 0; k < arr; k++) stripOffs.push_back(rd32(off + vo + (i64)k * 4));
                 } else if (tag == 279 && (type == 3 || type == 4)) {  // StripByteCounts
                     stripCnts.clear();
-                    for (u32 k = 0; k < n; k++)
+                    stripCnts.reserve(arr);
+                    for (u32 k = 0; k < arr; k++)
                         stripCnts.push_back(type == 3 ? (i64)rd16(off + vo + (i64)k * 2)
                                                       : rd32(off + vo + (i64)k * 4));
                 }
                 if (tag == 330 && type == 4) {   // SubIFDs: each value is an IFD
-                    for (u32 k = 0; k < n; k++) pushIfd(rd32(off + vo + (i64)k * 4));
+                    const u32 kSubIfdCap = 1u << 12;
+                    for (u32 k = 0; k < std::min(n, kSubIfdCap); k++)
+                        pushIfd(rd32(off + vo + (i64)k * 4));
                 }
             } else if (tag == 330) {
                 pushIfd(rd32(e + 8));

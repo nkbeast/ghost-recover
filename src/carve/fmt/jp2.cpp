@@ -26,8 +26,12 @@ i64 vJp2(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
                       std::memcmp(type.data(), "jxlp", 4) == 0 ||
                       std::memcmp(type.data(), "brob", 4) == 0;
         if (size == 1) {                                       // XLBox
+            // xl is an untrusted 64-bit length: a value >= 2^63 cast to i64
+            // goes negative, walks p backwards and loops forever on the same
+            // box. Compare in unsigned space against the remaining window,
+            // then the cast is safe.
             u64 xl = s.be64(p + 8);
-            if (xl < 16 || p + (i64)xl > off + max) return -1;
+            if (xl < 16 || xl > (u64)(off + max - p)) return -1;
             p += (i64)xl;
         } else {
             if (size < 8 || p + (i64)size > off + max) return -1;
