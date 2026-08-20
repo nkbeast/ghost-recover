@@ -673,6 +673,11 @@ std::vector<Extent> fatFree(DiskReader& disk, Progress& prog) {
     if (dataStart >= total) return free;
     u64 clusters = (total - dataStart) / spc;
     int bits = clusters < 4085 ? 12 : (clusters < 65525 ? 16 : 32);
+    // FAT32 stops at cluster 0x0FFFFFF5 (spec maximum), and clusters is a
+    // u32-derived value: a crafted boot sector claiming total=2^32 with
+    // spc=1 would otherwise drive the loop below through ~4.3 billion
+    // iterations of busy arithmetic. Cap to the spec ceiling.
+    if (bits == 32) clusters = std::min<u64>(clusters, (u64)0x0FFFFFF5 - 2);
     auto fat = disk.readBlock((u64)reserved * bps,
                               std::min<i64>((i64)fatSize * bps, 256LL << 20));
     Bytes f(fat);
