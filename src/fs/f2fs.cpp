@@ -56,8 +56,14 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         Bytes b(raw);
         if (raw.size() < 512 || b.le32(0) != kMagic) continue;
         u32 logBlockSize = b.le32(0x10);
-        if (logBlockSize > 16) continue;
-        sb.blocksize          = 1u << logBlockSize;
+        // F2FS blocks are hard-coded to 4 KiB in the spec and every Linux
+        // implementation. The inode and direct-node layouts parsed below
+        // (address arrays ending 4072 bytes into the block) assume that
+        // size; a hostile superblock claiming 512-byte blocks would make
+        // those reads cross the block boundary and fabricate files from
+        // neighbour bytes. Reject anything else outright.
+        if (logBlockSize != 12) continue;
+        sb.blocksize          = 4096;
         sb.log_blocks_per_seg = b.le32(0x14);
         sb.block_count        = b.le64(0x24);
         sb.segment_count_main = b.le32(0x44);
@@ -76,7 +82,6 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         }
         // volume_name is UTF-16LE
         if (raw.size() >= 0x7C + 64) sb.label = utf16leToUtf8(raw.data() + 0x7C, 64);
-        if (sb.blocksize < 512 || sb.blocksize > 65536) continue;
         loaded = true;
         if (sbOff != 1024) {
             res.technique("backup_superblock_recovery");
