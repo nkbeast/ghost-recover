@@ -1055,6 +1055,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         for (u32 i = 0; i < ipg; i += 128) {
             u32 count = std::min<u32>(128, ipg - i);
             auto buf = disk.readBlock(itableOff + (u64)i * dinodeSize, (i64)count * dinodeSize);
+            if (buf.empty()) break;   // table ran past the end of the device
             Bytes ib(buf);
             for (u32 k = 0; k < count; k++) {
                 size_t p = (size_t)k * dinodeSize;
