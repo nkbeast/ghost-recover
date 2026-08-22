@@ -636,7 +636,17 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     u32 zmapBlocks = (version == 3) ? b.le16(8) : b.le16(6);
     u32 firstData  = (version == 3) ? b.le16(10) : b.le16(8);
     u32 nzones     = (version >= 2) ? b.le32(20) : b.le16(2);
-    if (ninodes == 0 || imapBlocks == 0 || (u64)ninodes > (u64)volume / 16 + 1) {
+    const u32 inodeSize = (version == 2 || version == 3) ? 64 : 32;
+    const u64 inodeTable = (u64)(2 + imapBlocks + zmapBlocks) * kBlock;
+    // The old volume/16 heuristic assumed 16 bytes per inode; real layouts
+    // need 32 or 64, so it let a hostile superblock claim a table up to four
+    // times the size of the device. The sweep below issues one read per 256
+    // inodes and its stop condition (the inode map filling up) never trips on
+    // zeroed inodes, so an oversized claim would keep issuing doomed reads
+    // past the end of the device. Require the table to fit.
+    if (ninodes == 0 || imapBlocks == 0 ||
+        inodeTable >= (u64)volume ||
+        (u64)ninodes > ((u64)volume - inodeTable) / inodeSize) {
         res.ok = false;
         res.error = "implausible MINIX superblock";
         return res;
@@ -651,8 +661,6 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     res.technique("superblock_parse");
     res.technique("inode_table_scan");
 
-    const u32 inodeSize = (version == 2) ? 64 : 32;
-    const u64 inodeTable = (u64)(2 + imapBlocks + zmapBlocks) * kBlock;
     (void)firstData;
 
     struct MInode {
@@ -669,6 +677,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         if (prog.cancelled()) break;
         u32 count = std::min(perRead, ninodes - i);
         auto buf = disk.readBlock(inodeTable + (u64)i * inodeSize, (i64)count * inodeSize);
+        if (buf.empty()) break;   // table ran past the end of the device
         Bytes ib(buf);
         for (u32 k = 0; k < count; k++) {
             size_t p = (size_t)k * inodeSize;
