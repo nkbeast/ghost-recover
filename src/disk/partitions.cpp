@@ -682,6 +682,12 @@ std::vector<Extent> fatFree(DiskReader& disk, Progress& prog) {
                               std::min<i64>((i64)fatSize * bps, 256LL << 20));
     Bytes f(fat);
     for (u64 c = 2; c < clusters + 2 && !prog.cancelled(); c++) {
+        // A truncated or unreadable FAT makes every out-of-range entry read
+        // back as zero — i.e. "free". Stop at the last entry the buffer
+        // actually covers instead of minting phantom free space past it,
+        // exactly like the group-bitmap bound in extFree above.
+        const u64 need = bits == 12 ? c + c / 2 + 2 : (bits == 16 ? c * 2 + 2 : c * 4 + 4);
+        if (need > fat.size()) break;
         u32 v;
         if (bits == 12) {
             u64 o = c + (c / 2);
