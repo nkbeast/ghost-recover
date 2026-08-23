@@ -225,7 +225,10 @@ int cmdCarve(const Args& a) {
     if (!disk) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     CarveOptions opt;
     opt.output_dir = a.get("--out", joinPath(defaultOutputRoot(), "carved"));
-    opt.max_files = a.getInt("--limit", 20000);
+    // --limit is documented as a display cap, not a recovery cap: capping the
+    // carve itself silently threw away everything past N files. Recovery is
+    // bounded by --max-files; --limit only trims the --list table below.
+    opt.max_files = a.getInt("--max-files", 20000);
     opt.text_carving = a.has("--text");
     if (!a.get("--categories").empty()) {
         std::string cats = a.get("--categories");
@@ -251,10 +254,18 @@ int cmdCarve(const Args& a) {
     for (const auto& [fmt, n] : r.by_format) printf("  %-16s %lld\n", fmt.c_str(), (long long)n);
     if (a.has("--list")) {
         printf("\n%-14s %-12s %-16s %-6s %s\n", "OFFSET", "SIZE", "FORMAT", "ENTROPY", "FILE");
-        for (const auto& f : r.files)
+        i64 listed = 0;
+        const i64 showLimit = a.getInt("--limit", 200);
+        for (const auto& f : r.files) {
             printf("%-14lld %-12s %-16s %-6.2f %s\n", (long long)f.offset,
                    humanSize(f.size).c_str(), f.format.c_str(), f.entropy,
                    baseName(f.file).c_str());
+            if (++listed >= showLimit) {
+                printf("... (%lld more; use --limit to show them)\n",
+                       (long long)((i64)r.files.size() - listed));
+                break;
+            }
+        }
     }
     return r.ok ? 0 : 1;
 }
@@ -270,7 +281,8 @@ int cmdRecover(const Args& a) {
     auto disk = openTarget(a.positional[1], a.getInt("--offset", 0), a.getInt("--size", 0), &err);
     if (!disk) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     ScanOptions sopt;
-    sopt.max_files = a.getInt("--limit", 500000);
+    // --limit is display-only; the recovery cap is --max-files (see cmdCarve).
+    sopt.max_files = a.getInt("--max-files", defaultMaxFiles());
     ExtractOptions eopt;
     eopt.output_dir = out;
     Progress prog;
