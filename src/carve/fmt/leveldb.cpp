@@ -39,7 +39,11 @@ i64 vLevelDb(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         vals[i] = v;
     }
     const u64 idxOff = vals[2], idxSize = vals[3];
-    if (idxSize == 0 || idxOff > (1ull << 40)) return -1;
+    // Both fields feed an addition that derives the file start: an unbounded
+    // idxSize (~2^64) wraps the sum and lets a hostile footer place the start
+    // anywhere. Real handles are bounded by the file, itself far below 2^40.
+    if (idxOff > (1ull << 40) || idxSize > (1ull << 40)) return -1;
+    if (idxSize == 0) return -1;
     const u64 footerRel = idxOff + idxSize;
     const i64 fileStart = (off - 40) - (i64)footerRel;
     if (fileStart < 0 || fileStart >= off) return -1;
