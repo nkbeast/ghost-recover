@@ -97,6 +97,14 @@ print(hashlib.md5(d).hexdigest() + ' $b')
 done
 sort -o "$WORK/expected-hfs.md5" "$WORK/expected-hfs.md5"
 
+# The MINIX fixture skips files larger than the driver's 7 direct zones +
+# single-indirect block (double-indirect mapping is not implemented).
+( cd "$SRC" && find . -type f ) | while read -r f; do
+  b=$(basename "$f")
+  [ "$b" = large.bin ] && continue
+  md5sum "$SRC/$f" | awk '{n=$2; sub(/.*\//,"",n); print $1, n}'
+done | sort > "$WORK/expected-minix.md5"
+
 # --------------------------------------------------------------- detection
 head2 "Filesystem identification"
 declare -A EXPECT=(
@@ -120,7 +128,7 @@ for pair in "ext4:expected.md5" "ext2:expected.md5" "ntfs:expected.md5" "fat32:e
             "squashfs:expected.md5" "cramfs:expected.md5" "udf:expected.md5" "jffs2:expected.md5" \
             "hfs:expected-hfs.md5" "romfs:expected.md5" "hfsplus:expected.md5" "hfsx:expected.md5" \
             "f2fs:expected.md5" "ufs:expected.md5" "ufs2:expected.md5" "jfs:expected.md5" \
-            "reiserfs:expected.md5"; do
+            "reiserfs:expected.md5" "minix:expected-minix.md5"; do
   fs="${pair%%:*}"; exp="$WORK/${pair##*:}"
   [ -f "$IMG/$fs.img" ] || { skip "$fs (no fixture)"; continue; }
   out="$WORK/out-$fs"

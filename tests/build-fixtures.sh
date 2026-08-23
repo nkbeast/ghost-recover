@@ -168,7 +168,123 @@ if have mkfs.exfat; then
     exit 1
   fi
 fi
-have mkfs.minix && { truncate -s 20M "$IMG/minix.img"; mkfs.minix -3 "$IMG/minix.img" >/dev/null 2>&1; }
+if have mkfs.minix; then
+  truncate -s 20M "$IMG/minix.img"
+  mkfs.minix -3 "$IMG/minix.img" >/dev/null 2>&1
+  # Populate without mounting: append one directory entry per corpus file to
+  # the root directory and give each an inode plus data zones (direct, then a
+  # single-indirect block past seven zones). A fresh mkfs image holds only the
+  # root inode, which parsed correctly even back when the driver walked v3
+  # inodes with the wrong stride — only multi-inode images catch that.
+  if python3 - "$IMG/minix.img" "$SRC" <<'PY'
+import math, os, struct, sys
+img, src = sys.argv[1], sys.argv[2]
+d = bytearray(open(img, 'rb').read())
+SB = 1024
+K = 1024
+ninodes   = struct.unpack_from('<I', d, SB + 0)[0]
+imap_blk  = struct.unpack_from('<H', d, SB + 6)[0]
+zmap_blk  = struct.unpack_from('<H', d, SB + 8)[0]
+firstdata = struct.unpack_from('<H', d, SB + 10)[0]
+nzones    = struct.unpack_from('<I', d, SB + 20)[0]
+it_off    = (2 + imap_blk + zmap_blk) * K
+
+def bit_set(buf_off, n):
+    d[buf_off + n // 8] |= 1 << (n % 8)
+
+def bit_test(buf_off, n):
+    return (d[buf_off + n // 8] >> (n % 8)) & 1
+
+def free_inode():
+    # Inode numbers are 1-based: record r of the table is inode r+1. Record 0
+    # is the root, so allocation starts at record 1 (= inode 2).
+    for rec in range(1, ninodes):
+        off = it_off + rec * 64
+        if struct.unpack_from('<H', d, off)[0] == 0:
+            bit_set(2 * K, rec + 1)
+            return rec + 1
+    raise SystemExit('no free inodes')
+
+next_zone = firstdata + 1
+def alloc_zone():
+    global next_zone
+    while next_zone < nzones and bit_test(3 * K, next_zone):
+        next_zone += 1
+    if next_zone >= nzones:
+        raise SystemExit('image full')
+    z = next_zone
+    next_zone += 1
+    bit_set(3 * K, z)
+    return z
+
+root_ino = 1
+root = it_off + (root_ino - 1) * 64
+root_size = struct.unpack_from('<I', d, root + 8)[0]
+files = sorted(
+    os.path.join(dp, f) for dp, _, fs in os.walk(src) for f in fs
+)
+# The driver resolves seven direct zones plus one single-indirect block
+# (7+256 KiB); anything larger would need double-indirect mapping, so large
+# files are left out and verify.sh compares against a filtered expectation.
+CAP = (7 + 256) * K
+skipped = [p for p in files if os.path.getsize(p) > CAP]
+files = [p for p in files if os.path.getsize(p) <= CAP]
+# The fresh root directory is a single 1 KiB zone with "." and ".." already
+# in it; 17 more entries do not fit. Extend it across as many consecutive
+# fresh zones as needed and chain them through the root inode's direct
+# slots — the driver reads them exactly like any other extent run.
+dir_need = root_size + 64 * len(files)
+dir_zones = []
+for _ in range(max(1, math.ceil(dir_need / K))):
+    dir_zones.append(alloc_zone())
+zs_root = [0] * 10
+zs_root[:len(dir_zones)] = dir_zones
+struct.pack_into('<10I', d, root + 24, *zs_root)
+for path in files:
+    name = os.path.basename(path).encode()[:60]
+    data = open(path, 'rb').read()
+    need = max(1, math.ceil(len(data) / K))
+    blocks = [bytes(data[i*K:(i+1)*K].ljust(K, b'\0')) for i in range(need)]
+    zones = [alloc_zone() for _ in range(need)]
+    for z, blk in zip(zones, blocks):
+        d[z*K:(z+1)*K] = blk
+    zs = [0]*10
+    direct = zones[:7]
+    zs[:len(direct)] = direct
+    rest = zones[7:]
+    if rest:
+        ind = alloc_zone()
+        table = b''.join(struct.pack('<I', z) for z in rest)
+        table += b'\0' * (K - len(table))
+        d[ind*K:(ind+1)*K] = table
+        zs[7] = ind
+    ino = free_inode()
+    off = it_off + (ino - 1) * 64
+    struct.pack_into('<H', d, off + 0, 0o100644)          # mode: regular
+    struct.pack_into('<H', d, off + 2, 1)                 # nlinks
+    struct.pack_into('<I', d, off + 8, len(data))         # size
+    struct.pack_into('<10I', d, off + 24, *zs)
+    # Entries may straddle two dir zones: write per-zone chunks.
+    ent = struct.pack('<I', ino) + name.ljust(60, b'\0')
+    abs_pos = dir_zones[0] * K + root_size
+    end_abs = abs_pos + 64
+    for zi, z in enumerate(dir_zones):
+        zlo, zhi = z * K, (z + 1) * K
+        lo, hi = max(abs_pos, zlo), min(end_abs, zhi)
+        if lo < hi:
+            d[lo:hi] = ent[(lo - abs_pos):(hi - abs_pos)]
+    root_size += 64
+
+struct.pack_into('<I', d, root + 8, root_size)
+open(img, 'wb').write(bytes(d))
+note = f' (skipped {len(skipped)}: {", ".join(os.path.basename(p) for p in skipped)})' if skipped else ''
+print(f'minix.img populated with {len(files)} corpus files{note}')
+PY
+  then :; else
+    echo "minix fixture population failed" >&2
+    exit 1
+  fi
+fi
 
 if have mkfs.hfs && have hcopy; then
   # Classic HFS via hfsutils. hcopy converts LF->CR in .txt files and refuses
