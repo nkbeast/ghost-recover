@@ -37,10 +37,20 @@ void applyTimes(const std::string& path, i64 mtime, i64 atime) {
     ::utimes(path.c_str(), tv);
 }
 
-std::string csvEscape(const std::string& s) {
-    bool needQuotes = s.find_first_of(",\"\n\r") != std::string::npos;
+std::string csvEscape(const std::string& s, bool neutraliseFormulas = false) {
+    // Spreadsheet applications treat a leading =, +, - or @ as a formula and
+    // execute it when the manifest is opened. Recovered filenames come off a
+    // damaged disk and are attacker-controlled, so cells that are purely
+    // informational get the OWASP apostrophe prefix. output_path is exempt:
+    // it must stay byte-exact or the manifest stops describing what is on
+    // disk.
+    bool formula = neutraliseFormulas && !s.empty() &&
+                   (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@' ||
+                    s[0] == '\t' || s[0] == '\r');
+    bool needQuotes = formula || s.find_first_of(",\"\n\r") != std::string::npos;
     if (!needQuotes) return s;
     std::string o = "\"";
+    if (formula) o += '\'';
     for (char c : s) {
         if (c == '"') o += "\"\"";
         else o += c;
@@ -351,8 +361,8 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
             csv << "output_path,source_path,recovery_method,logical_size,bytes_written,"
                    "device_offset,deleted,confidence,still_compressed,md5,sha1\n";
             for (const auto& r : manifest) {
-                csv << csvEscape(r.path) << ',' << csvEscape(r.source) << ','
-                    << csvEscape(r.method) << ',' << r.size << ',' << r.recovered << ','
+                csv << csvEscape(r.path) << ',' << csvEscape(r.source, true) << ','
+                    << csvEscape(r.method, true) << ',' << r.size << ',' << r.recovered << ','
                     << r.offset << ',' << (r.deleted ? "yes" : "no") << ','
                     << r.confidence << ',' << (r.undecoded ? "yes" : "no") << ','
                     << r.md5 << ',' << r.sha1 << '\n';
