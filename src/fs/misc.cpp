@@ -740,7 +740,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     prog.setPhase("walking MINIX directories");
     std::unordered_map<u32, std::string> names;
     std::unordered_map<u32, u32> parents;
-    const u32 entSize = (u32)(2 + nameLen);
+    // v1/v2 entries are (u16 ino, char name[nameLen]); v3 widened the inode
+    // field to u32 and pads each entry to 64 bytes — striding v3 with the
+    // old 2+nameLen size (and reading names two bytes in) resolved nothing.
+    const u32 entSize  = (version == 3) ? 64u : (u32)(2 + nameLen);
+    const size_t nmOff = (version == 3) ? 4u : 2u;
     for (const auto& [ino, in] : inodes) {
         if ((in.mode & 0xF000) != 0x4000) continue;
         std::vector<Extent> ex;
@@ -753,7 +757,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
             for (size_t p = 0; p + entSize <= db.size(); p += entSize) {
                 u32 child = (version == 3) ? db.le32(p) : db.le16(p);
                 if (!child) continue;
-                std::string nm = db.str(p + 2, nameLen);
+                std::string nm = db.str(p + nmOff, nameLen);
                 while (!nm.empty() && nm.back() == '\0') nm.pop_back();
                 if (nm.empty() || nm == "." || nm == "..") continue;
                 names[child] = nm;
