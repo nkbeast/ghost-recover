@@ -20,9 +20,14 @@ i64 vDer(ByteSource& s, i64 off, i64 max, const CarveSpec& spec) {
     std::vector<El> stack;
     i64 pos = off;
     i64 lastEnd = -1;
-    i64 total = 0;
-    const i64 kLimit = (i64)1 << 28;
-    while (pos < off + max && total < kLimit) {
+    // A run of empty SEQUENCEs ("30 00" repeated) advances the cursor two
+    // bytes per element, so the walk is bounded by max/2 iterations unless a
+    // budget says otherwise. Real containers hold nowhere near this many
+    // top-level elements.
+    const i64 kMaxElements = 1 << 20;
+    i64 elements = 0;
+    while (pos < off + max) {
+        if (++elements > kMaxElements) return -1;
         u8 tag = s.byte(pos);
         // Top-level element: tag byte must be 0x30/0x31 (SEQUENCE/SET) for the
         // common .der/.p12 containers; a raw OCTET STRING wrapper is rare
