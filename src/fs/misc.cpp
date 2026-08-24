@@ -709,29 +709,56 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     }
 
     auto zonesToExtents = [&](const MInode& in, std::vector<Extent>& out) {
-        const int direct = 7;   // both Minix v1 and v2 use seven direct zones
-        for (int z = 0; z < direct && z < (int)in.zones.size(); z++) {
-            u32 zn = in.zones[z];
-            if (!zn) { out.push_back(Extent(0, kBlock, true)); continue; }
+        auto pushZone = [&](u32 zn) {
+            if (!zn) { out.push_back(Extent(0, kBlock, true)); return; }
             i64 off = (i64)zn * kBlock;
-            if (off < 0 || off >= volume) continue;
+            if (off < 0 || off >= volume) return;
             if (!out.empty() && !out.back().sparse && out.back().offset + out.back().length == off)
                 out.back().length += kBlock;
             else out.push_back(Extent(off, kBlock));
-        }
-        // Single indirect
+        };
+        const int direct = 7;   // both Minix v1 and v2 use seven direct zones
+        for (int z = 0; z < direct && z < (int)in.zones.size(); z++)
+            pushZone(in.zones[z]);
+        // Indirect blocks: v1/v2 hold u16 zone numbers, v3 u32. Zones 7..9
+        // are the single-, double- and triple-indirect pointers; a file over
+        // ~269 KiB on a v3 volume needs at least the double level.
+        u32 per = (version >= 2) ? kBlock / 4 : kBlock / 2;
+        auto readIndirect = [&](u32 blk, std::vector<u32>& out_) {
+            auto b = disk.readBlock((u64)blk * kBlock, kBlock);
+            Bytes bb(b);
+            for (u32 i = 0; i < per; i++)
+                out_.push_back((version >= 2) ? bb.le32((size_t)i * 4)
+                                              : bb.le16((size_t)i * 2));
+        };
+        std::vector<u32> lvl;
         if ((int)in.zones.size() > direct && in.zones[direct]) {
-            auto blk = disk.readBlock((u64)in.zones[direct] * kBlock, kBlock);
-            Bytes bb(blk);
-            u32 per = (version >= 2) ? kBlock / 4 : kBlock / 2;
-            for (u32 i = 0; i < per; i++) {
-                u32 zn = (version >= 2) ? bb.le32((size_t)i * 4) : bb.le16((size_t)i * 2);
-                if (!zn) continue;
-                i64 off = (i64)zn * kBlock;
-                if (off < 0 || off >= volume) continue;
-                if (!out.empty() && !out.back().sparse && out.back().offset + out.back().length == off)
-                    out.back().length += kBlock;
-                else out.push_back(Extent(off, kBlock));
+            readIndirect(in.zones[direct], lvl);
+            for (u32 zn : lvl) pushZone(zn);
+        }
+        if ((int)in.zones.size() > direct + 1 && in.zones[direct + 1]) {
+            std::vector<u32> l1;
+            readIndirect(in.zones[direct + 1], l1);
+            for (u32 a : l1) {
+                if (!a || a * (u64)kBlock >= (u64)volume) continue;
+                lvl.clear();
+                readIndirect(a, lvl);
+                for (u32 zn : lvl) pushZone(zn);
+            }
+        }
+        if ((int)in.zones.size() > direct + 2 && in.zones[direct + 2]) {
+            std::vector<u32> l2;
+            readIndirect(in.zones[direct + 2], l2);
+            for (u32 b1 : l2) {
+                if (!b1 || b1 * (u64)kBlock >= (u64)volume) continue;
+                lvl.clear();
+                readIndirect(b1, lvl);
+                for (u32 a : lvl) {
+                    if (!a || a * (u64)kBlock >= (u64)volume) continue;
+                    std::vector<u32> l0;
+                    readIndirect(a, l0);
+                    for (u32 zn : l0) pushZone(zn);
+                }
             }
         }
     };
