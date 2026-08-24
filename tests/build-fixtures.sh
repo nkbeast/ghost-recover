@@ -223,12 +223,6 @@ root_size = struct.unpack_from('<I', d, root + 8)[0]
 files = sorted(
     os.path.join(dp, f) for dp, _, fs in os.walk(src) for f in fs
 )
-# The driver resolves seven direct zones plus one single-indirect block
-# (7+256 KiB); anything larger would need double-indirect mapping, so large
-# files are left out and verify.sh compares against a filtered expectation.
-CAP = (7 + 256) * K
-skipped = [p for p in files if os.path.getsize(p) > CAP]
-files = [p for p in files if os.path.getsize(p) <= CAP]
 # The fresh root directory is a single 1 KiB zone with "." and ".." already
 # in it; 17 more entries do not fit. Extend it across as many consecutive
 # fresh zones as needed and chain them through the root inode's direct
@@ -248,22 +242,36 @@ for path in files:
     zones = [alloc_zone() for _ in range(need)]
     for z, blk in zip(zones, blocks):
         d[z*K:(z+1)*K] = blk
-    zs = [0]*10
+    zz = [0]*10
     direct = zones[:7]
-    zs[:len(direct)] = direct
+    zz[:len(direct)] = direct
     rest = zones[7:]
     if rest:
-        ind = alloc_zone()
-        table = b''.join(struct.pack('<I', z) for z in rest)
-        table += b'\0' * (K - len(table))
-        d[ind*K:(ind+1)*K] = table
-        zs[7] = ind
+        # Indirect mapping, mirroring the on-disk format: zone 7 points at a
+        # table of up to 256 data zones (single-indirect); beyond that zone 8
+        # points at a table of such tables (double-indirect).
+        def ind_table(entries):
+            t = b''.join(struct.pack('<I', x) for x in entries)
+            return t.ljust(K, b'\0')
+        per = K // 4
+        lvl1 = []
+        while rest:
+            chunk, rest = rest[:per], rest[per:]
+            tz = alloc_zone()
+            d[tz*K:(tz+1)*K] = ind_table(chunk)
+            lvl1.append(tz)
+        if len(lvl1) == 1:
+            zz[7] = lvl1[0]
+        else:
+            top = alloc_zone()
+            d[top*K:(top+1)*K] = ind_table(lvl1)
+            zz[8] = top
     ino = free_inode()
     off = it_off + (ino - 1) * 64
     struct.pack_into('<H', d, off + 0, 0o100644)          # mode: regular
     struct.pack_into('<H', d, off + 2, 1)                 # nlinks
     struct.pack_into('<I', d, off + 8, len(data))         # size
-    struct.pack_into('<10I', d, off + 24, *zs)
+    struct.pack_into('<10I', d, off + 24, *zz)
     # Entries may straddle two dir zones: write per-zone chunks.
     ent = struct.pack('<I', ino) + name.ljust(60, b'\0')
     abs_pos = dir_zones[0] * K + root_size
@@ -277,8 +285,7 @@ for path in files:
 
 struct.pack_into('<I', d, root + 8, root_size)
 open(img, 'wb').write(bytes(d))
-note = f' (skipped {len(skipped)}: {", ".join(os.path.basename(p) for p in skipped)})' if skipped else ''
-print(f'minix.img populated with {len(files)} corpus files{note}')
+print(f'minix.img populated with {len(files)} corpus files')
 PY
   then :; else
     echo "minix fixture population failed" >&2
