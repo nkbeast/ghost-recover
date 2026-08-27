@@ -282,8 +282,14 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
     if (!opt.skip_regions.empty()) {
         std::vector<std::pair<i64, i64>> spans;
         spans.reserve(opt.skip_regions.size());
-        for (const auto& e : opt.skip_regions)
-            if (e.length > 0) spans.push_back({e.offset, e.offset + e.length});
+        for (const auto& e : opt.skip_regions) {
+            if (e.length <= 0 || e.offset < 0) continue;
+            // Hostile filesystem metadata can craft an extent whose
+            // offset+length wraps i64 and would otherwise create a span
+            // that covers the whole address space and suppresses all carving.
+            if (e.offset > INT64_MAX - e.length) continue;
+            spans.push_back({e.offset, e.offset + e.length});
+        }
         std::sort(spans.begin(), spans.end());
         for (const auto& [s, e] : spans) {
             if (!skipIndex.starts.empty() && s <= skipIndex.ends.back()) {
