@@ -748,10 +748,18 @@ void finalizeFile(RecoveredFile& f, i64 volumeSize) {
             continue;
         }
         if (e.offset < 0 || e.offset >= volumeSize) continue;
-        if (e.offset + e.length > volumeSize) e.length = volumeSize - e.offset;
+        // Guard the addition against i64 wrap: a hostile extent with
+        // offset near INT64_MAX would wrap to negative and bypass the
+        // volume clamp, producing a huge out-of-bounds read later.
+        if (e.length > 0 && e.offset > volumeSize - e.length)
+            e.length = volumeSize - e.offset;
         if (e.length <= 0) continue;
         keep.push_back(e);
-        total += e.length;
+        // total is bounded by volumeSize in practice, but cap the addition
+        // so a hostile file with many extents cannot wrap it to negative
+        // and defeat the tail-trim below.
+        if (total > INT64_MAX - e.length) total = volumeSize;
+        else total += e.length;
     }
     f.extents = std::move(keep);
 
@@ -789,7 +797,12 @@ bool extentsPlausible(const std::vector<Extent>& ex, i64 size, i64 volumeSize) {
     i64 total = 0;
     for (const auto& e : ex) {
         if (e.length <= 0) return false;
-        if (!e.sparse && (e.offset < 0 || e.offset + e.length > volumeSize)) return false;
+        if (!e.sparse) {
+            if (e.offset < 0 || e.offset >= volumeSize) return false;
+            // Same overflow guard as finalizeFile: offset+length must not wrap.
+            if (e.length > 0 && e.offset > volumeSize - e.length) return false;
+        }
+        if (e.length > 0 && total > INT64_MAX - e.length) return false;
         total += e.length;
         if (total > volumeSize) return false;
     }
