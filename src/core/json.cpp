@@ -244,6 +244,9 @@ struct P {
                                     s[i] == 'E' || s[i] == '+' || s[i] == '-'))
                 i++;
             if (i == start) { bad = true; depth--; return v; }
+            // A 64 MiB payload of digits would allocate a 64 MiB substring
+            // and make strtod scan it — cap the token to avoid DoS.
+            if (i - start > 65536) { bad = true; depth--; return v; }
             v.type = Value::Type::Number;
             v.num  = strtod(s.substr(start, i - start).c_str(), nullptr);
         }
