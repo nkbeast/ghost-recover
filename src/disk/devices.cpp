@@ -4,6 +4,7 @@
 #include "ghost/util.h"
 
 #include <algorithm>
+#include <climits>
 #include <fstream>
 
 #include <dirent.h>
@@ -95,8 +96,11 @@ std::vector<DiskInfo> detectDisks() {
         d.logical_sector  = (i64)std::max<u64>(512, readAttrU64(sysPath + "/queue/logical_block_size"));
         d.physical_sector = (i64)std::max<u64>(512, readAttrU64(sysPath + "/queue/physical_block_size"));
         // /sys/block/*/size is always in 512-byte units regardless of the
-        // device's logical sector size.
-        d.size_bytes = (i64)(sectors * 512);
+        // device's logical sector size. Guard the u64 multiply against
+        // i64 overflow: a hostile virtual device could report an absurd
+        // sector count and the cast would be UB.
+        if (sectors > (u64)INT64_MAX / 512) d.size_bytes = INT64_MAX;
+        else d.size_bytes = (i64)(sectors * 512);
         if (d.size_bytes <= 0) continue;
         d.size_gb = d.size_bytes / 1073741824.0;
 
