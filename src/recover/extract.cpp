@@ -72,7 +72,18 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
     std::vector<u8> out;
     i64 budget = maxBytes > 0 ? maxBytes : (f.size > 0 ? f.size : 0);
     if (budget <= 0) {
-        for (const auto& e : f.extents) budget += e.length;
+        for (const auto& e : f.extents) {
+            // A hostile image can synthesise an extent list whose lengths sum
+            // past INT64_MAX. Saturate instead of wrapping: a wrapped budget
+            // would flip the sign and make the guard below return an empty
+            // file, and any future change to that guard could then feed a
+            // negative budget into the reserve.
+            if (e.length > 0 && budget > INT64_MAX - e.length) {
+                budget = INT64_MAX;
+                break;
+            }
+            budget += e.length;
+        }
     }
     if (budget <= 0) return out;
     out.reserve((size_t)std::min<i64>(budget, 64LL * 1024 * 1024));
@@ -129,7 +140,13 @@ std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off
     for (const auto& e : f.extents) {
         i64 eLen = std::max<i64>(0, e.length);
         if (eLen <= 0) continue;
-        const i64 eEnd = pos + eLen;
+        // Saturate the running offset: a hostile extent with a near-INT64_MAX
+        // length would make pos + eLen wrap to negative and corrupt every
+        // subsequent span test. Cap at INT64_MAX and let the bound checks
+        // terminate the walk.
+        i64 eEnd;
+        if (eLen > INT64_MAX - pos) eEnd = INT64_MAX;
+        else eEnd = pos + eLen;
         if (eEnd > off) {
             const i64 from = std::max(pos, off);
             const i64 to = std::min(eEnd, off + len);
