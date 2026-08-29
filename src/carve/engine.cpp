@@ -842,6 +842,11 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
             // extents record it, the offset field only the signature position.
             const Extent& e = f.extents.empty() ? Extent(f.offset, f.size)
                                                 : f.extents.front();
+            // Skip a hostile extent whose offset+length would wrap i64; it
+            // cannot describe a real claim and would corrupt the upper_bound
+            // lookup below.
+            if (e.length <= 0 || e.offset < 0 || e.offset > INT64_MAX - e.length)
+                continue;
             claimed.emplace_back(e.offset, e.offset + e.length);
         }
         std::sort(claimed.begin(), claimed.end());
