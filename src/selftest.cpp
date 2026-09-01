@@ -163,6 +163,20 @@ static int runZlib() {
             printf("zlib: decode mismatch\n");
             fail++;
         }
+        if (clen > 1) {
+            std::vector<unsigned char> truncated;
+            bool truncatedOk = zlibStreamDecode(comp.data(), clen - 1, truncated);
+            if (truncatedOk || !truncated.empty()) {
+                printf("zlib: truncated stream accepted\n");
+                fail++;
+            }
+        }
+        std::vector<unsigned char> bounded = decompressBlock(
+            "zlib-block", comp.data(), clen, (i64)plain.size() - 1);
+        if (!bounded.empty()) {
+            printf("zlib: output limit was applied after decoding\n");
+            fail++;
+        }
     }
 
     // Raw DEFLATE (the form Btrfs stores): compress2() emits a wrapped

@@ -11,6 +11,7 @@
 #include "ghost/decompress.h"
 
 #include <cstring>
+#include <limits>
 
 #ifdef GHOST_HAVE_ZLIB
 #include <zlib.h>
@@ -25,35 +26,53 @@ namespace ghost {
 namespace {
 
 // zlib inflate of a whole stream. Returns false on failure.
-bool inflateAny(const u8* src, size_t srcLen, std::vector<u8>& out, bool raw) {
+bool inflateAny(const u8* src, size_t srcLen, std::vector<u8>& out, bool raw,
+                i64 maxOut = 0) {
 #ifdef GHOST_HAVE_ZLIB
+    if (srcLen > std::numeric_limits<uInt>::max()) return false;
+    constexpr size_t kMaxDecode = 512u * 1024 * 1024;
+    const size_t base = out.size();
+    const size_t limit = maxOut > 0
+                             ? std::min<size_t>((size_t)maxOut, kMaxDecode)
+                             : kMaxDecode;
+    if (base >= limit) return false;
+
     z_stream zs{};
     if (inflateInit2(&zs, raw ? -MAX_WBITS : MAX_WBITS) != Z_OK) return false;
     zs.next_in = const_cast<Bytef*>(src);
     zs.avail_in = (uInt)srcLen;
-    size_t base = out.size();
-    out.resize(base + srcLen * 4 + 4096);
+
+    const size_t estimate = srcLen > (std::numeric_limits<size_t>::max() - 4096) / 4
+                                ? std::numeric_limits<size_t>::max()
+                                : srcLen * 4 + 4096;
+    const size_t initial = std::min(limit - base,
+                                    std::max<size_t>(1, std::min<size_t>(estimate,
+                                                                          1u * 1024 * 1024)));
+    out.resize(base + initial);
     size_t total = base;
-    int ret;
     while (true) {
         zs.next_out = out.data() + total;
         zs.avail_out = (uInt)(out.size() - total);
-        ret = inflate(&zs, Z_NO_FLUSH);
+        const int ret = inflate(&zs, Z_NO_FLUSH);
         total = out.size() - zs.avail_out;
         if (ret == Z_STREAM_END) break;
         if (ret != Z_OK) { inflateEnd(&zs); out.resize(base); return false; }
-        if (zs.avail_out == 0) {
-            if (out.size() > base + 512u * 1024 * 1024) { inflateEnd(&zs); out.resize(base); return false; }
-            out.resize(out.size() * 2);
-        } else if (zs.avail_in == 0) {
-            break;
+        if (zs.avail_out != 0) {
+            // A valid stream must terminate; accepting input exhaustion here
+            // would turn truncated compressed data into a successful partial file.
+            if (zs.avail_in == 0) { inflateEnd(&zs); out.resize(base); return false; }
+            continue;
         }
+        if (total >= limit) { inflateEnd(&zs); out.resize(base); return false; }
+        const size_t available = limit - total;
+        const size_t grown = std::min(available, std::max(total * 2, total + 1));
+        out.resize(total + grown);
     }
     inflateEnd(&zs);
     out.resize(total);
     return true;
 #else
-    (void)src; (void)srcLen; (void)out;
+    (void)src; (void)srcLen; (void)out; (void)raw; (void)maxOut;
     return false;
 #endif
 }
@@ -61,8 +80,8 @@ bool inflateAny(const u8* src, size_t srcLen, std::vector<u8>& out, bool raw) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-bool rawDeflateAll(const u8* src, size_t srcLen, std::vector<u8>& out) {
-    return inflateAny(src, srcLen, out, /*raw=*/true);
+bool rawDeflateAll(const u8* src, size_t srcLen, std::vector<u8>& out, i64 maxOut) {
+    return inflateAny(src, srcLen, out, /*raw=*/true, maxOut);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,8 +217,8 @@ bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out,
 }
 
 // ---------------------------------------------------------------------------
-bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out) {
-    return inflateAny(in, inLen, out, /*raw=*/false);
+bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out, i64 maxOut) {
+    return inflateAny(in, inLen, out, /*raw=*/false, maxOut);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +246,17 @@ std::vector<u8> zstdFrameDecode(const u8* in, size_t inLen) {
 // (LSB first); a clear bit means a literal byte, a set bit a 16-bit tuple with
 // (offset-1) in the top (12-shift) bits and (length-3) in the low `shift`
 // bits, where `shift` shrinks as the output position grows.
-bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out) {
+bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out, i64 maxOut) {
+    constexpr size_t kMaxDecode = 512u * 1024 * 1024;
+    const size_t base = out.size();
+    const size_t limit = maxOut > 0
+                             ? std::min<size_t>((size_t)maxOut, kMaxDecode)
+                             : kMaxDecode;
+    if (base > limit) return false;
+    auto canAppend = [&](size_t n) {
+        return n <= limit - base && n <= limit - out.size();
+    };
+
     size_t ip = 0;
     while (ip + 2 <= inLen) {
         u16 header = (u16)(in[ip] | (in[ip + 1] << 8));
@@ -235,22 +264,24 @@ bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out) {
         if (header == 0) return true;                   // end-of-unit marker
         u32 chunkLen = (header & 0x0FFF) + 1;
         if (chunkLen > inLen - ip) return false;
-        const u8* end = in + ip + chunkLen;
+        const size_t end = ip + chunkLen;
         if (!(header & 0x8000)) {                       // raw sub-block
-            out.insert(out.end(), in + ip, end);
-            ip = (size_t)(end - in);
+            if (!canAppend(chunkLen)) return false;
+            out.insert(out.end(), in + ip, in + end);
+            ip = end;
             continue;
         }
-        size_t chunkStart = out.size();
-        while (ip < (size_t)(end - in)) {
+        const size_t chunkStart = out.size();
+        while (ip < end) {
             u8 tag = in[ip++];
             for (int b = 0; b < 8; b++, tag >>= 1) {
-                if (ip >= (size_t)(end - in)) break;
+                if (ip >= end) break;
                 if (!(tag & 1)) {
+                    if (!canAppend(1)) return false;
                     out.push_back(in[ip++]);
                     continue;
                 }
-                if (ip + 2 > (size_t)(end - in)) return false;
+                if (ip + 2 > end) return false;
                 u16 tuple = (u16)(in[ip] | (in[ip + 1] << 8));
                 ip += 2;
                 size_t pos = out.size() - chunkStart;
@@ -258,12 +289,12 @@ bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out) {
                 while (pos > threshold && shift > 0) { shift--; threshold <<= 1; }
                 u32 off = (tuple >> shift) + 1;
                 u32 len = (tuple & ((1u << shift) - 1)) + 3;
-                if (off > pos) return false;
+                if (off > pos || !canAppend(len)) return false;
                 size_t src = out.size() - off;
                 for (u32 i = 0; i < len; i++) out.push_back(out[src + i]);
             }
         }
-        ip = (size_t)(end - in);
+        ip = end;
     }
     return true;
 }
@@ -275,14 +306,14 @@ std::vector<u8> decompressBlock(const std::string& codec, const u8* data,
     if (codec == "btrfs-lzo") {
         if (!btrfsLzoDecode(data, len, out, sectorsize, expectedOut)) return {};
     } else if (codec == "zlib-block") {
-        if (!zlibStreamDecode(data, len, out)) return {};
+        if (!zlibStreamDecode(data, len, out, expectedOut)) return {};
     } else if (codec == "btrfs-zlib") {
-        if (!rawDeflateAll(data, len, out)) return {};
+        if (!rawDeflateAll(data, len, out, expectedOut)) return {};
     } else if (codec == "btrfs-zstd") {
         out = zstdFrameDecode(data, len);
         if (out.empty()) return {};
     } else if (codec == "lznt1") {
-        if (!lznt1Decode(data, len, out)) return {};
+        if (!lznt1Decode(data, len, out, expectedOut)) return {};
     } else {
         return {};
     }
