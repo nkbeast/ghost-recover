@@ -23,10 +23,14 @@ bool btrfsLzoDecode(const u8* in, size_t inLen, std::vector<u8>& out,
                     u32 sectorsize = 4096, i64 maxOut = 0);
 
 // zlib stream (btrfs zlib extents, squashfs-style zlib blocks).
-bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out);
+// `maxOut` bounds the total output size when positive.
+bool zlibStreamDecode(const u8* in, size_t inLen, std::vector<u8>& out,
+                      i64 maxOut = 0);
 
 // Raw DEFLATE (no zlib wrapper), as Btrfs stores for zlib-compressed extents.
-bool rawDeflateAll(const u8* in, size_t inLen, std::vector<u8>& out);
+// `maxOut` bounds the total output size when positive.
+bool rawDeflateAll(const u8* in, size_t inLen, std::vector<u8>& out,
+                   i64 maxOut = 0);
 
 // Standard zstd frame (btrfs zstd extents). Empty result when the engine was
 // built without zstd support.
@@ -34,7 +38,8 @@ std::vector<u8> zstdFrameDecode(const u8* in, size_t inLen);
 
 // LZNT1 (NTFS compression, MS-XCA). A unit is a sequence of 4 KiB chunks,
 // each with a 0x3000 (raw) or 0xB000 (compressed) header.
-bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out);
+bool lznt1Decode(const u8* in, size_t inLen, std::vector<u8>& out,
+                 i64 maxOut = 0);
 
 // Dispatches one independently compressed block on its codec id. `expectedOut`
 // (when > 0) truncates the result to that length. `sectorsize` (default 4096)
