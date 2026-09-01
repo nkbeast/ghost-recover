@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 #include <fcntl.h>
@@ -177,12 +178,41 @@ RaidReader::~RaidReader() = default;
 
 bool RaidReader::open(std::string* err) {
     readers_.clear();
-    int n = (int)layout_.disks.size();
+    const int n = (int)layout_.disks.size();
     if (n == 0) { if (err) *err = "no RAID members supplied"; return false; }
+
+    const i64 C = layout_.chunk_size > 0 ? layout_.chunk_size : 65536;
+    if (C <= 0 || C > 1LL * 1024 * 1024 * 1024) {
+        if (err) *err = "invalid RAID chunk size";
+        return false;
+    }
+    if (layout_.level == RaidLevel::Raid0 && n < 2) {
+        if (err) *err = "RAID 0 requires at least two members";
+        return false;
+    }
+    if (layout_.level == RaidLevel::Raid5 && n < 2) {
+        if (err) *err = "RAID 5 requires at least two members";
+        return false;
+    }
+    if (layout_.level == RaidLevel::Raid6 && n < 3) {
+        if (err) *err = "RAID 6 requires at least three members";
+        return false;
+    }
+    if (layout_.level == RaidLevel::Raid10 &&
+        (layout_.copies < 1 || layout_.copies > n || n % layout_.copies != 0)) {
+        if (err) *err = "invalid RAID 10 mirror count";
+        return false;
+    }
+    if (layout_.data_size < 0) {
+        if (err) *err = "negative RAID data size";
+        return false;
+    }
 
     i64 smallest = 0;
     int present = 0;
-    for (const auto& m : layout_.disks) {
+    std::vector<i64> usable((size_t)n, 0);
+    for (int i = 0; i < n; i++) {
+        const auto& m = layout_.disks[(size_t)i];
         if (!m.present || m.path.empty()) {
             readers_.push_back(nullptr);
             continue;
@@ -194,25 +224,58 @@ bool RaidReader::open(std::string* err) {
             layout_.notes.push_back("member " + m.path + " could not be opened: " + e);
             continue;
         }
-        i64 avail = (m.size > 0) ? std::min(m.size, r->deviceSize() - m.data_offset)
-                                 : r->deviceSize() - m.data_offset;
+        const i64 deviceSize = r->deviceSize();
+        if (m.data_offset < 0 || m.data_offset > deviceSize) {
+            if (err) *err = "member data offset is outside the device";
+            return false;
+        }
+        const i64 available = deviceSize - m.data_offset;
+        const i64 avail = m.size > 0 ? std::min(m.size, available) : available;
+        if (avail <= 0) {
+            if (err) *err = "RAID member has no usable data";
+            return false;
+        }
         r->setWindow((u64)m.data_offset, avail);
+        layout_.disks[(size_t)i].size = avail;
+        usable[(size_t)i] = avail;
         if (smallest == 0 || avail < smallest) smallest = avail;
         readers_.push_back(std::move(r));
         present++;
     }
     if (present == 0) { if (err) *err = "none of the RAID members could be opened"; return false; }
     if (smallest <= 0) { if (err) *err = "RAID members report zero usable size"; return false; }
+    if ((layout_.level == RaidLevel::Raid5 && present < n - 1) ||
+        (layout_.level == RaidLevel::Raid6 && present < n - 2)) {
+        if (err) *err = "too many RAID members are unavailable";
+        return false;
+    }
 
+    auto checkedProduct = [](i64 a, i64 b, i64& out) {
+        if (a < 0 || b < 0 || (b != 0 && a > INT64_MAX / b)) return false;
+        out = a * b;
+        return true;
+    };
     switch (layout_.level) {
-        case RaidLevel::Raid0:  size_ = smallest * n; break;
-        case RaidLevel::Raid1:  size_ = smallest; break;
-        case RaidLevel::Raid5:  size_ = smallest * (n - 1); break;
-        case RaidLevel::Raid6:  size_ = smallest * (n - 2); break;
-        case RaidLevel::Raid10: size_ = smallest * n / std::max(1, layout_.copies); break;
+        case RaidLevel::Raid0:
+            if (!checkedProduct(smallest, n, size_)) { if (err) *err = "RAID size overflows"; return false; }
+            break;
+        case RaidLevel::Raid1: size_ = smallest; break;
+        case RaidLevel::Raid5:
+            if (!checkedProduct(smallest, n - 1, size_)) { if (err) *err = "RAID size overflows"; return false; }
+            break;
+        case RaidLevel::Raid6:
+            if (!checkedProduct(smallest, n - 2, size_)) { if (err) *err = "RAID size overflows"; return false; }
+            break;
+        case RaidLevel::Raid10:
+            if (!checkedProduct(smallest, n, size_)) { if (err) *err = "RAID size overflows"; return false; }
+            size_ /= layout_.copies;
+            break;
         case RaidLevel::Linear: {
             size_ = 0;
-            for (const auto& m : layout_.disks) size_ += m.size;
+            for (i64 memberSize : usable) {
+                if (memberSize > INT64_MAX - size_) { if (err) *err = "RAID size overflows"; return false; }
+                size_ += memberSize;
+            }
             break;
         }
         default: if (err) *err = "unsupported RAID level"; return false;
@@ -223,15 +286,16 @@ bool RaidReader::open(std::string* err) {
 }
 
 i64 RaidReader::readStripeUnit(int diskIdx, i64 unitOffset, u8* buf, i64 count) {
-    if (diskIdx < 0 || diskIdx >= (int)readers_.size()) return 0;
+    if (diskIdx < 0 || diskIdx >= (int)readers_.size() || unitOffset < 0) return 0;
     DiskReader* r = readers_[(size_t)diskIdx].get();
     if (!r) return 0;
     return r->read((u64)unitOffset, buf, count);
 }
 
 i64 RaidReader::read(u64 offset, u8* buf, i64 count) {
-    if (count <= 0 || (i64)offset >= size_) return 0;
-    if ((i64)offset + count > size_) count = size_ - (i64)offset;
+    if (count <= 0 || offset >= (u64)size_) return 0;
+    const u64 remaining = (u64)size_ - offset;
+    if ((u64)count > remaining) count = (i64)remaining;
     const int n = (int)readers_.size();
     const i64 C = layout_.chunk_size > 0 ? layout_.chunk_size : 65536;
     i64 done = 0;
