@@ -133,9 +133,12 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
 
 // ---------------------------------------------------------------------------
 std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off, i64 len) {
+    constexpr i64 kMaxWindowBytes = 64LL * 1024 * 1024;
     std::vector<u8> out;
-    if (len <= 0) return out;
-    out.reserve((size_t)len);
+    if (off < 0 || len <= 0) return out;
+    len = std::min(len, kMaxWindowBytes);
+    out.reserve((size_t)std::min<i64>(len, 1LL * 1024 * 1024));
+    const i64 end = len > INT64_MAX - off ? INT64_MAX : off + len;
     i64 pos = 0;
     for (const auto& e : f.extents) {
         i64 eLen = std::max<i64>(0, e.length);
@@ -149,18 +152,20 @@ std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off
         else eEnd = pos + eLen;
         if (eEnd > off) {
             const i64 from = std::max(pos, off);
-            const i64 to = std::min(eEnd, off + len);
+            const i64 to = std::min(eEnd, end);
             if (to > from) {
+                const i64 delta = from - pos;
                 if (e.sparse) {
                     out.insert(out.end(), (size_t)(to - from), 0);
-                } else {
-                    auto chunk = disk.readBlock((u64)(e.offset + (from - pos)), to - from);
+                } else if (e.offset >= 0 && delta <= INT64_MAX - e.offset) {
+                    const i64 physical = e.offset + delta;
+                    auto chunk = disk.readBlock((u64)physical, to - from);
                     out.insert(out.end(), chunk.begin(), chunk.end());
                 }
             }
         }
         pos = eEnd;
-        if (pos >= off + len) break;
+        if (pos >= end) break;
     }
     return out;
 }
