@@ -137,11 +137,11 @@ std::unique_ptr<DiskReader> DiskReader::clone() const {
 }
 
 void DiskReader::setWindow(u64 base, i64 length) {
-    if ((i64)base > device_size_) base = (u64)device_size_;
+    if (base > (u64)device_size_) base = (u64)device_size_;
     base_ = base;
-    i64 avail = device_size_ - (i64)base;
-    if (avail < 0) avail = 0;
-    size_ = (length > 0) ? std::min(length, avail) : avail;
+    const u64 device = (u64)device_size_;
+    const u64 avail = device - base;
+    size_ = (length > 0) ? std::min<u64>((u64)length, avail) : avail;
     dropCache();
 }
 
@@ -249,8 +249,9 @@ i64 DiskReader::degradedPread(u64 abs_off, u8* dst, i64 count) {
 
 i64 DiskReader::read(u64 offset, void* buf, i64 count) {
     if (fd_ < 0 || count <= 0 || !buf) return 0;
-    if ((i64)offset >= size_) return 0;
-    if ((i64)offset + count > size_) count = size_ - (i64)offset;
+    if (offset >= (u64)size_) return 0;
+    const u64 remaining = (u64)size_ - offset;
+    if ((u64)count > remaining) count = (i64)remaining;
     if (count <= 0) return 0;
 
     u8* dst = static_cast<u8*>(buf);

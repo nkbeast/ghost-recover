@@ -96,6 +96,27 @@ void testReadExact() {
     ::unlink(path.c_str());
 }
 
+void testWindowBounds() {
+    std::vector<u8> data(512, 0xA5);
+    const std::string path = makeTempFile(data);
+    check(!path.empty(), "window bounds: temp file created");
+    if (path.empty()) return;
+
+    DiskReader dr(path);
+    check(dr.open(), "window bounds: open succeeds");
+    dr.setWindow(UINT64_MAX, 100);
+    check(dr.base() == 512, "window bounds: oversized base clamps to device end");
+    check(dr.size() == 0, "window bounds: oversized base produces empty window");
+    u8 byte = 0;
+    check(dr.read(UINT64_MAX, &byte, 1) == 0,
+          "window bounds: hostile offset cannot bypass the empty window");
+
+    dr.resetWindow();
+    check(dr.read(UINT64_MAX, &byte, 1) == 0,
+          "window bounds: hostile offset cannot wrap into the device");
+    ::unlink(path.c_str());
+}
+
 void testWindowedRead() {
     // 512 bytes of data; set a window covering bytes [128, 128+256).
     std::vector<u8> data(512);
@@ -250,6 +271,7 @@ void testCacheBypass() {
 int main() {
     testBasicRead();
     testReadExact();
+    testWindowBounds();
     testWindowedRead();
     testEofShortRead();
     testHealthCounters();
