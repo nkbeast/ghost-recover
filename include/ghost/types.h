@@ -50,11 +50,14 @@ struct Bytes {
     u32 be32 (size_t o) const { return has(o, 4) ? ((u32)p[o] << 24 | (u32)p[o+1] << 16 | (u32)p[o+2] << 8 | (u32)p[o+3]) : 0; }
     u64 be64 (size_t o) const { u64 v = 0; if (has(o, 8)) for (int i = 0; i < 8; i++) v = (v << 8) | p[o+i]; return v; }
     i64 sle   (size_t o, int width) const {  // signed little-endian of arbitrary width (NTFS runlists)
-        if (!has(o, (size_t)width) || width <= 0 || width > 8) return 0;
-        i64 v = 0;
-        for (int i = width - 1; i >= 0; i--) v = (v << 8) | p[o+i];
-        int shift = 64 - width * 8;
-        return (v << shift) >> shift;  // sign-extend
+        if (width <= 0 || width > 8 || !has(o, (size_t)width)) return 0;
+        u64 raw = 0;
+        for (int i = width - 1; i >= 0; i--) raw = (raw << 8) | p[o+i];
+        if (width < 8 && (raw & (1ULL << (width * 8 - 1))))
+            raw |= ~0ULL << (width * 8);
+        i64 value = 0;
+        std::memcpy(&value, &raw, sizeof(value));
+        return value;  // sign-extend without signed-shift overflow
     }
     u64 ule   (size_t o, int width) const {
         if (!has(o, (size_t)width) || width <= 0 || width > 8) return 0;
