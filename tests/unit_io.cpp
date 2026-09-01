@@ -208,6 +208,24 @@ void testReadLE() {
     ::unlink(path.c_str());
 }
 
+void testCacheSizeBounds() {
+    std::vector<u8> data(1, 0x5A);
+    const std::string path = makeTempFile(data);
+    check(!path.empty(), "cache bounds: temp file created");
+    if (path.empty()) return;
+
+    DiskReader dr(path);
+    check(dr.open(), "cache bounds: open succeeds");
+    dr.setCacheSize(INT64_MAX);
+    check(dr.cacheSize() == 512LL * 1024 * 1024,
+          "cache bounds: oversized cache request is capped");
+    dr.setCacheSize(-1);
+    check(dr.cacheSize() == 64LL * 1024,
+          "cache bounds: negative cache request uses one cache block");
+
+    ::unlink(path.c_str());
+}
+
 void testCacheBypass() {
     // Reads >= kCacheBypass (128 KiB) bypass the cache; verify they still work.
     const size_t sz = 200 * 1024;
@@ -237,6 +255,7 @@ int main() {
     testHealthCounters();
     testClone();
     testReadLE();
+    testCacheSizeBounds();
     testCacheBypass();
 
     if (failures) {

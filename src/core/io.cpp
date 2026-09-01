@@ -25,11 +25,18 @@ i64 defaultCacheBytes() {
 }
 // Reads at least this large skip the cache: sequential carving would otherwise
 // evict the metadata blocks the filesystem drivers depend on.
-constexpr i64 kCacheBypass = kCacheBlock * 2;
+constexpr i64 kCacheBypass  = kCacheBlock * 2;
+constexpr i64 kMaxCacheBytes = 512LL * 1024 * 1024;
 
 size_t roundUpPow2(size_t v) {
+    if (v <= 1) return 1;
+    constexpr size_t kTopBit = size_t(1) << (sizeof(size_t) * 8 - 1);
+    if (v > kTopBit) return kTopBit;
     size_t p = 1;
-    while (p < v) p <<= 1;
+    while (p < v) {
+        if (p > kTopBit / 2) return kTopBit;
+        p <<= 1;
+    }
     return p;
 }
 }  // namespace
@@ -60,7 +67,7 @@ DiskReader::DiskReader(std::string path) : path_(std::move(path)) {
 DiskReader::~DiskReader() { close(); }
 
 void DiskReader::setCacheSize(i64 bytes) {
-    cache_bytes_ = std::max<i64>(kCacheBlock, bytes);
+    cache_bytes_ = std::min<i64>(kMaxCacheBytes, std::max<i64>(kCacheBlock, bytes));
     size_t lines = (size_t)std::max<i64>(8, cache_bytes_ / kCacheBlock);
     lines = roundUpPow2(lines);
     cache_.assign(lines, CacheLine{});
