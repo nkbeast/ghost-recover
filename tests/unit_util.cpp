@@ -44,6 +44,16 @@ void testBytesAccessors() {
     check(!b.has((size_t)-2, 8), "has rejects overflowing ranges");
     check(b.le32(6) == 0, "integer reads outside the buffer return zero");
     check(b.str(7, 8).empty(), "string reads outside the buffer return empty");
+
+    const u8 signedRaw[] = {0x80, 0x34, 0x12, 0x00, 0xFF, 0xFF, 0xFF, 0xFF};
+    Bytes signedBytes(signedRaw, sizeof(signedRaw));
+    check(signedBytes.sle(0, 1) == -128, "sle sign-extends 8-bit negatives");
+    check(signedBytes.sle(1, 3) == 0x1234, "sle preserves positive 24-bit values");
+    check(signedBytes.sle(3, 4) == -256, "sle sign-extends 32-bit negatives");
+    const u8 fullSignedRaw[] = {0x80, 0, 0, 0, 0, 0, 0, 0x80};
+    Bytes fullSignedBytes(fullSignedRaw, sizeof(fullSignedRaw));
+    check(fullSignedBytes.sle(0, 8) == (i64)0x8000000000000080ULL,
+          "sle handles full-width values without signed shifts");
 }
 
 void testEncodingAndHashes() {
