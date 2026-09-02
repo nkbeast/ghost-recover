@@ -151,6 +151,9 @@ if(GHOST_BUILD_TESTS)
         tests/unit_io.cpp
         src/core/io.cpp
         src/core/util.cpp
+        src/core/json.cpp
+        src/core/decompress.cpp
+        src/recover/extract.cpp
     )
     target_include_directories(ghost_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(ghost_io_tests PRIVATE Threads::Threads)

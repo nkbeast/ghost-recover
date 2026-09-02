@@ -10,6 +10,7 @@
 // by inspecting the post-read health counters.
 
 #include "ghost/io.h"
+#include "ghost/recover.h"
 #include "ghost/types.h"
 
 #include <cstdio>
@@ -268,6 +269,50 @@ void testCacheBypass() {
 
 }  // namespace
 
+// extract.cpp references scanVolume (the filesystem drivers pull in the whole
+// src/fs tree); the window test never calls it, so satisfy the linker with a
+// stub instead of linking every driver into this target.
+namespace ghost {
+ScanResult scanVolume(DiskReader&, const std::string&, const ScanOptions&, Progress&) {
+    ScanResult r;
+    r.error = "not available in the unit test build";
+    return r;
+}
+}  // namespace ghost
+
+// A window read whose extent runs past the end of the device must pad the
+// unreadable tail with zeros instead of shortening the output: the stream is
+// addressed by file offset, and a shortened chunk would shift every later
+// extent's bytes to earlier positions (silently scrambled content).
+void testWindowShortReadStaysAligned() {
+    std::vector<u8> content(8192);
+    for (size_t i = 0; i < content.size(); i++) content[i] = (u8)(i * 11 + 5);
+    std::string path = makeTempFile(content);
+
+    RecoveredFile f;
+    f.id = 1;
+    f.size = 12288;                       // 8 KiB readable + 4 KiB past EOF
+    f.extents.push_back(Extent(0, 8192));
+    f.extents.push_back(Extent(8192, 4096));   // entirely beyond the device
+
+    auto disk = std::make_unique<DiskReader>(path);
+    check(disk->open(nullptr), "io test image opens");
+    disk->setWindow(0, (i64)content.size());
+
+    auto window = readFileWindow(*disk, f, 0, f.size);
+    check(window.size() == (size_t)f.size,
+          "window read returns the full logical length even past EOF");
+    bool headOk = true;
+    for (size_t i = 0; i < content.size() && headOk; i++)
+        headOk = window[i] == content[i];
+    check(headOk, "window read keeps readable bytes at their own offsets");
+    bool tailZero = true;
+    for (size_t i = content.size(); i < window.size() && tailZero; i++)
+        tailZero = window[i] == 0;
+    check(tailZero, "unreadable window tail is zero-filled, not dropped");
+    ::unlink(path.c_str());
+}
+
 int main() {
     testBasicRead();
     testReadExact();
@@ -279,6 +324,7 @@ int main() {
     testReadLE();
     testCacheSizeBounds();
     testCacheBypass();
+    testWindowShortReadStaysAligned();
 
     if (failures) {
         std::cerr << failures << " io unit test failure(s)\n";

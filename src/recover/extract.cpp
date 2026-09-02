@@ -155,13 +155,20 @@ std::vector<u8> readFileWindow(DiskReader& disk, const RecoveredFile& f, i64 off
             const i64 to = std::min(eEnd, end);
             if (to > from) {
                 const i64 delta = from - pos;
-                if (e.sparse) {
-                    out.insert(out.end(), (size_t)(to - from), 0);
-                } else if (e.offset >= 0 && delta <= INT64_MAX - e.offset) {
-                    const i64 physical = e.offset + delta;
-                    auto chunk = disk.readBlock((u64)physical, to - from);
-                    out.insert(out.end(), chunk.begin(), chunk.end());
-                }
+            if (e.sparse) {
+                out.insert(out.end(), (size_t)(to - from), 0);
+            } else if (e.offset >= 0 && delta <= INT64_MAX - e.offset) {
+                const i64 physical = e.offset + delta;
+                auto chunk = disk.readBlock((u64)physical, to - from);
+                out.insert(out.end(), chunk.begin(), chunk.end());
+                // A short read (the extent runs past the end of the image, or
+                // the sector is unreadable) must not shift the rest of the
+                // window: every later extent would land at the wrong offset
+                // and the served bytes would be silently scrambled. Pad the
+                // unreadable tail with zeros, like the sparse path.
+                if ((i64)chunk.size() < to - from)
+                    out.insert(out.end(), (size_t)(to - from - (i64)chunk.size()), 0);
+            }
             }
         }
         pos = eEnd;
