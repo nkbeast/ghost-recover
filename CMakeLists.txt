@@ -143,6 +143,7 @@ if(GHOST_BUILD_TESTS)
     add_executable(ghost_unit_tests
         tests/unit_util.cpp
         src/core/util.cpp
+        src/core/json.cpp
     )
     target_include_directories(ghost_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     add_test(NAME ghost_unit_tests COMMAND ghost_unit_tests)

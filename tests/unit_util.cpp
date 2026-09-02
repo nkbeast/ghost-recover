@@ -1,3 +1,4 @@
+#include "ghost/json.h"
 #include "ghost/types.h"
 #include "ghost/util.h"
 
@@ -69,6 +70,66 @@ void testEncodingAndHashes() {
           "sha1Hex matches a known digest");
 }
 
+void testEncodingSurrogates() {
+    // A lone UTF-16 surrogate has no Unicode meaning; the CESU-8 bytes it
+    // would encode are not valid UTF-8. The conversion must emit U+FFFD
+    // (ef bf bd) instead, or recovered names leak invalid UTF-8 into JSON
+    // documents and onto the filesystem.
+    const u8 loneHigh[] = {0x00, 0xD8, 0x41, 0x00};        // U+D800 followed by 'A'
+    check(utf16leToUtf8(loneHigh, sizeof(loneHigh)) ==
+              std::string("\xef\xbf\xbd" "A"),
+          "unpaired high surrogate becomes U+FFFD, next char survives");
+
+    const u8 loneLow[] = {0x41, 0x00, 0x00, 0xDC};         // 'A' followed by U+DC00
+    check(utf16leToUtf8(loneLow, sizeof(loneLow)) ==
+              std::string("A\xef\xbf\xbd"),
+          "unpaired low surrogate becomes U+FFFD");
+
+    const u8 trailingHigh[] = {0x41, 0x00, 0x3A, 0xD8};    // 'A' + U+D83A at end
+    check(utf16leToUtf8(trailingHigh, sizeof(trailingHigh)) ==
+              std::string("A\xef\xbf\xbd"),
+          "high surrogate at the end of the buffer becomes U+FFFD");
+
+    // A well-formed pair must still combine into a single code point.
+    const u8 pair[] = {0x00, 0xD8, 0x00, 0xDC};            // U+D800 U+DC00 = U+10000
+    check(utf16leToUtf8(pair, sizeof(pair)) == std::string("\xf0\x90\x80\x80"),
+          "valid surrogate pair still decodes");
+}
+
+void testJsonWriterPendingKey() {
+    // endObject() after a bare key() must close the pair with null rather
+    // than emitting the invalid document {"k":}.
+    json::Writer w;
+    w.beginObject().key("k").endObject();
+    check(w.str() == "{\"k\":null}", "endObject flushes a pending key with null");
+
+    json::Writer w2;
+    w2.beginArray().beginObject().key("a").endObject().endArray();
+    check(w2.str() == "[{\"a\":null}]", "endArray past a pending key is also safe");
+
+    // The happy path is unchanged.
+    json::Writer w3;
+    w3.beginObject().kv("a", (i64)1).key("b").beginArray().value("x").endArray().endObject();
+    check(w3.str() == "{\"a\":1,\"b\":[\"x\"]}", "well-formed documents are untouched");
+}
+
+void testJsonParseStrictness() {
+    check(json::parse("{\"a\":1}").find("a") != nullptr, "parse accepts a clean object");
+    check(json::parse("  {\"a\":1}  ").find("a") != nullptr,
+          "parse tolerates surrounding whitespace");
+    check(json::parse("[1,2] trailing").type == json::Value::Type::Null,
+          "parse rejects trailing garbage after the root value");
+    check(json::parse("{} {}").type == json::Value::Type::Null,
+          "parse rejects concatenated documents");
+    check(json::parse("\"\\ud800\"").type == json::Value::Type::Null ||
+              json::parse("\"\\ud800\"").asStr() ==
+                  std::string("\xef\xbf\xbd"),
+          "parse maps an unpaired surrogate escape to U+FFFD");
+    check(json::parse("\"\\ud83d\\ude00\"").asStr() ==
+              std::string("\xf0\x9f\x98\x80"),
+          "parse keeps a valid surrogate pair");
+}
+
 void testSanitizers() {
     check(sanitizeFilename("../bad:name?.txt") == ".._bad_name_.txt",
           "sanitizeFilename replaces path and shell-sensitive characters");
@@ -109,6 +170,9 @@ void testPathContainment() {
 int main() {
     testBytesAccessors();
     testEncodingAndHashes();
+    testEncodingSurrogates();
+    testJsonWriterPendingKey();
+    testJsonParseStrictness();
     testSanitizers();
     testPathContainment();
 
