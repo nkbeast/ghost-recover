@@ -180,6 +180,10 @@ struct P {
                         unsigned lo = hex4();
                         if (lo >= 0xDC00 && lo <= 0xDFFF)
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        else
+                            cp = 0xFFFD;   // unpaired high surrogate
+                    } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+                        cp = 0xFFFD;       // unpaired low surrogate
                     }
                     utf8(out, cp);
                     break;

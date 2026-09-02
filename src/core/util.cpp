@@ -267,7 +267,16 @@ static std::string utf16ToUtf8(const u8* d, size_t bytes, bool big) {
             if (lo >= 0xDC00 && lo <= 0xDFFF) {
                 c = 0x10000 + ((c - 0xD800) << 10) + (lo - 0xDC00);
                 i += 2;
+            } else {
+                // A high surrogate not followed by a low one (or a bare low
+                // surrogate below) has no Unicode meaning; the 3-byte CESU-8
+                // form it would encode is not valid UTF-8. Recovered file
+                // names travel through JSON documents and filesystem paths,
+                // so emit the replacement character instead.
+                c = 0xFFFD;
             }
+        } else if (c >= 0xD800 && c <= 0xDFFF) {
+            c = 0xFFFD;
         }
         appendUtf8(out, c);
     }
