@@ -108,6 +108,15 @@ DetectResult probeAt(DiskReader& disk, i64 start, i64 length) {
 // Volume size implied by a filesystem's own superblock. Used to size recovered
 // partitions that have no table entry.
 i64 volumeSizeFromFs(DiskReader& disk, i64 start, const std::string& fs) {
+    // count * blocksize products come straight from on-disk fields. A crafted
+    // or torn superblock can make the u64 product wrap, and casting the wrapped
+    // value to i64 then reports a negative partition size downstream. Saturate
+    // at INT64_MAX instead of trusting the multiply.
+    auto satMul = [](u64 a, u64 b) -> i64 {
+        if (a != 0 && b > (u64)INT64_MAX / a) return INT64_MAX;
+        i64 v = (i64)(a * b);
+        return v > 0 ? v : INT64_MAX;
+    };
     u64 savedBase = disk.base();
     i64 savedSize = disk.size();
     disk.setWindow((u64)start, 0);
@@ -120,7 +129,7 @@ i64 volumeSizeFromFs(DiskReader& disk, i64 start, const std::string& fs) {
             u64 blocks = b.le32(0x04);
             u32 incompat = b.le32(0x60);
             if (incompat & 0x80) blocks |= ((u64)b.le32(0x150)) << 32;
-            size = (i64)(blocks * (1024ull << logBs));
+            size = satMul(blocks, 1024ull << logBs);
         }
     } else if (fs == "ntfs") {
         auto b0 = disk.readBlock(0, 512);
@@ -129,25 +138,26 @@ i64 volumeSizeFromFs(DiskReader& disk, i64 start, const std::string& fs) {
         u64 sectors = b.le64(0x28);
         // NTFS records one sector fewer than the partition holds (the last one
         // carries the boot-sector backup).
-        if (bps) size = (i64)((sectors + 1) * bps);
+        if (bps) size = satMul(sectors + 1, bps);
     } else if (startsWith(fs, "fat") || fs == "vfat") {
         auto b0 = disk.readBlock(0, 512);
         Bytes b(b0);
         u16 bps = b.le16(11);
         u32 total = b.le16(19) ? b.le16(19) : b.le32(32);
-        size = (i64)total * bps;
+        size = satMul(total, bps);
     } else if (fs == "exfat") {
         auto b0 = disk.readBlock(0, 512);
         Bytes b(b0);
         u8 shift = b.u8at(0x6C);
-        if (shift >= 9 && shift <= 12) size = (i64)(b.le64(0x48) * ((u64)1 << shift));
+        if (shift >= 9 && shift <= 12) size = satMul(b.le64(0x48), (u64)1 << shift);
     } else if (fs == "xfs") {
         auto b0 = disk.readBlock(0, 512);
         Bytes b(b0);
-        size = (i64)(b.be64(0x08) * b.be32(0x04));
+        size = satMul(b.be64(0x08), b.be32(0x04));
     } else if (fs == "btrfs") {
         auto b0 = disk.readBlock(0x10000, 4096);
-        size = (i64)Bytes(b0).le64(0x70);
+        u64 bytes = Bytes(b0).le64(0x70);
+        size = bytes > (u64)INT64_MAX ? INT64_MAX : (i64)bytes;
     }
     disk.setWindow(savedBase, savedSize);
     return size;
