@@ -368,7 +368,18 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
 
         if (opt.write_manifest) {
             ManifestRow row;
-            row.path = dest.substr(std::min(dest.size(), opt.output_dir.size() + 1));
+            // Strip the output directory prefix. joinPath() absorbs a trailing
+            // slash in output_dir, so the naive "size + 1" cut would eat the
+            // first character of every row ("/tmp/out/" + 1). Cut at the
+            // directory separator that joinPath actually inserted instead.
+            {
+                std::string prefix = opt.output_dir;
+                while (prefix.size() > 1 && prefix.back() == '/') prefix.pop_back();
+                row.path = dest.size() > prefix.size() &&
+                                   dest.compare(0, prefix.size(), prefix) == 0
+                               ? dest.substr(prefix.size() + (prefix.back() == '/' ? 0 : 1))
+                               : dest;
+            }
             row.source = f.path.empty() ? f.name : f.path;
             row.method = f.method;
             row.size = f.size;
