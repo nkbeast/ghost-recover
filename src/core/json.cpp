@@ -64,11 +64,24 @@ Writer& Writer::beginObject() { comma(); out_ += '{'; stack_.push_back('o'); nee
 Writer& Writer::beginArray()  { comma(); out_ += '['; stack_.push_back('a'); need_comma_ = false; return *this; }
 
 Writer& Writer::endObject() {
-    if (!stack_.empty() && stack_.back() == 'o') { stack_.pop_back(); out_ += '}'; need_comma_ = true; }
+    if (!stack_.empty() && stack_.back() == 'o') {
+        // A key() that never received a value would close the object mid-pair
+        // and emit invalid JSON ({"k":}). finish() already handles this for
+        // the top level; endObject()/endArray() must behave the same way.
+        if (want_value_) { out_ += "null"; want_value_ = false; }
+        stack_.pop_back();
+        out_ += '}';
+        need_comma_ = true;
+    }
     return *this;
 }
 Writer& Writer::endArray() {
-    if (!stack_.empty() && stack_.back() == 'a') { stack_.pop_back(); out_ += ']'; need_comma_ = true; }
+    if (!stack_.empty() && stack_.back() == 'a') {
+        if (want_value_) { out_ += "null"; want_value_ = false; }
+        stack_.pop_back();
+        out_ += ']';
+        need_comma_ = true;
+    }
     return *this;
 }
 
