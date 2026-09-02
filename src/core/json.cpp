@@ -279,6 +279,11 @@ Value parse(const std::string& text) {
     P p(text);
     Value v = p.value();
     if (p.bad) return {};
+    // A JSON text is exactly one value: reject anything but whitespace after
+    // the root value so a concatenated or truncated document fails loudly
+    // instead of silently parsing only its first fragment.
+    p.ws();
+    if (!p.eof()) return {};
     return v;
 }
 
