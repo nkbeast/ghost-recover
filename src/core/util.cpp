@@ -328,7 +328,14 @@ std::string sanitizeFilename(const std::string& name) {
     if (firstGood == std::string::npos) o.clear();
     while (!o.empty() && (o.back() == ' ' || o.back() == '.')) o.pop_back();
     if (o.empty()) o = "unnamed";
-    if (o.size() > 200) o.resize(200);
+    if (o.size() > 200) {
+        // Truncate on a UTF-8 character boundary: recovered names are
+        // frequently UTF-8 and a raw 200-byte cut would split a multi-byte
+        // sequence, leaving an invalid character at the end of the name.
+        size_t cut = 200;
+        while (cut > 0 && ((unsigned char)o[cut] & 0xC0) == 0x80) cut--;
+        o.resize(cut);
+    }
     return o;
 }
 
