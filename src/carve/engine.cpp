@@ -868,13 +868,18 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                 if (buf.empty()) break;
                 size_t i = 0;
                 while (i < buf.size()) {
+                    // Bytes >= 0x80 count as text: the sized vText path and
+                    // looksLikeText both accept them (they are UTF-8 or
+                    // latin-1 document bytes), and rejecting them here would
+                    // fragment a UTF-8 document into sub-256-byte runs at
+                    // every accented character, so nothing would ever carve.
                     u8 c = buf[i];
-                    bool printable = (c >= 0x20 && c < 0x7F) || c == '\t' || c == '\n' || c == '\r';
+                    bool printable = (c >= 0x20 && c < 0x7F) || c == '\t' || c == '\n' || c == '\r' || c >= 0x80;
                     if (!printable) { i++; continue; }
                     size_t j = i;
                     while (j < buf.size()) {
                         u8 d = buf[j];
-                        bool p = (d >= 0x20 && d < 0x7F) || d == '\t' || d == '\n' || d == '\r';
+                        bool p = (d >= 0x20 && d < 0x7F) || d == '\t' || d == '\n' || d == '\r' || d >= 0x80;
                         if (!p) break;
                         j++;
                     }
