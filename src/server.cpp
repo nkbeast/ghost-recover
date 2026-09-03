@@ -1924,6 +1924,21 @@ int startServer(const ServerConfig& cfg) {
         i64 fileLen = f.size > 0 ? f.size : 0;
         if (fileLen <= 0)
             for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
+        const i64 logicalLen = fileLen;
+
+        // The windowed content provider declares Content-Length up front, so
+        // serveLen must never exceed what the extents can actually deliver: a
+        // partially recoverable file (extents ending before f.size — the norm
+        // for a deleted file whose tail clusters were reused) would otherwise
+        // end the stream early and the browser would abort with a truncated
+        // transfer instead of playing the bytes that do exist. Cap to the
+        // highest extent end; sparse extents are fine, they serve zeros.
+        i64 extentCover = 0;
+        for (const auto& e : f.extents)
+            if (e.length > 0 && e.offset >= 0 && e.offset <= INT64_MAX - e.length)
+                extentCover = std::max<i64>(extentCover, e.offset + e.length);
+        const bool windowed = f.resident.empty() && f.codec.empty() && f.fragment_offset < 0;
+        if (windowed && extentCover > 0 && extentCover < fileLen) fileLen = extentCover;
 
         std::string err;
         auto disk = openTarget(stored->target, stored->offset, stored->length, &err);
@@ -1950,7 +1965,7 @@ int startServer(const ServerConfig& cfg) {
             // and answers 416 to every media seek.)
             i64 serveLen = capped ? std::min<i64>(fileLen, maxBytes) : fileLen;
             res.set_header("Accept-Ranges", "bytes");
-            if (serveLen < fileLen) res.set_header("X-Content-Truncated", "1");
+            if (serveLen < logicalLen) res.set_header("X-Content-Truncated", "1");
             // The provider runs after this handler returns, so it must own
             // the reader itself — a shared_ptr keeps the (non-copyable,
             // move-only) reader alive while staying copyable for the
