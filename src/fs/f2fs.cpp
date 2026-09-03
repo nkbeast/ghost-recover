@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace ghost {
 namespace f2fs {
@@ -238,7 +239,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         std::vector<std::string> parts;
         u32 cur = ino;
         int guard = 0;
-        while (cur != sb.root_ino && guard++ < 128) {
+        // Corrupt parent pointers can form a cycle; without tracking the
+        // visited inodes the loop walks it until the guard and emits the same
+        // directory name over and over.
+        std::unordered_set<u32> seen;
+        while (cur != sb.root_ino && guard++ < 128 && seen.insert(cur).second) {
             auto it = inodes.find(cur);
             if (it == inodes.end() || it->second.name.empty()) break;
             parts.push_back(it->second.name);
