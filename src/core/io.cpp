@@ -337,12 +337,19 @@ std::unique_ptr<DiskReader> openTarget(const std::string& path, i64 offset, i64 
         if (err) *err = "device reports zero size: " + path;
         return nullptr;
     }
+    // A negative offset or size can only come from a typo or a bad API call;
+    // ignoring it would silently scan the wrong region of the device.
+    if (offset < 0 || length < 0) {
+        if (err) *err = "offset and size must not be negative (got offset " +
+                        std::to_string(offset) + ", size " + std::to_string(length) + ")";
+        return nullptr;
+    }
     if (offset > 0 || length > 0) {
         if (offset >= d->deviceSize()) {
             if (err) *err = "offset " + std::to_string(offset) + " is past the end of the device";
             return nullptr;
         }
-        d->setWindow((u64)std::max<i64>(0, offset), length);
+        d->setWindow((u64)offset, length);
     }
     return d;
 }
