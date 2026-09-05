@@ -99,16 +99,18 @@ i64 vJpeg(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
             // fake W x H sails past every mass-based bound.
             auto d = s.read(p + 4, len);
             if (d.size() >= (size_t)len && len >= 7) {
+                // SOF payload after the 2-byte Lf: P (1) | Y (2) | X (2) |
+                // Nf (1) | component i (1 id + 1 sampling + 1 quant table).
                 u8 prec = d[0];
-                u32 h = (u32)d[2] << 8 | d[3];
-                u32 w = (u32)d[4] << 8 | d[5];
-                u8 n = d[6];
+                u32 h = (u32)d[1] << 8 | d[2];
+                u32 w = (u32)d[3] << 8 | d[4];
+                u8 n = d[5];
                 bool sane = prec == 8 && n >= 1 && n <= 4 && (size_t)len == 8 + 3u * n &&
                             w > 0 && w <= 20000 && h > 0 && h <= 20000;
                 for (int i = 0; sane && i < n; i++) {
-                    u8 id = d[7 + 3 * i];
-                    u8 samp = d[8 + 3 * i];
-                    u8 qt = d[9 + 3 * i];
+                    u8 id = d[6 + 3 * i];
+                    u8 samp = d[7 + 3 * i];
+                    u8 qt = d[8 + 3 * i];
                     if (id > 4 || (samp >> 4) > 4 || (samp & 0x0F) > 4 || qt > 3) sane = false;
                 }
                 if (sane) {

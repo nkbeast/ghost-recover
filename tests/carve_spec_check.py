@@ -196,7 +196,8 @@ def make_orw(name):
 def make_jpeg(_):
     seg = b'\xFF\xE0' + u16be(16) + b'JFIF\x00' + junk(11)
     seg += b'\xFF\xE1' + u16be(100) + junk(100)
-    seg += b'\xFF\xC0' + u16be(11) + bytes([8, 0, 8, 0, 8, 1, 0x11, 0])
+    # SOF0: P=8, 8x8, 1 component (id 1, 1x1 sampling, quant table 0)
+    seg += b'\xFF\xC0' + u16be(11) + bytes([8, 0, 8, 0, 8, 1, 0x01, 0x11, 0x00])
     seg += b'\xFF\xDA' + u16be(8) + junk(8)
     return b'\xFF\xD8' + seg + b'\xFF\xD9'
 
@@ -205,7 +206,7 @@ def make_jpeg_eoi_tail(_):
     # Entropy data with an unescaped EOI followed by a well-formed entropy
     # continuation (every FF stuffed) and a final EOI: the later EOI is the
     # real end ("data after EOI"), the spurious one must be skipped.
-    seg = b'\xFF\xC0' + u16be(11) + bytes([8, 0, 8, 0, 8, 1, 0x11, 0])
+    seg = b'\xFF\xC0' + u16be(11) + bytes([8, 0, 8, 0, 8, 1, 0x01, 0x11, 0x00])
     seg += b'\xFF\xDA' + u16be(8) + junk(8)
     head = b'\xFF\xD8' + seg
     entropy = b'\x11\x22\x33' + b'\xFF\x00\x44\x55' + b'\xFF\xFF\x66\x77' + junk(64)
