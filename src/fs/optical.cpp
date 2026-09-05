@@ -46,6 +46,10 @@ i64 isoDateToUnix(const Bytes& b, size_t o) {
     tmv.tm_min  = b.u8at(o + 4);
     tmv.tm_sec  = b.u8at(o + 5);
     if (tmv.tm_mon < 0 || tmv.tm_mon > 11 || tmv.tm_mday < 1) return 0;
+    // A damaged or hostile record can carry hour/min/sec far out of range;
+    // timegm silently normalises those into a date days away from the real
+    // one, so reject them instead of showing fabricated timestamps.
+    if (tmv.tm_hour > 23 || tmv.tm_min > 59 || tmv.tm_sec > 59) return 0;
     time_t t = timegm(&tmv);
     if (t == (time_t)-1) return 0;
     i8 tz = (i8)b.u8at(o + 6);            // 15-minute offsets from GMT
