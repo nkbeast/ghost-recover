@@ -336,8 +336,10 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                                  const CarveSpec* sp = specs[(size_t)specId];
                                  i64 fileOff = hitOff - sp->magic_offset;
                                  if (fileOff < 0) return;
-                                 if (skipIndex.contains(fileOff)) return;
-                                 skippedHits.fetch_add(1, std::memory_order_relaxed);
+                                 if (skipIndex.contains(fileOff)) {
+                                     skippedHits.fetch_add(1, std::memory_order_relaxed);
+                                     return;
+                                 }
                                  if (sp->scan_filter) {
                                      i64 rel = hitOff - pos;
                                      if (rel >= 0 &&
