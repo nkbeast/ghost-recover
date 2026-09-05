@@ -534,6 +534,13 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     res.technique("header_parse");
     res.technique("file_header_walk");
 
+    // The header states where the filesystem ends. When that size is
+    // plausible it bounds the header walk, so a romfs signature found inside
+    // foreign data stops at the end of the real image instead of chasing
+    // entry chains through every byte that follows it.
+    i64 walkEnd = volume;
+    if (fullSize != 0 && (i64)fullSize <= volume) walkEnd = (i64)fullSize;
+
     u32 firstHeader = (u32)((16 + volName.size() + 1 + 15) & ~size_t(15));
 
     prog.setPhase("walking romfs entries");
@@ -547,7 +554,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         queue.pop_back();
         u32 off = cur.off;
         int guard = 0;
-        while (off && (i64)off + 16 <= volume && guard++ < 100000) {
+        while (off && (i64)off + 16 <= walkEnd && guard++ < 100000) {
             if (!visited.insert(off).second) break;
             auto e = disk.readBlock(off, 16);
             Bytes eb(e);
@@ -580,7 +587,7 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                         break;
                     case 2:                                  // regular file
                         f.kind = FileKind::Regular;
-                        if (size && (i64)dataOff < volume)
+                        if (size && (i64)dataOff < walkEnd)
                             f.extents.push_back(Extent((i64)dataOff, size));
                         break;
                     case 3:                                  // symlink
