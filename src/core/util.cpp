@@ -313,8 +313,16 @@ std::string guidToString(const u8* g) {
 std::string sanitizeFilename(const std::string& name) {
     std::string o;
     o.reserve(name.size());
-    for (unsigned char c : name) {
+    for (size_t i = 0; i < name.size(); i++) {
+        unsigned char c = (unsigned char)name[i];
         if (c < 0x20 || c == 0x7F) continue;
+        // Unicode bidi overrides let a name like "txt.exe" render its
+        // extension as if it were the start of the name — strip them.
+        if (c == 0xE2 && i + 2 < name.size() &&
+            (unsigned char)name[i+1] == 0x80) {
+            unsigned char c3 = (unsigned char)name[i+2];
+            if (c3 >= 0xAA && c3 <= 0xAE) { i += 2; continue; }
+        }
         switch (c) {
             case '/': case '\\': case ':': case '*': case '?':
             case '"': case '<':  case '>': case '|':
