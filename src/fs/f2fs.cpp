@@ -129,7 +129,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         std::vector<u8> inlineBytes;
     };
     std::unordered_map<u32, Node> inodes;   // ino -> newest node seen
-    std::unordered_map<u32, std::vector<u32>> directNodes;   // nid -> addresses
+    // nid -> (addresses, checkpoint version). Direct nodes are stored with
+    // their checkpoint version so a stale copy appearing later in the sweep
+    // cannot overwrite the fresher one.
+    std::unordered_map<u32, std::pair<std::vector<u32>, u64>> directNodes;
 
     const i64 chunkSize = 4LL * 1024 * 1024;
     std::vector<u8> chunk;
@@ -167,7 +170,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     addrs.push_back(a);
                     if (a) any = true;
                 }
-                if (any) directNodes[nid] = std::move(addrs);
+                auto dit = directNodes.find(nid);
+                if (dit == directNodes.end() || cpVer >= dit->second.second)
+                    directNodes[nid] = {std::move(addrs), cpVer};
                 continue;
             }
 
@@ -264,7 +269,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         f.name = n.name.empty() ? ("inode_" + std::to_string(ino)) : n.name;
         f.parent_id = n.pino;
         f.size = (i64)n.size;
-        f.alloc_size = (i64)std::min<u64>(n.blocks * (u64)sb.blocksize, (u64)INT64_MAX);
+        // n.blocks is an on-disk u64: the multiply must clamp before it
+        // wraps, or a hostile value folds into a small wrong alloc_size.
+        u64 maxBlocks = (u64)INT64_MAX / sb.blocksize;
+        f.alloc_size = (i64)std::min<u64>(std::min<u64>(n.blocks, maxBlocks) * sb.blocksize,
+                                          (u64)INT64_MAX);
         f.uid = n.uid; f.gid = n.gid; f.mode = n.mode & 0x0FFF;
         f.nlink = n.links;
         f.mtime = n.mtime; f.atime = n.atime; f.ctime = n.ctime;
@@ -285,13 +294,13 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 auto dit = directNodes.find(nid);
                 if (dit == directNodes.end()) continue;
                 if (i < 2) {
-                    addrsToExtents(dit->second, f.extents);   // direct node
+                    addrsToExtents(dit->second.first, f.extents);   // direct node
                 } else {
                     // Indirect: entries point at further direct nodes.
-                    for (u32 sub : dit->second) {
+                    for (u32 sub : dit->second.first) {
                         if (!sub) continue;
                         auto sit = directNodes.find(sub);
-                        if (sit != directNodes.end()) addrsToExtents(sit->second, f.extents);
+                        if (sit != directNodes.end()) addrsToExtents(sit->second.first, f.extents);
                         if (f.extents.size() > 200000) break;
                     }
                 }
