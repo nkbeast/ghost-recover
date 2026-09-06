@@ -25,6 +25,10 @@ i64 vPng(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (type.size() < 4) return -1;
         for (u8 c : type)
             if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return -1;
+        // IHDR is mandatory first in every real PNG. Requiring it here keeps
+        // the 8-byte signature inside foreign data from walking plausible
+        // junk chains and masking the real file behind it.
+        if (chunks == 0 && std::memcmp(type.data(), "IHDR", 4) != 0) return -1;
         chunks++;
         i64 next = p + 12 + (i64)len;
         if (std::memcmp(type.data(), "IEND", 4) == 0) return next - off;
