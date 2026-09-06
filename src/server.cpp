@@ -2328,6 +2328,10 @@ int startServer(const ServerConfig& cfg) {
         opt.write_manifest = body.getBool("write_manifest", true);
         opt.compute_hashes = body.getBool("compute_hashes", true);
         opt.overwrite      = body.getBool("overwrite", false);
+        // Optional per-extraction size cap; the default stays at the
+        // ExtractOptions default when the field is absent or out of range.
+        i64 maxFileSize = body.getInt("max_file_size", 0);
+        if (maxFileSize > 0) opt.max_file_size = maxFileSize;
 
         if (!outputPathAllowed(opt.output_dir)) {
             res.set_content(errorJson("output_dir must be inside " + outputRoot()),
