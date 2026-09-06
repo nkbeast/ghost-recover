@@ -170,9 +170,11 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                     addrs.push_back(a);
                     if (a) any = true;
                 }
-                auto dit = directNodes.find(nid);
-                if (dit == directNodes.end() || cpVer >= dit->second.second)
-                    directNodes[nid] = {std::move(addrs), cpVer};
+                if (any) {
+                    auto dit = directNodes.find(nid);
+                    if (dit == directNodes.end() || cpVer >= dit->second.second)
+                        directNodes[nid] = {std::move(addrs), cpVer};
+                }
                 continue;
             }
 
