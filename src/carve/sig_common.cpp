@@ -126,6 +126,25 @@ i64 vTar(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         for (u8 c : h) if (c) { allZero = false; break; }
         if (allZero) break;                       // end-of-archive terminator
         if (std::memcmp(h.data() + 257, "ustar", 5) != 0) break;
+        // Every real tar header carries a checksum over its 512 bytes with
+        // the checksum field itself read as spaces. Junk whose only claim to
+        // being a tar is the ustar magic breaks the chain here instead of
+        // walking fabricated sizes deeper into the volume.
+        {
+            unsigned sum = 0;
+            for (int i = 0; i < 512; i++)
+                sum += (i >= 148 && i < 156) ? (unsigned)' ' : (unsigned)h[i];
+            unsigned stored = 0;
+            bool anyOctal = false;
+            for (int i = 148; i < 156; i++) {
+                u8 c = h[i];
+                if (c == 0 || c == ' ') break;
+                if (c < '0' || c > '7') { anyOctal = false; break; }
+                stored = stored * 8 + (unsigned)(c - '0');
+                anyOctal = true;
+            }
+            if (!anyOctal || stored != sum) break;
+        }
         // size is an octal string at +124, 12 bytes
         u64 size = 0;
         for (int i = 124; i < 135; i++) {
