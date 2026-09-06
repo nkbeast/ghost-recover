@@ -194,6 +194,17 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
     res.bump("squashfs_version", fs.major);
     res.bump("compressor_id", fs.compression);
     res.technique("superblock_parse");
+    // A metadata compressor this build cannot decode means every directory
+    // read below will fail: say so plainly instead of returning an empty
+    // scan that looks like an empty filesystem.
+    if (!fs.supportsCompression()) {
+        static const char* kCompressors[] = {"?", "gzip", "lzma", "lzo", "xz", "lz4", "zstd"};
+        res.ok = false;
+        res.error = std::string("squashfs metadata uses ") +
+                    kCompressors[fs.compression < 7 ? fs.compression : 0] +
+                    " compression, which this build cannot decode (built without zlib support)";
+        return res;
+    }
 
     static const char* kCompressors[] = {"?", "gzip", "lzma", "lzo", "xz", "lz4", "zstd"};
     std::string comp = (fs.compression < 7) ? kCompressors[fs.compression] : "unknown";
