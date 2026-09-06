@@ -104,9 +104,16 @@ int cmdDisks(const Args&) {
     }
     printf("%-14s %-12s %-10s %-28s %s\n", "DEVICE", "SIZE", "TYPE", "MODEL", "STATUS");
     for (const auto& d : disks) {
+        // Truncate on a UTF-8 character boundary so a model string with
+        // multi-byte characters does not end the column in a split sequence.
+        std::string modelCol = d.display_name;
+        size_t cut = std::min<size_t>(28, modelCol.size());
+        while (cut > 0 && cut < modelCol.size() &&
+               ((unsigned char)modelCol[cut] & 0xC0) == 0x80)
+            cut--;
         printf("%-14s %-12s %-10s %-28s %s\n", d.device_path.c_str(),
                humanSize(d.size_bytes).c_str(), d.type.c_str(),
-               d.display_name.substr(0, 28).c_str(),
+               modelCol.substr(0, cut).c_str(),
                d.accessible ? "readable" : d.status_message.c_str());
     }
     return 0;
