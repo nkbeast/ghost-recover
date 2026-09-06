@@ -351,7 +351,15 @@ CarveResult carveDevice(DiskReader& disk, const CarveOptions& opt, Progress& pro
                              });
                 pos += (i64)buf.size();
                 scanned += (i64)buf.size();
-                if ((scanned.load() & ((16 << 20) - 1)) == 0) prog.set(scanned.load(), totalBytes);
+                // Report on crossing a 16 MiB boundary; a bitwise mask on the
+                // cumulative total misses updates whenever a single read
+                // strides over a multiple without landing exactly on it.
+                static thread_local i64 lastReported = -1;
+                i64 nowScanned = scanned.load();
+                if (nowScanned / (16 << 20) != lastReported) {
+                    lastReported = nowScanned / (16 << 20);
+                    prog.set(nowScanned, totalBytes);
+                }
                 // Flush a worker's local batch once it approaches the budget; the flush
                 // threshold must scale with the cap so a tiny cap (a small box
                 // or the GHOST_CARVE_CAP override) never lets one worker's
