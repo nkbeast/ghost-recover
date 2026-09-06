@@ -2207,18 +2207,25 @@ int startServer(const ServerConfig& cfg) {
             i64 fileLen = f.size > 0 ? f.size : 0;
             if (fileLen <= 0)
                 for (const auto& e : f.extents) fileLen += std::max<i64>(0, e.length);
-            i64 end = offset + length;
-            if (end < offset || (fileLen > 0 && offset >= fileLen)) {
+            if (fileLen > 0 && offset >= fileLen) {
                 res.status = 404;
                 res.set_content(errorJson("offset is beyond the end of the file"),
                                 "application/json");
                 return;
             }
-            if (fileLen > 0) end = std::min(end, fileLen);
-            auto all = readFileData(*disk, f, end);
-            total = f.size > 0 ? f.size : (i64)all.size();
-            if (offset < (i64)all.size())
-                data.assign(all.begin() + offset, all.begin() + std::min<size_t>(all.size(), (size_t)(offset + length)));
+            // Read only the requested window. The previous readFileData(end)
+            // call materialised every byte from the start of the file up to
+            // the window end, so paging the hex view deep into a large
+            // recovered file allocated gigabytes and OOM-killed the engine.
+            i64 want = length > 0 ? std::min<i64>(length, fileLen - offset) : 0;
+            if (want <= 0) {
+                res.status = 404;
+                res.set_content(errorJson("offset is beyond the end of the file"),
+                                "application/json");
+                return;
+            }
+            data = readFileWindow(*disk, f, offset, want);
+            total = fileLen;
             sourceLabel = f.path.empty() ? f.name : f.path;
         } else {
             std::string path = req.get_param_value("path");
