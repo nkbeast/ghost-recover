@@ -107,6 +107,15 @@ struct SqFs {
         return false;
     }
 
+    // Whether this build can decode the volume's metadata compressor at all.
+    bool supportsCompression() const {
+        return compression == 1
+#ifdef GHOST_HAVE_ZLIB
+               || true
+#endif
+            ;
+    }
+
     // Reads `len` bytes of the metadata stream starting at (blockStart, offset).
     bool readMeta(u64 tableStart, u64 blockOff, u16 inBlock, size_t len,
                   std::vector<u8>& out) const {
@@ -807,7 +816,10 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
         std::vector<std::string> parts;
         u32 cur = ino;
         int g = 0;
-        while (cur != 1 && g++ < 128) {
+        // Corrupt parent pointers can form a cycle; track visited inodes so
+        // the walk stops after the first lap instead of repeating names.
+        std::set<u32> seen;
+        while (cur != 1 && g++ < 128 && seen.insert(cur).second) {
             auto n = names.find(cur);
             if (n == names.end()) break;
             parts.push_back(n->second);
