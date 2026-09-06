@@ -108,7 +108,7 @@ struct ExFatFs {
         return out;
     }
 
-    std::vector<u64> contiguous(u64 first, i64 size) const {
+    std::vector<u64> contiguous(u64 first, i64 size, bool stopAtAllocated = false) const {
         std::vector<u64> out;
         if (first < 2 || size <= 0) return out;
         u64 need = ((u64)size + clusterSize() - 1) / clusterSize();
@@ -118,8 +118,14 @@ struct ExFatFs {
         // far fewer clusters (a 4 MiB cluster gives 2^41 bytes of reach).
         // Cap the scan; the tail of an absurdly claimed run is dropped.
         if (need > (1ull << 22)) need = (1ull << 22);
-        for (u64 i = 0; i < need && first + i < (u64)cluster_count + 2; i++)
+        for (u64 i = 0; i < need && first + i < (u64)cluster_count + 2; i++) {
+            // A deleted file's chain was released, so a cluster the allocation
+            // bitmap now marks in-use has been reused by a live file: stop
+            // there rather than shipping another file's bytes as this one's.
+            if (stopAtAllocated && out.size() > 0 && !clusterFree(first + i))
+                break;
             out.push_back(first + i);
+        }
         return out;
     }
 
@@ -361,7 +367,9 @@ ScanResult scan(DiskReader& disk, const ScanOptions& opt, Progress& prog) {
                 } else {
                     // The chain was released on delete; fall back to contiguous
                     // allocation, which exFAT overwhelmingly uses in practice.
-                    fcl = fs.contiguous(firstCluster, (i64)dataLength);
+                    // Clusters the bitmap marks in-use were reused by live
+                    // files and must not be presented as this file's data.
+                    fcl = fs.contiguous(firstCluster, (i64)dataLength, true);
                     f.method = "deleted_contiguous_heuristic";
                     f.confidence = 0.7;
                 }
