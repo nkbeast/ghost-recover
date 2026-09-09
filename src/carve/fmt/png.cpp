@@ -31,8 +31,8 @@ i64 vPng(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         if (chunks == 0 && std::memcmp(type.data(), "IHDR", 4) != 0) return -1;
         chunks++;
         i64 next = p + 12 + (i64)len;
-        if (std::memcmp(type.data(), "IEND", 4) == 0) return next - off;
         if (next <= p || next > off + max) return -1;
+        if (std::memcmp(type.data(), "IEND", 4) == 0) return next - off;
         p = next;
     }
     return -1;
