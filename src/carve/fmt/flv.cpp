@@ -34,6 +34,7 @@ i64 vFlv(ByteSource& s, i64 off, i64 max, const CarveSpec&) {
         tags++;
     }
     if (tags < 2) return -1;
+    if (p + 4 > off + max) return -1;
     return (p + 4) - off;
 }void registerFmt_flv(Registry& r) {
     auto add = [&](CarveSpec c) { r.push_back(std::move(c)); };
