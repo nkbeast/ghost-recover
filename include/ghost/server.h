@@ -26,7 +26,7 @@ int startServer(const ServerConfig& cfg);
 // Where the engine is allowed to read files from and write results to. Serving
 // and extraction are confined to these roots so the API cannot be used to read
 // arbitrary files off the host.
-const std::string& outputRoot();
+std::string outputRoot();
 void setOutputRoot(const std::string& p);
 bool pathAllowedForServing(const std::string& p);
 

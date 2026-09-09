@@ -530,7 +530,7 @@ std::string webRootPath(const std::string& configured) {
 // ---------------------------------------------------------------------------
 const char* engineVersion() { return kVersion; }
 
-const std::string& outputRoot() {
+std::string outputRoot() {
     std::lock_guard<std::mutex> lk(g_outputMutex);
     if (g_outputRoot.empty()) g_outputRoot = defaultOutputRoot();
     return g_outputRoot;
