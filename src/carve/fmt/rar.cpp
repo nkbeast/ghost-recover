@@ -43,6 +43,7 @@ static i64 rar5Vint(ByteSource& s, i64 at, i64 base, i64 hi, int& width) {
             if (type == 0x7B) break;                // end-of-archive
         }
         if (blocks < 1) return -1;
+        if (p <= off || p > off + max) return -1;
         return p - off;
     }
     // RAR 5.0: walk header blocks to the End-of-archive header (type 5).
