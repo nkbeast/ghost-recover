@@ -1855,9 +1855,14 @@ int startServer(const ServerConfig& cfg) {
     // Full detail for one file, including where its data physically lives.
     svr.Get("/api/fileinfo", [&](const httplib::Request& req, httplib::Response& res) {
         auto stored = ResultStore::instance().get(req.get_param_value("job"));
+        if (!stored) {
+            res.status = 404;
+            res.set_content(errorJson("no results for that job"), "application/json");
+            return;
+        }
         i64 index = paramInt(req, "index", -1);
         std::lock_guard<std::mutex> lk(stored->mu);   // live results grow under this
-        if (index >= (i64)stored->files.size()) {
+        if (index < 0 || index >= (i64)stored->files.size()) {
             res.status = 404;
             res.set_content(errorJson("no such file in that job"), "application/json");
             return;
