@@ -55,6 +55,12 @@ function keepPresence() {
   const t = sessionToken();
   const ws = new WebSocket('ws://' + location.host + API + '/presence' +
                            (t ? '?tok=' + encodeURIComponent(t) : ''));
+  // A successful connect ends the outage and restarts the budget: without
+  // this the cap counts the page's whole lifetime, so a few engine
+  // hand-overs, crashes or suspend/resume cycles would leave the tab
+  // permanently disconnected from presence — and closing it could no longer
+  // trigger the ~5 s engine shutdown.
+  ws.onopen = () => { __presenceTries = 0; };
   ws.onclose = () => {
     if (window.__ghostStopped || document.visibilityState !== 'visible') return;
     if (++__presenceTries > 15) return;
