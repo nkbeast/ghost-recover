@@ -1291,10 +1291,17 @@ async function startJob(kind, extra) {
 
 function pollJob(id) {
   clearInterval(S.jobPoll);
-  S.jobPoll = setInterval(async () => {
+  // Ticks overlap: one can outlive the 400 ms period (its own fetch plus the
+  // live-results refresh), and clearInterval cannot cancel a tick that is
+  // already awaiting. Key each tick to its interval id — once the job has
+  // reached a terminal state (S.jobPoll nulled) or a newer pollJob() took
+  // over, a stale tick must drop its result instead of firing
+  // onJobFinished a second time.
+  const pollId = setInterval(async () => {
     try {
       const r = await apiGet('/job?id=' + encodeURIComponent(id));
       if (!r.ok) throw new Error(r.error);
+      if (S.jobPoll !== pollId) return;
       S.job = r.job;
       if (['done', 'failed', 'cancelled'].includes(r.job.state)) {
         clearInterval(S.jobPoll);
@@ -1312,12 +1319,14 @@ function pollJob(id) {
         }
       }
     } catch (e) {
+      if (S.jobPoll !== pollId) return;
       clearInterval(S.jobPoll);
       S.jobPoll = null;
       log('lost track of the job: ' + e.message, 'err');
       render();
     }
   }, 400);
+  S.jobPoll = pollId;
 }
 
 async function onJobFinished(r) {
