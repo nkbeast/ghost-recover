@@ -113,7 +113,12 @@ async function apiGet(path) {
   if (t) h['X-Ghost-Token'] = t;
   const r = await fetch(API + path, { headers: h });
   const t2 = await r.text();
-  if (r.status === 403 && !sessionToken()) {
+  if (r.status === 403 && t2.includes('engine is locked')) {
+    // The pre-routing auth gate answers every /api call whose token is
+    // missing or invalid with this exact body — regardless of whether a
+    // (stale) token is stored. Distinguish it from route-level 403s so
+    // boot() shows the unlock screen instead of assigning the error JSON
+    // to S.health and rendering a bogus "engine ready" welcome.
     throw new Error('engine-locked');
   }
   if (r.status === 404) {
