@@ -1322,6 +1322,15 @@ function pollJob(id) {
       if (S.jobPoll !== pollId) return;
       clearInterval(S.jobPoll);
       S.jobPoll = null;
+      // Leaving S.job in its last running/queued state would keep every busy
+      // check true forever — start buttons disabled, topbar showing
+      // "working…" — until a reload. Mark the job failed so the UI unsticks;
+      // the job may still complete server-side, so existing results stay
+      // reachable.
+      if (S.job && !['done', 'failed', 'cancelled'].includes(S.job.state)) {
+        S.job.state = 'failed';
+        S.job.error = 'lost contact with the engine: ' + e.message;
+      }
       log('lost track of the job: ' + e.message, 'err');
       render();
     }
