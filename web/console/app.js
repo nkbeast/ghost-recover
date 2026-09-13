@@ -1452,7 +1452,9 @@ function shutdownEngine() {
     : '';
   if (!confirm('Shut down the GHOST RECOVER engine?' + job)) return;
   window.__ghostStopped = true;
-  fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
+  // A locked (elevated) engine rejects token-less /api calls with 403, so the
+  // request must ride through apiPost(), which attaches the session token.
+  apiPost('/shutdown').catch(() => {});
   setTimeout(() => {
     document.body.innerHTML = `<div class="center">
       <img class="logo" src="/logo.png" width="128" height="128" alt="GHOST RECOVER">
