@@ -1083,13 +1083,15 @@ int startServer(const ServerConfig& cfg) {
             req.path.rfind("/api", 0) == 0) {
             // API calls from fetch() carry the token as a header. Media tags
             // (<img>, <video>, <audio>), inline previews and downloads cannot
-            // set headers, so /api/content also accepts it as ?tok=… (the
-            // browser appends it in contentUrl()). /api/shutdown and
-            // /api/presence do too: closing the tab fires a header-less
-            // sendBeacon, and the WebSocket API cannot set headers at all.
+            // set headers, so /api/content and /api/preview also accept it as
+            // ?tok=… (the browser appends it in contentUrl() and previewUrl();
+            // the preview bytes are piped into <video>/<audio> the same way).
+            // /api/shutdown and /api/presence do too: closing the tab fires a
+            // header-less sendBeacon, and the WebSocket API cannot set headers
+            // at all.
             const std::string given =
-                (req.path == "/api/content" || req.path == "/api/shutdown" ||
-                 req.path == "/api/presence")
+                (req.path == "/api/content" || req.path == "/api/preview" ||
+                 req.path == "/api/shutdown" || req.path == "/api/presence")
                     ? req.get_param_value("tok")
                     : std::string();
             // The header wins when both are present; fall back to the query
