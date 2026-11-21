@@ -11204,16 +11204,24 @@ inline Server &Server::Options(const std::string &pattern, Handler handler) {
 
 inline Server &Server::WebSocket(const std::string &pattern,
                                  WebSocketHandler handler) {
-  websocket_handlers_.push_back(
-      {make_matcher(pattern), std::move(handler), nullptr});
+  // A named local entry keeps the unique_ptr's ownership explicit: the
+  // aggregate-initialised temporary in push_back made clang-analyzer believe
+  // make_matcher's result leaked (it is stored in the vector).
+  WebSocketHandlerEntry entry;
+  entry.matcher = make_matcher(pattern);
+  entry.handler = std::move(handler);
+  websocket_handlers_.push_back(std::move(entry));
   return *this;
 }
 
 inline Server &Server::WebSocket(const std::string &pattern,
                                  WebSocketHandler handler,
                                  SubProtocolSelector sub_protocol_selector) {
-  websocket_handlers_.push_back({make_matcher(pattern), std::move(handler),
-                                 std::move(sub_protocol_selector)});
+  WebSocketHandlerEntry entry;
+  entry.matcher = make_matcher(pattern);
+  entry.handler = std::move(handler);
+  entry.sub_protocol_selector = std::move(sub_protocol_selector);
+  websocket_handlers_.push_back(std::move(entry));
   return *this;
 }
 
