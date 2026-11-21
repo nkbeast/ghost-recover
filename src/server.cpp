@@ -2104,10 +2104,10 @@ int startServer(const ServerConfig& cfg) {
 
         static const std::string kFfmpegCandidates[] = {
             "/usr/bin/ffmpeg", "/bin/ffmpeg", "/usr/local/bin/ffmpeg"};
-        bool have = false;
+        std::string ffmpegPath;
         for (const auto& c : kFfmpegCandidates)
-            if (::access(c.c_str(), X_OK) == 0) have = true;
-        if (!have) {
+            if (::access(c.c_str(), X_OK) == 0) { ffmpegPath = c; break; }
+        if (ffmpegPath.empty()) {
             res.status = 501;
             res.set_content(errorJson("ffmpeg is not installed — this format "
                                       "cannot be previewed"), "application/json");
@@ -2141,12 +2141,17 @@ int startServer(const ServerConfig& cfg) {
             ::dup2(outPipe[1], 1);
             ::close(inPipe[0]); ::close(inPipe[1]);
             ::close(outPipe[0]); ::close(outPipe[1]);
-            ::execlp("ffmpeg", "ffmpeg", "-v", "error", "-nostdin",
-                     "-i", "pipe:0",
-                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                     "-c:a", "aac", "-b:a", "96k",
-                     "-movflags", "frag_keyframe+empty_moov",
-                     "-f", "mp4", "pipe:1", (char*)nullptr);
+            // Exec the exact binary the availability check found. execlp()
+            // searches PATH, which a service-managed engine may not share
+            // with the interactive session that decided ffmpeg exists —
+            // then the 501 check passes and every preview still dies with
+            // exec failure 127.
+            ::execl(ffmpegPath.c_str(), "ffmpeg", "-v", "error", "-nostdin",
+                    "-i", "pipe:0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                    "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "frag_keyframe+empty_moov",
+                    "-f", "mp4", "pipe:1", (char*)nullptr);
             _exit(127);
         }
         ::close(inPipe[0]);
