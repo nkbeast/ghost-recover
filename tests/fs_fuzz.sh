@@ -31,7 +31,8 @@ case "${1:-}" in
 esac
 
 IMGS=(squashfs cramfs jffs2 iso9660 udf minix hfs ext2 ext4 ext4-deleted \
-      fat32 fat32-deleted ntfs exfat ufs ufs2 xfs btrfs disk-mbr disk-gpt)
+      fat32 fat32-deleted ntfs exfat ufs ufs2 xfs btrfs disk-mbr disk-gpt \
+      f2fs jfs hfsplus hfsx romfs)
 export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 SAN="$(gcc -print-file-name=libasan.so)"
