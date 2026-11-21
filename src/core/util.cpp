@@ -317,11 +317,17 @@ std::string sanitizeFilename(const std::string& name) {
         unsigned char c = (unsigned char)name[i];
         if (c < 0x20 || c == 0x7F) continue;
         // Unicode bidi overrides let a name like "txt.exe" render its
-        // extension as if it were the start of the name — strip them.
-        if (c == 0xE2 && i + 2 < name.size() &&
-            (unsigned char)name[i+1] == 0x80) {
+        // extension as if it were the start of the name — strip them. That
+        // covers U+202A..U+202E (E2 80 AA..AE) and the newer isolates
+        // U+2066..U+2069 (E2 81 A6..A9), which re-embed text the same way.
+        if (c == 0xE2 && i + 2 < name.size()) {
+            unsigned char c2 = (unsigned char)name[i+1];
             unsigned char c3 = (unsigned char)name[i+2];
-            if (c3 >= 0xAA && c3 <= 0xAE) { i += 2; continue; }
+            if ((c2 == 0x80 && c3 >= 0xAA && c3 <= 0xAE) ||
+                (c2 == 0x81 && c3 >= 0xA6 && c3 <= 0xA9)) {
+                i += 2;
+                continue;
+            }
         }
         switch (c) {
             case '/': case '\\': case ':': case '*': case '?':
