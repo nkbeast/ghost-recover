@@ -320,7 +320,7 @@ int cmdImage(const Args& a) {
     ImageOptions opt;
     opt.output_path = out;
     opt.mapfile = a.get("--map", out + ".map");
-    opt.retry_passes = a.getInt("--retries", 2);
+    opt.retry_passes = std::clamp<i64>(a.getInt("--retries", 2), 0, 16);
     opt.start = a.getInt("--offset", 0);
     opt.length = a.getInt("--size", 0);
     Progress prog;
