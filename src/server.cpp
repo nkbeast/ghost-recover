@@ -988,7 +988,10 @@ bool pathAllowedForRawHex(const std::string& p) {
     if (real.rfind("/dev/", 0) != 0) return false;
     struct stat st{};
     if (::stat(real.c_str(), &st) != 0 || !S_ISBLK(st.st_mode)) return false;
-    std::string sys = "/sys/block/" + real.substr(5);
+    // /sys/class/block is the flat view: it holds whole disks AND partitions
+    // (nvme0n1p1 etc). The old /sys/block lookup missed every partition, so
+    // the raw hex view 403'd on exactly the volumes the UI selects.
+    const std::string sys = "/sys/class/block/" + real.substr(5);
     return fileExists(sys + "/size") || fileExists(sys + "/partition");
 }
 
