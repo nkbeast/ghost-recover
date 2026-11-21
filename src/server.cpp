@@ -2706,6 +2706,12 @@ int startServer(const ServerConfig& cfg) {
             return;
         }
         std::string body((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        // The console ships under fixed names (app.js, styles.css, index.html)
+        // with no hashed URLs, so a browser that heuristically caches them
+        // would keep an old UI against a new engine after an update until the
+        // cache expired. Revalidate every time: the files are a few kilobytes
+        // and localhost is not going anywhere.
+        res.set_header("Cache-Control", "no-cache");
         res.set_content(body, mime);
     };
 
