@@ -845,6 +845,17 @@ std::vector<Extent> exfatFree(DiskReader& disk, Progress& prog) {
     u32 clusterCount = b.le32(0x5C);
     u32 rootCluster = b.le32(0x60);
     u32 fatOff = b.le32(0x50);
+    // clusterCount comes straight from the boot sector; a hostile one claiming
+    // ~2^32 clusters wraps the (heap_offset + cluster * spc) * bps byte math
+    // into negative offsets below. Bound the count by what the device can
+    // actually hold after the cluster heap starts.
+    {
+        const u64 heapStartBytes = (u64)heapOff * bps;
+        const u64 avail = heapStartBytes < (u64)disk.size()
+                              ? (u64)disk.size() - heapStartBytes : 0;
+        const u64 maxClusters = avail / clusterSize;
+        if (clusterCount > maxClusters) clusterCount = (u32)maxClusters;
+    }
     u32 fatLen = b.le32(0x54);
     if (!clusterCount || rootCluster < 2) return free;
 
