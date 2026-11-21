@@ -1435,6 +1435,13 @@ async function loadResults(live) {
       S.page = Math.floor((r.matched - 1) / S.pageSize);
       return loadResults(live);
     }
+    // A filter that empties the list while parked on a later page left the UI
+    // on an out-of-range page: matched == 0 skipped the clamp above, so the
+    // view stayed past the last row and every render showed a blank table.
+    if (r.matched === 0 && S.page > 0) {
+      S.page = 0;
+      return loadResults(live);
+    }
     if (live) { updateResultsRegion(); return; }
   } catch (e) {
     if (e.status === 404) {
