@@ -379,10 +379,12 @@ bool makeDirs(const std::string& path) {
         else if (cur == "/") cur += comp;
         else cur += "/" + comp;
         if (::mkdir(cur.c_str(), 0755) != 0) {
-            if (errno != EEXIST) {
-                struct stat st{};
-                if (::stat(cur.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return false;
-            }
+            // EEXIST also fires when a regular file sits at the component, not
+            // just when the directory already exists — verify it really is a
+            // directory, or a later open(dir + "/file") would fail (or worse,
+            // the "directory" would silently be a file).
+            struct stat st{};
+            if (::stat(cur.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return false;
         } else {
             adoptOwnership(cur);
         }
