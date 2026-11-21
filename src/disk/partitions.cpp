@@ -114,9 +114,12 @@ i64 volumeSizeFromFs(DiskReader& disk, i64 start, const std::string& fs) {
     // value to i64 then reports a negative partition size downstream. Saturate
     // at INT64_MAX instead of trusting the multiply.
     auto satMul = [](u64 a, u64 b) -> i64 {
-        if (a != 0 && b > (u64)INT64_MAX / a) return INT64_MAX;
-        i64 v = (i64)(a * b);
-        return v > 0 ? v : INT64_MAX;
+        // 0 * anything is 0 (an unreadable/zeroed superblock must report
+        // "unknown size", not the saturating ceiling — that used to mint a
+        // phantom partition covering the whole device).
+        if (a == 0 || b == 0) return 0;
+        if (a > (u64)INT64_MAX / b) return INT64_MAX;
+        return (i64)(a * b);
     };
     u64 savedBase = disk.base();
     i64 savedSize = disk.size();
