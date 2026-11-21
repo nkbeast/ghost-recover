@@ -101,7 +101,14 @@ std::vector<u8> readFileData(DiskReader& disk, const RecoveredFile& f, i64 maxBy
         if (!coded && !isTailFragment)
             want = std::min(e.length, budget - (i64)out.size());
         if (e.sparse) {
-            out.insert(out.end(), (size_t)(decompSize > 0 ? decompSize : want), 0);
+            i64 zeros = decompSize > 0 ? decompSize : want;
+            // A crafted compressed+sparse file (NTFS allows the combination)
+            // carries a huge extent length; the coded path skips the budget
+            // clamp above, so the zero fill must be bounded here or the
+            // insert tries to allocate the claimed length outright.
+            if (budget > 0 && zeros > budget - (i64)out.size())
+                zeros = std::max<i64>(0, budget - (i64)out.size());
+            out.insert(out.end(), (size_t)zeros, 0);
             continue;
         }
         auto chunk = disk.readBlock((u64)e.offset, want);
