@@ -368,10 +368,16 @@ PartitionScanResult scanPartitions(DiskReader& disk, const PartitionOptions& opt
             u64 first = eb.le64(e + 32);
             u64 last  = eb.le64(e + 40);
             if (last < first) continue;
+            // first/last come straight from the table; a hostile entry can
+            // claim LBAs near 2^64 whose byte products wrap and cast back to
+            // negative i64s, which would slip past every bound below. Reject
+            // entries that do not fit inside the device's sector range.
+            if (first > (u64)res.total_sectors) continue;
             p.start_lba = (i64)first;
             p.size_lba  = (i64)(last - first + 1);
             p.start_byte = (i64)(first * (u64)ss);
             p.size_bytes = p.size_lba * ss;
+            if (p.start_byte < 0 || p.size_bytes < 0) continue;
             if (p.start_byte >= res.image_size) continue;
             if (p.start_byte + p.size_bytes > res.image_size) {
                 p.size_bytes = res.image_size - p.start_byte;
