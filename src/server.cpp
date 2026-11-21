@@ -188,6 +188,13 @@ struct StoredResult {
     mutable std::mutex mu;
     std::vector<RecoveredFile> files;   // unified view used by the UI
     i64 scan_file_count = 0;            // scan.files size before it was moved
+    // Extension histogram for /api/results. Recomputing it walked every file
+    // on every page request while holding mu — with a million-file result the
+    // UI's polls (and live refreshes during a carve) each serialized against
+    // the carve thread's pushFile for hundreds of milliseconds. Cached against
+    // the file count instead.
+    std::map<std::string, i64> byExtCache;
+    i64 byExtFiles = -1;
 };
 
 // Approximate in-memory footprint of a stored result. Strings dominate — names,
@@ -1875,11 +1882,17 @@ int startServer(const ServerConfig& cfg) {
         for (i64 i = offset; i < (i64)idx.size() && i < offset + limit; i++)
             writeFile(w, stored->files[idx[(size_t)i]], idx[(size_t)i]);
         w.endArray();
-        // Extension histogram so the UI can build its filter without a second pass.
-        std::map<std::string, i64> byExt;
-        for (const auto& f : stored->files) byExt[extensionOf(f.name)]++;
+        // Extension histogram so the UI can build its filter without a second
+        // pass. Cached in the result and rebuilt only when the file list has
+        // grown since the last computation (see StoredResult::byExtCache).
+        if (stored->byExtFiles != (i64)stored->files.size()) {
+            std::map<std::string, i64> byExt;
+            for (const auto& f : stored->files) byExt[extensionOf(f.name)]++;
+            stored->byExtCache = std::move(byExt);
+            stored->byExtFiles = (i64)stored->files.size();
+        }
         w.key("by_ext").beginObject();
-        for (const auto& [k, v] : byExt) w.kv(k.empty() ? "(none)" : k, v);
+        for (const auto& [k, v] : stored->byExtCache) w.kv(k.empty() ? "(none)" : k, v);
         w.endObject();
         w.endObject();
         res.set_content(w.str(), "application/json");
