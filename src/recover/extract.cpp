@@ -314,6 +314,11 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
                     } else {
                         want = std::min(kChunk, take - pos);
                     }
+                    // Extent offsets are raw on-disk values; a hostile one
+                    // near INT64_MAX overflows the + pos here (UB) before
+                    // readBlock could clamp. Fail the extent instead — same
+                    // guard readFileWindow applies to its spans.
+                    if (e.offset < 0 || pos > INT64_MAX - e.offset) { failed = true; break; }
                     auto chunk = disk.readBlock((u64)(e.offset + pos), want);
                     if (chunk.empty()) break;
                     const std::vector<u8>* payload = &chunk;
