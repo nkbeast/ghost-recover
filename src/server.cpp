@@ -688,6 +688,22 @@ std::string runtimeDir() {
     if (dir.empty()) dir = "/tmp";
     dir = joinPath(dir, "ghost-recover-" + std::to_string(::getuid()));
     if (!makeDirs(dir)) return {};
+    // The fallback location is a world-writable directory, so a second local
+    // user can pre-create (or symlink) the per-uid path before this process
+    // ever runs. Writing the session/handover tokens into such a directory
+    // would hand the root engine to that user. Refuse unless the directory is
+    // a real directory (no symlink) owned by this uid.
+    struct stat st{};
+    if (::lstat(dir.c_str(), &st) != 0 || S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "ghost-recover: refusing to use %s: not a real directory "
+                        "(pre-created or symlinked by another user?)\n", dir.c_str());
+        return {};
+    }
+    if (st.st_uid != ::getuid()) {
+        fprintf(stderr, "ghost-recover: refusing to use %s: owned by uid %lu, not %u\n",
+                dir.c_str(), (unsigned long)st.st_uid, (unsigned)::getuid());
+        return {};
+    }
     ::chmod(dir.c_str(), 0700);
     return dir;
 }
