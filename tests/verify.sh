@@ -58,7 +58,14 @@ fi
 
 FIX="${1:-}"
 if [ -z "$FIX" ]; then
-  FIX="$("$HERE/build-fixtures.sh" | tail -1)"
+  # Take only the builder's success path: a failed build must stop the suite
+  # loudly, not silently poison $FIX with the last error line (which turned
+  # every fixture-backed check into a skip while claiming success).
+  bld_out="$("$HERE/build-fixtures.sh")" || {
+    echo "fixture build failed — fix tests/build-fixtures.sh or pass an existing fixture dir" >&2
+    exit 1
+  }
+  FIX="$(printf '%s\n' "$bld_out" | tail -1)"
 fi
 IMG="$FIX/img"
 SRC="$FIX/corpus"
@@ -518,7 +525,9 @@ if command -v curl >/dev/null; then
   # When the file is missing (the fail-open non-root fallback), the API stays
   # open and the plain curls below keep working.
   TOKEN=""
-  for tf in "$XDG_RUNTIME_DIR/ghost-recover-$(id -u)/session-token" \
+  # XDG_RUNTIME_DIR is unset under sudo/CI; the engine falls back to /tmp, so
+  # the token lookup must tolerate that instead of tripping `set -u`.
+  for tf in "${XDG_RUNTIME_DIR:-/tmp}/ghost-recover-$(id -u)/session-token" \
             "/tmp/ghost-recover-$(id -u)/session-token"; do
     [ -f "$tf" ] && TOKEN=$(cat "$tf" 2>/dev/null) && break
   done
