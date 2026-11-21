@@ -44,6 +44,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -717,16 +718,27 @@ std::string runtimeDir() {
     return dir;
 }
 
-// A 64-hex random token from /dev/urandom. Returns empty when the system RNG
+// A 64-hex random token from the kernel RNG. Returns empty when the system RNG
 // cannot supply the bytes — the callers fail closed rather than fall back to
 // a guessable mix of time and pid.
+//
+// getrandom(2) rather than open/read on /dev/urandom: the token is minted
+// while the /api/elevate handler holds the elevation mutex, and a blocking
+// read() inside that critical section is exactly what a static analyzer (and
+// a cautious reviewer) objects to. getrandom serves the same bytes from the
+// same source without the file descriptor, and its only blocking condition
+// (pre-initialised pool) cannot happen in a running system.
 std::string randomToken() {
     u8 raw[32] = {0};
-    int fd = ::open("/dev/urandom", O_RDONLY);
-    if (fd < 0) return {};
-    ssize_t got = ::read(fd, raw, sizeof(raw));
-    ::close(fd);
-    if (got != (ssize_t)sizeof(raw)) return {};
+    size_t got = 0;
+    while (got < sizeof(raw)) {
+        ssize_t n = ::getrandom(raw + got, sizeof(raw) - got, 0);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            return {};
+        }
+        got += (size_t)n;
+    }
     return toHex(raw, sizeof(raw));
 }
 
