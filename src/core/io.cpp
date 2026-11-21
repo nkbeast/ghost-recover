@@ -158,7 +158,11 @@ void DiskReader::clearHealth() {
 }
 
 void DiskReader::noteBad(u64 abs_off, i64 len) {
-    bad_sectors_ += std::max<i64>(1, len / sector_size_);
+    // sector_size_ is only probed for block devices (BLKSSZGET); an image file
+    // read failing (EIO on a sparse-backed file, NFS hiccup) would divide by
+    // zero and kill the engine with SIGFPE. Fall back to 512.
+    const i64 ss = sector_size_ > 0 ? sector_size_ : 512;
+    bad_sectors_ += std::max<i64>(1, len / ss);
     if (!bad_regions_.empty()) {
         Extent& last = bad_regions_.back();
         if (last.offset + last.length == (i64)abs_off) { last.length += len; return; }
