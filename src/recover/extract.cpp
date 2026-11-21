@@ -245,6 +245,37 @@ ExtractResult extractFiles(DiskReader& disk, const std::vector<RecoveredFile>& f
             res.failures.push_back(rel + ": cannot create directory");
             continue;
         }
+        // The output directory is user-writable, and after an elevation the
+        // engine runs as root: a symlink planted inside it (media -> /etc)
+        // would make this privileged write follow it and create or overwrite
+        // files outside the output root. Walk every component below the
+        // output directory and refuse the file when any of them is a symlink.
+        {
+            std::string prefix = opt.output_dir;
+            while (prefix.size() > 1 && prefix.back() == '/') prefix.pop_back();
+            std::string rest = dest.size() > prefix.size() &&
+                               dest.compare(0, prefix.size(), prefix) == 0
+                             ? dest.substr(prefix.size())
+                             : dest;
+            std::string walk = prefix;
+            size_t i = 0;
+            bool bad = false;
+            while (i < rest.size()) {
+                size_t j = rest.find('/', i);
+                if (j == std::string::npos) j = rest.size();
+                std::string comp = rest.substr(i, j - i);
+                i = j + 1;
+                if (comp.empty()) continue;
+                walk += "/" + comp;
+                struct stat lst{};
+                if (::lstat(walk.c_str(), &lst) == 0 && S_ISLNK(lst.st_mode)) { bad = true; break; }
+            }
+            if (bad) {
+                res.files_failed++;
+                res.failures.push_back(rel + ": refuses to follow a symlink in the output path");
+                continue;
+            }
+        }
         if (!opt.overwrite && (fileExists(dest) || usedPaths.count(dest)))
             dest = uniquePath(dirName(dest), baseName(dest));
         usedPaths.insert(dest);
