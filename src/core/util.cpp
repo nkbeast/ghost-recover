@@ -440,7 +440,12 @@ std::string uniquePath(const std::string& dir, const std::string& name) {
         std::string c = joinPath(dir, stem + "_" + std::to_string(i) + ext);
         if (!fileExists(c)) return c;
     }
-    return cand;
+    // The counter ran out (a hundred thousand collisions means something is
+    // wrong with the directory): fall back to a time/pid suffix instead of
+    // returning the original candidate, which exists and would be overwritten.
+    char buf[64];
+    snprintf(buf, sizeof(buf), "_%lld_%d", (long long)(nowMs() % 1000000000), (int)::getpid());
+    return joinPath(dir, stem + buf + ext);
 }
 
 std::string realPathOf(const std::string& p) {
