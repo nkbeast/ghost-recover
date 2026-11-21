@@ -62,7 +62,9 @@ bool        g_allowWrites = false;
 // Set while a privileged copy of this process is being handed the port.
 std::string       g_handoverToken;
 std::string       g_handoverFile;
-httplib::Server*  g_server = nullptr;
+// Atomic because the idle-watchdog thread polls it while the serving thread
+// clears it on shutdown — a plain pointer read/write race is UB.
+std::atomic<httplib::Server*> g_server{nullptr};
 std::atomic<bool> g_handedOver{false};
 
 // Last time any HTTP request arrived. The UI heartbeats /api/health every
@@ -113,7 +115,7 @@ std::atomic<bool> g_sudoCachedResult{false};
 // on-disk state worth flushing: results live in memory by design and are
 // released by exiting.
 void requestEngineShutdown() {
-    if (g_server) g_server->stop();
+    if (httplib::Server* s = g_server.load()) s->stop();
     std::thread([]() {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         ::_exit(0);
@@ -1347,7 +1349,7 @@ int startServer(const ServerConfig& cfg) {
         // Let the response flush before the listener closes.
         std::thread([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            if (g_server) g_server->stop();
+            if (httplib::Server* s = g_server.load()) s->stop();
         }).detach();
     });
 
@@ -2772,7 +2774,7 @@ int startServer(const ServerConfig& cfg) {
         while (true) {
             for (int i = 0; i < 5; i++) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                if (g_server == nullptr) return;   // engine went down
+                if (g_server.load() == nullptr) return;   // engine went down
             }
             if (g_presenceEver.load() && g_presenceCount.load() == 0 &&
                 nowMs() - g_presenceZeroSinceMs.load() >= 4000) {
