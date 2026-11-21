@@ -788,6 +788,12 @@ std::vector<Extent> ntfsFree(DiskReader& disk, Progress& prog) {
                 if (offLen) {
                     lcn += r.sle(q, offLen);
                     q += offLen;
+                    // Run lengths are raw on-disk fields; a corrupt 8-byte
+                    // length would make clusters * clusterSize overflow i64
+                    // (UB) before readBlock ever sees it. Clamp first —
+                    // readBlock caps the transfer anyway.
+                    const i64 kMaxRunClusters = (i64)(64LL * 1024 * 1024 / (clusterSize ? clusterSize : 1)) + 1;
+                    if (clusters > kMaxRunClusters) clusters = kMaxRunClusters;
                     auto part = disk.readBlock((u64)(lcn * clusterSize),
                                                clusters * (i64)clusterSize);
                     bitmap.insert(bitmap.end(), part.begin(), part.end());
