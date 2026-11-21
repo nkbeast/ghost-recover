@@ -12516,8 +12516,12 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
     // Find matching WebSocket handler
     for (const auto &entry : websocket_handlers_) {
       if (entry.matcher->match(req)) {
-        // Compute accept key
+        // Compute accept key. RFC 6455 Section 4.2.1 requires the request to
+        // carry a Sec-WebSocket-Key; accepting an empty one would let a
+        // non-conforming client complete the handshake with a deterministic
+        // accept value.
         auto client_key = req.get_header_value("Sec-WebSocket-Key");
+        if (client_key.empty()) { return false; }
         auto accept_key = detail::websocket_accept_key(client_key);
 
         // Negotiate subprotocol
