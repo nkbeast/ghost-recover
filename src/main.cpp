@@ -484,8 +484,8 @@ int main(int argc, char* argv[]) {
                 static const char* kValueOpts[] = {"--port", "--listen", "--output", "--web",
                                                   "--offset", "--size", "--fs", "--out",
                                                   "--limit", "--action", "--map", "--retries",
-                                                  "--categories", "--takeover", "--level", "--chunk",
-                                                  "--layout", nullptr};
+                                                  "--max-files", "--categories", "--takeover",
+                                                  "--level", "--chunk", "--layout", nullptr};
                 bool isValue = false;
                 for (int k = 0; kValueOpts[k]; k++) if (prev == kValueOpts[k]) isValue = true;
                 if (isValue) continue;
