@@ -866,8 +866,21 @@ bool spawnElevated(const std::string& method, const std::string& password,
         // sudo-password method is refused when the server is reachable
         // remotely (no TLS on the HTTP listener).
         // codeql[cpp/cleartext-transmission]
-        ssize_t written = ::write(pw[0], line.data(), line.size());
-        (void)written;
+        // A pty master's buffer can be temporarily full (EAGAIN) or the write
+        // can be interrupted (EINTR); a single unchecked write() could send a
+        // truncated password and fail the elevation with a confusing
+        // "password was not accepted". Push the whole line, retrying the
+        // recoverable conditions.
+        size_t sent = 0;
+        while (sent < line.size()) {
+            ssize_t written = ::write(pw[0], line.data() + sent, line.size() - sent);
+            if (written > 0) { sent += (size_t)written; continue; }
+            if (written < 0 && (errno == EAGAIN || errno == EINTR)) {
+                ::usleep(20000);
+                continue;
+            }
+            break;   // hard error: sudo died or the pty closed; report as-is
+        }
         // Wait for sudo to read the whole line (unread bytes are still queued
         // on the slave), then close so a retry after a wrong password reads
         // EOF and fails cleanly instead of hanging on the next prompt.
