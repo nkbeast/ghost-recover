@@ -1974,6 +1974,13 @@ int startServer(const ServerConfig& cfg) {
         res.set_header("Content-Disposition",
                        std::string(inlineOk ? "inline" : "attachment") +
                        "; filename=\"" + sanitizeFilename(f.name) + "\"");
+        // Recovered bytes are hostile by definition. SVG and media stay
+        // renderable inline for the UI, but a navigated document must not be
+        // able to run scripts in the engine's origin (the session token rides
+        // in the URL fragment). The CSP of a subresource response does not
+        // affect the embedding page, so <img>/<video>/<iframe> previews keep
+        // working; only top-level navigation is hardened.
+        res.set_header("Content-Security-Policy", "default-src 'none'");
         const bool plain = f.resident.empty() && f.codec.empty() && f.fragment_offset < 0;
         if (plain && fileLen > 0) {
             // Plain files (the vast majority — videos, audio, images, PDFs,
@@ -2152,6 +2159,9 @@ int startServer(const ServerConfig& cfg) {
         });
 
         res.set_header("Cache-Control", "no-store");
+        // The transcode output is ffmpeg-generated MP4, but add the same
+        // origin hardening as /api/content for consistency.
+        res.set_header("Content-Security-Policy", "default-src 'none'");
         res.set_chunked_content_provider(
             "video/mp4",
             [st](size_t, httplib::DataSink& sink) -> bool {
@@ -2332,6 +2342,9 @@ int startServer(const ServerConfig& cfg) {
         res.set_header("Content-Disposition",
                        std::string(inlineOk ? "inline" : "attachment") +
                        "; filename=\"" + sanitizeFilename(baseName(path)) + "\"");
+        // Same hardening as /api/content: carved files under the output root
+        // may be navigated by URL, and must not execute in the engine origin.
+        res.set_header("Content-Security-Policy", "default-src 'none'");
         res.set_content(data, mime.c_str());
     });
 
