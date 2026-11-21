@@ -311,6 +311,11 @@ def main():
         if not hits:
             print(f'ERROR: {name}: no extents found')
             return 1
+        # The same leaf can be discovered twice through overlapping chunk
+        # mappings, and discovery order follows the scan, not the file. Dedupe
+        # and order the items by their KEY offset, which is where the file
+        # offset of each extent actually lives.
+        hits = sorted(set(hits))
         want = corpus_bytes(f'media/{name}')
         offset = 0
         for (pos, idx) in hits:
@@ -325,10 +330,15 @@ def main():
                 return 1
             disk_bytenr = le64(blk, dp + REG_DISK_BYTENR)
             disk_num = le64(blk, dp + REG_DISK_NUM_BYTES)
-            ext_off = le64(blk, dp + 37)
+            # The file offset of this piece is the item's KEY offset. The
+            # extent item's own `offset` field (dp+37) is the offset *within
+            # the extent* — 0 for every non-shared extent — so comparing it
+            # against the running file offset only works by accident for
+            # single-extent files and breaks multi-extent ones.
+            file_off = le64(blk, q + 9)
             num_bytes = le64(blk, dp + REG_NUM_BYTES)
-            if ext_off != offset:
-                print(f'ERROR: {name}: unexpected extent offset {ext_off} (want {offset})')
+            if file_off != offset:
+                print(f'ERROR: {name}: unexpected extent offset {file_off} (want {offset})')
                 return 1
             ph = to_physical(disk_bytenr)
             if ph is None or ph + disk_num > volume:
