@@ -127,7 +127,12 @@ bool probeMdSuperblock(const std::string& path, RaidMember& member, RaidLayout& 
         u32 devNumber = b.le32(160);
         // dev_roles[] starts at byte 256; the entry for this device gives its
         // position in the array (0xFFFE = spare, 0xFFFF = faulty).
-        auto roles = d.readBlock((u64)off + 256, (i64)(layout.members + 8) * 2);
+        // members is a raw superblock field: do the arithmetic in i64 before
+        // any scaling, or a crafted count near INT_MAX overflows the int
+        // addition/multiply (UB) before readBlock can clamp the request.
+        i64 roleBytes = (i64)layout.members * 2 + 16;
+        if (roleBytes < 2 || roleBytes > 64LL * 1024 * 1024) roleBytes = 64;
+        auto roles = d.readBlock((u64)off + 256, roleBytes);
         Bytes rb(roles);
         u16 role = rb.le16((size_t)devNumber * 2);
         member.role = (role < 0xFFFE) ? (int)role : -1;
