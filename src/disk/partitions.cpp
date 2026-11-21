@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <map>
 
 namespace ghost {
@@ -456,6 +457,13 @@ PartitionScanResult scanPartitions(DiskReader& disk, const PartitionOptions& opt
         const i64 kStride = 1 << 20;
         prog.set(0, limit);
         int found = 0;
+        // Lower bound of the sweep: the smallest offset any realStart reset
+        // has already taken us to. Resetting off backwards without this guard
+        // can oscillate forever (a small recovered volume whose later backup
+        // superblocks keep mapping to the same start, each reset followed by
+        // a stride that lands back on the next backup of the same volume),
+        // hanging the whole /api/partitions endpoint.
+        i64 lowestProbed = std::numeric_limits<i64>::max();
         for (i64 off = 0; off < limit && found < 64 && !prog.cancelled(); off += kStride) {
             if ((off & ((256 << 20) - 1)) == 0) prog.set(off, limit);
             if (covered(off)) continue;
@@ -486,7 +494,15 @@ PartitionScanResult scanPartitions(DiskReader& disk, const PartitionOptions& opt
                     if (realStart < 0) continue;
                 }
             }
-            off = realStart;
+            // Follow the backup superblock back to the volume start — but only
+            // when that start is below anything we have already swept to, so
+            // repeated backups of one volume cannot drag the walk backwards
+            // into an endless loop. Re-probing an already-swept offset would
+            // be skipped by the dedup checks anyway.
+            if (realStart < lowestProbed) {
+                lowestProbed = realStart;
+                off = realStart;
+            }
             if (covered(off)) continue;
 
             // Do not report the same volume twice when several of its backup
