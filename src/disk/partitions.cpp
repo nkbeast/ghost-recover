@@ -657,6 +657,12 @@ std::vector<Extent> extFree(DiskReader& disk, Progress& prog) {
     u16 descSize = (incompat & 0x80) ? std::max<u16>(64, s.le16(0xFE)) : 32;
     if (incompat & 0x80) blocksCount |= ((u64)s.le32(0x150)) << 32;
     if (!blocksPerGroup || !blocksCount) return free;
+    // Blocks past the end of the device are fiction (and would wrap the
+    // byte-offset multiply below into negative extents). Bound the count by
+    // what the device can actually hold.
+    const u64 maxBlocks = (u64)(disk.size() / (i64)bs) + 1;
+    if (blocksCount > maxBlocks) blocksCount = maxBlocks;
+    if (firstData >= blocksCount) return free;
 
     // A crafted superblock may claim blocksPerGroup=1 for a huge volume,
     // blowing the group count (and the descriptor read below — up to ~0.25 TiB
